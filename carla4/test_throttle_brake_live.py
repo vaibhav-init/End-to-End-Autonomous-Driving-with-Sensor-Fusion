@@ -1,112 +1,128 @@
 #!/usr/bin/env python3
 """
-Live Test: Throttle/Brake MLP with BasicAgent Steering
-========================================================
+Live test for the target-speed sequence model.
 
-Tests the trained throttle/brake model in CARLA:
-  - BasicAgent handles steering (pathfinding + lane following)
-  - MLP model controls throttle & brake based on front radar
-  - Spawns obstacle scenarios to test if the car stops properly
-
-The script spawns challenging situations (stopped vehicles, sudden brakers,
-pedestrians) and logs whether the model brakes in time to avoid collision.
-
-Usage:
-    python test_throttle_brake_live.py
-    python test_throttle_brake_live.py --duration 180 --vehicles 60
-
-Press Ctrl+C to stop.
+The neural network predicts desired speed from recent radar + vision history.
+A classic PID controller converts that desired speed into throttle and brake.
 """
 
-import os, sys, math, time, random, argparse, traceback, threading
-import numpy as np
+import argparse
+from collections import deque
+import json
+import math
+import os
+import pickle
+import random
+import sys
+import threading
+import time
+
 import carla
+import numpy as np
 import torch
 import torch.nn as nn
-import pickle
+
 from yolo_perception import (
-    CameraManager, YOLOPerception,
-    TL_STATE_NAMES, YOLO_AVAILABLE,
+    CameraManager,
+    TL_STATE_NAMES,
+    YOLO_AVAILABLE,
+    YOLOPerception,
+    empty_visual_features,
 )
 
-# Add CARLA agents to path
-CARLA_ROOT = os.environ.get('CARLA_ROOT', '/opt/carla-simulator')
-AGENTS_PATH = os.path.join(CARLA_ROOT, 'PythonAPI', 'carla')
+
+CARLA_ROOT = os.environ.get("CARLA_ROOT", "/opt/carla-simulator")
+AGENTS_PATH = os.path.join(CARLA_ROOT, "PythonAPI", "carla")
 if AGENTS_PATH not in sys.path:
     sys.path.insert(0, AGENTS_PATH)
 
 try:
-    from agents.navigation.basic_agent import BasicAgent
-    AGENT_AVAILABLE = True
+    from agents.navigation.controller import PIDLateralController
 except ImportError:
-    AGENT_AVAILABLE = False
-    print("⚠️  BasicAgent not found. Will use manual steering.")
-    print(f"   Tried: {AGENTS_PATH}")
+    print("ERROR: CARLA agents not found. Please ensure CARLA PythonAPI is in your PYTHONPATH.")
+    print(f"       Tried: {AGENTS_PATH}")
+    sys.exit(1)
 
 
-# ============================================================================
-# Config
-# ============================================================================
-CARLA_HOST = '127.0.0.1'
+CARLA_HOST = "127.0.0.1"
 CARLA_PORT = 2000
-TOWN = 'Town01'
+DEFAULT_TOWN = "Town01"
 FPS = 20
 MAX_RADAR_RANGE = 50.0
 
-MODEL_PATH = 'model_throttle_brake/throttle_brake_mlp.pt'
-SCALER_PATH = 'model_throttle_brake/scaler.pkl'
+MODEL_PATH = "model_throttle_brake/target_speed_mlp.pt"
+SCALER_PATH = "model_throttle_brake/scaler.pkl"
+MODEL_CONFIG_PATH = "model_throttle_brake/model_config.json"
 
-FEATURE_COLS = [
-    'ego_speed', 'target_speed', 'ego_acceleration', 'distance',
-    'relative_velocity', 'ttc', 'obstacle_speed',
-    'approaching_intersection', 'traffic_light_state',
+DEFAULT_BASE_FEATURE_COLS = [
+    "ego_speed",
+    "target_speed_limit",
+    "speed_error",
+    "ego_acceleration",
+    "distance",
+    "relative_velocity",
+    "ttc",
+    "obstacle_speed",
+    "traffic_light_state",
+    "tl_confidence",
+    "tl_bbox_area",
+    "tl_center_x",
 ]
 
 
-# ============================================================================
-# MLP Model (must match training — dual output)
-# ============================================================================
-class ThrottleBrakeMLP(nn.Module):
-    def __init__(self, input_dim=9):
+def feature_sort_key(name):
+    base, lag = name.rsplit("_t-", 1)
+    return int(lag), base
+
+
+def flatten_history(history, base_cols):
+    row = {}
+    frames = list(history)
+    for lag, feature_dict in enumerate(reversed(frames)):
+        for name in base_cols:
+            row[f"{name}_t-{lag}"] = feature_dict[name]
+    return row
+
+
+class TargetSpeedMLP(nn.Module):
+    def __init__(self, input_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 64),
+            nn.Linear(input_dim, 256),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, 32),
+            nn.Dropout(0.20),
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(32, 2),
-            nn.Sigmoid(),  # [throttle, brake] each in [0, 1]
+            nn.Dropout(0.10),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
         )
 
     def forward(self, x):
-        return self.net(x)  # shape: (batch, 2)
+        return self.net(x).squeeze(-1)
 
 
-# ============================================================================
-# Front Radar Sensor
-# ============================================================================
 class FrontRadar:
     def __init__(self, vehicle, world, range_m=50.0):
         self.latest = {
-            'distance': range_m,
-            'relative_velocity': 0.0,
-            'obstacle_speed': 0.0,
+            "distance": range_m,
+            "relative_velocity": 0.0,
+            "obstacle_speed": 0.0,
         }
         self._ego_speed = 0.0
         self._range = range_m
 
-        bp = world.get_blueprint_library().find('sensor.other.radar')
-        bp.set_attribute('horizontal_fov', '10')  # Much narrower to avoid adjacent lanes
-        bp.set_attribute('vertical_fov', '2')  # Narrow beam to avoid ground returns
-        bp.set_attribute('range', str(range_m))
-        bp.set_attribute('points_per_second', '1500')
-        tf = carla.Transform(
+        bp = world.get_blueprint_library().find("sensor.other.radar")
+        bp.set_attribute("horizontal_fov", "10")
+        bp.set_attribute("vertical_fov", "2")
+        bp.set_attribute("range", str(range_m))
+        bp.set_attribute("points_per_second", "1500")
+        transform = carla.Transform(
             carla.Location(x=2.5, z=1.0),
-            carla.Rotation(pitch=2.0)  # Tilt up slightly
+            carla.Rotation(pitch=2.0),
         )
-        self.sensor = world.spawn_actor(bp, tf, attach_to=vehicle)
+        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
         self.sensor.listen(self._on_radar)
 
     def _on_radar(self, data):
@@ -118,12 +134,13 @@ class FrontRadar:
             if det.depth < nearest_dist:
                 nearest_dist = det.depth
                 nearest_vel = det.velocity
+
         rel_vel = -nearest_vel
-        obs_speed = max(0, self._ego_speed - rel_vel)
+        obs_speed = max(0.0, self._ego_speed - rel_vel)
         self.latest = {
-            'distance': nearest_dist,
-            'relative_velocity': rel_vel,
-            'obstacle_speed': obs_speed,
+            "distance": nearest_dist,
+            "relative_velocity": rel_vel,
+            "obstacle_speed": obs_speed,
         }
 
     def update_ego_speed(self, speed):
@@ -137,9 +154,6 @@ class FrontRadar:
             self.sensor.destroy()
 
 
-# ============================================================================
-# Collision Recorder
-# ============================================================================
 class CollisionRecorder:
     COOLDOWN = 3.0
     MIN_IMPULSE = 200.0
@@ -147,7 +161,7 @@ class CollisionRecorder:
     def __init__(self, vehicle, world):
         self.collisions = []
         self._last = {}
-        bp = world.get_blueprint_library().find('sensor.other.collision')
+        bp = world.get_blueprint_library().find("sensor.other.collision")
         self.sensor = world.spawn_actor(bp, carla.Transform(), attach_to=vehicle)
         self.sensor.listen(self._on_collision)
 
@@ -155,251 +169,334 @@ class CollisionRecorder:
         now = time.time()
         actor_type = event.other_actor.type_id
         impulse = event.normal_impulse.length()
-        if not (actor_type.startswith('vehicle.') or actor_type.startswith('walker.')):
+        if not (actor_type.startswith("vehicle.") or actor_type.startswith("walker.")):
             return
         if impulse < self.MIN_IMPULSE:
             return
-        aid = event.other_actor.id
-        if aid in self._last and now - self._last[aid] < self.COOLDOWN:
+        actor_id = event.other_actor.id
+        if actor_id in self._last and now - self._last[actor_id] < self.COOLDOWN:
             return
-        self._last[aid] = now
-        self.collisions.append({
-            'time': now, 'actor': actor_type, 'impulse': impulse
-        })
-        print(f"\n  💥 COLLISION! Hit {actor_type} ({impulse:.0f} N·s)")
+        self._last[actor_id] = now
+        self.collisions.append({"time": now, "actor": actor_type, "impulse": impulse})
+        print(f"\n  COLLISION with {actor_type} ({impulse:.0f} N*s)")
 
     def cleanup(self):
         if self.sensor and self.sensor.is_alive:
             self.sensor.destroy()
 
 
-# ============================================================================
-# Waypoint-based steering fallback (if BasicAgent not available)
-# ============================================================================
-def compute_waypoint_steer(ego, carla_map):
-    """Manual fallback if BasicAgent fails."""
-    vel = ego.get_velocity()
-    speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
-    lookahead = max(3.0, min(12.0, speed * 1.5))
-    wp = carla_map.get_waypoint(ego.get_location(), project_to_road=True)
-    if not wp:
-        return 0.0
+class PIDSpeedController:
+    """Convert desired speed into throttle/brake."""
 
-    target_wp = wp
-    remaining = lookahead
-    while remaining > 0:
-        step = min(2.0, remaining)
-        nexts = target_wp.next(step)
-        if not nexts:
-            break
-        target_wp = nexts[0]
-        remaining -= step
+    def __init__(self, dt, kp=0.75, ki=0.08, kd=0.12):
+        self.dt = dt
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.integral = 0.0
+        self.prev_error = 0.0
 
-    ego_tf = ego.get_transform()
-    target_yaw = math.radians(target_wp.transform.rotation.yaw)
-    ego_yaw = math.radians(ego_tf.rotation.yaw)
-    err = target_yaw - ego_yaw
-    err = (err + math.pi) % (2 * math.pi) - math.pi
-    steer = err / math.radians(60)
-    return max(-0.7, min(0.7, steer))
+    def run_step(self, target_speed, current_speed):
+        error = target_speed - current_speed
+        self.integral += error * self.dt
+        self.integral = max(-5.0, min(5.0, self.integral))
+        derivative = (error - self.prev_error) / max(self.dt, 1e-6)
+        self.prev_error = error
+
+        accel_cmd = self.kp * error + self.ki * self.integral + self.kd * derivative
+        accel_cmd = max(-1.0, min(1.0, accel_cmd))
+
+        if accel_cmd >= 0.0:
+            throttle = accel_cmd
+            brake = 0.0
+        else:
+            throttle = 0.0
+            brake = -accel_cmd
+
+        if target_speed < 0.3 and current_speed < 0.8:
+            throttle = 0.0
+            brake = max(brake, 0.35)
+
+        return throttle, brake
 
 
-# ============================================================================
-# Spawn test obstacles
-# ============================================================================
-def spawn_stopped_vehicle(world, ego, carla_map, ahead_m=35):
-    """Spawn a stopped vehicle ahead of ego on the same lane."""
-    wp = carla_map.get_waypoint(ego.get_location(), project_to_road=True)
-    if not wp:
+def cleanup_actor(actor):
+    if actor and actor.is_alive:
+        try:
+            actor.destroy()
+        except RuntimeError:
+            pass
+
+
+def waypoint_ahead(carla_map, location, distance_m):
+    waypoint = carla_map.get_waypoint(location, project_to_road=True)
+    if waypoint is None:
         return None
-    for _ in range(int(ahead_m / 3)):
-        nwps = wp.next(3.0)
-        if not nwps:
+    travelled = 0.0
+    step = 3.0
+    while travelled < distance_m:
+        next_wps = waypoint.next(step)
+        if not next_wps:
             return None
-        wp = nwps[0]
+        waypoint = next_wps[0]
+        travelled += step
+    return waypoint
+
+
+def spawn_stopped_vehicle(world, ego, carla_map, ahead_m=35.0):
+    waypoint = waypoint_ahead(carla_map, ego.get_location(), ahead_m)
+    if waypoint is None:
+        return None
 
     bp_lib = world.get_blueprint_library()
-    vbp = random.choice([bp for bp in bp_lib.filter('vehicle.*')
-                         if int(bp.get_attribute('number_of_wheels')) >= 4])
-    tf = wp.transform
-    tf.location.z += 0.5
-    v = world.try_spawn_actor(vbp, tf)
-    if v:
-        v.apply_control(carla.VehicleControl(brake=1.0))
-        v.set_target_velocity(carla.Vector3D(0, 0, 0))
-        print(f"  🚧 Stopped vehicle spawned {ahead_m}m ahead")
-    return v
+    vehicle_bps = [
+        bp
+        for bp in bp_lib.filter("vehicle.*")
+        if int(bp.get_attribute("number_of_wheels")) >= 4
+    ]
+    bp = random.choice(vehicle_bps)
+    transform = waypoint.transform
+    transform.location.z += 0.5
+    vehicle = world.try_spawn_actor(bp, transform)
+    if vehicle:
+        vehicle.apply_control(carla.VehicleControl(brake=1.0))
+        vehicle.set_target_velocity(carla.Vector3D(0.0, 0.0, 0.0))
+        print(f"  Spawned stopped vehicle at {ahead_m:.0f}m")
+    return vehicle
 
 
-def spawn_sudden_braker(world, ego, carla_map, ahead_m=25):
-    """Spawn a vehicle ahead that drives then brakes suddenly."""
-    wp = carla_map.get_waypoint(ego.get_location(), project_to_road=True)
-    if not wp:
+def spawn_sudden_braker(world, ego, carla_map, ahead_m=28.0):
+    waypoint = waypoint_ahead(carla_map, ego.get_location(), ahead_m)
+    if waypoint is None:
         return None
-    for _ in range(int(ahead_m / 3)):
-        nwps = wp.next(3.0)
-        if not nwps:
-            return None
-        wp = nwps[0]
 
     bp_lib = world.get_blueprint_library()
-    vbp = random.choice([bp for bp in bp_lib.filter('vehicle.*')
-                         if int(bp.get_attribute('number_of_wheels')) >= 4])
-    tf = wp.transform
-    tf.location.z += 0.5
-    v = world.try_spawn_actor(vbp, tf)
-    if v:
-        fwd = tf.get_forward_vector()
-        v.enable_constant_velocity(carla.Vector3D(fwd.x * 8.0, fwd.y * 8.0, 0))
-        print(f"  🚗💨 Moving vehicle spawned {ahead_m}m ahead (will brake in ~4s)")
-    return v
+    vehicle_bps = [
+        bp
+        for bp in bp_lib.filter("vehicle.*")
+        if int(bp.get_attribute("number_of_wheels")) >= 4
+    ]
+    bp = random.choice(vehicle_bps)
+    transform = waypoint.transform
+    transform.location.z += 0.5
+    vehicle = world.try_spawn_actor(bp, transform)
+    if vehicle:
+        fwd = transform.get_forward_vector()
+        vehicle.enable_constant_velocity(carla.Vector3D(fwd.x * 8.0, fwd.y * 8.0, 0.0))
+        print(f"  Spawned sudden braker at {ahead_m:.0f}m")
+    return vehicle
 
 
-def spawn_pedestrian_crossing(world, ego, carla_map, ahead_m=20):
-    """Spawn a pedestrian crossing the road ahead."""
-    wp = carla_map.get_waypoint(ego.get_location(), project_to_road=True)
-    if not wp:
+def spawn_pedestrian_crossing(world, ego, carla_map, ahead_m=20.0):
+    waypoint = waypoint_ahead(carla_map, ego.get_location(), ahead_m)
+    if waypoint is None:
         return None, None
-    for _ in range(int(ahead_m / 3)):
-        nwps = wp.next(3.0)
-        if not nwps:
-            return None, None
-        wp = nwps[0]
 
     bp_lib = world.get_blueprint_library()
-    wbp = random.choice(bp_lib.filter('walker.pedestrian.*'))
-    if wbp.has_attribute('is_invincible'):
-        wbp.set_attribute('is_invincible', 'false')
+    walker_bp = random.choice(bp_lib.filter("walker.pedestrian.*"))
+    if walker_bp.has_attribute("is_invincible"):
+        walker_bp.set_attribute("is_invincible", "false")
 
-    tf = wp.transform
-    right = tf.get_right_vector()
-    tf.location.x -= right.x * 4
-    tf.location.y -= right.y * 4
-    tf.location.z += 0.5
+    transform = waypoint.transform
+    right = transform.get_right_vector()
+    transform.location.x -= right.x * 4.0
+    transform.location.y -= right.y * 4.0
+    transform.location.z += 0.5
 
-    walker = world.try_spawn_actor(wbp, tf)
-    ctrl = None
+    walker = world.try_spawn_actor(walker_bp, transform)
+    controller = None
     if walker:
-        ctrl_bp = bp_lib.find('controller.ai.walker')
-        ctrl = world.spawn_actor(ctrl_bp, carla.Transform(), attach_to=walker)
+        ctrl_bp = bp_lib.find("controller.ai.walker")
+        controller = world.spawn_actor(ctrl_bp, carla.Transform(), attach_to=walker)
         world.tick()
-        # Walk across the road
-        dest = wp.transform.location + carla.Location(
-            x=right.x * 8, y=right.y * 8)
-        ctrl.start()
-        ctrl.go_to_location(dest)
-        ctrl.set_max_speed(1.8)
-        print(f"  🚶 Pedestrian crossing road {ahead_m}m ahead")
-    return walker, ctrl
+        dest = waypoint.transform.location + carla.Location(x=right.x * 8.0, y=right.y * 8.0)
+        controller.start()
+        controller.go_to_location(dest)
+        controller.set_max_speed(1.8)
+        print(f"  Spawned pedestrian crossing at {ahead_m:.0f}m")
+    return walker, controller
 
 
-# ============================================================================
-# Spawn background traffic
-# ============================================================================
 def spawn_background_traffic(world, client, tm, count):
     bp_lib = world.get_blueprint_library()
-    vehicle_bps = [bp for bp in bp_lib.filter('vehicle.*')
-                   if int(bp.get_attribute('number_of_wheels')) >= 4]
+    vehicle_bps = [
+        bp
+        for bp in bp_lib.filter("vehicle.*")
+        if int(bp.get_attribute("number_of_wheels")) >= 4
+    ]
     spawn_points = world.get_map().get_spawn_points()
     random.shuffle(spawn_points)
 
     port = tm.get_port()
     batch = []
-    for i in range(min(count, len(spawn_points) - 1)):
+    for index in range(min(count, len(spawn_points) - 1)):
         bp = random.choice(vehicle_bps)
-        if bp.has_attribute('color'):
-            bp.set_attribute('color', random.choice(bp.get_attribute('color').recommended_values))
+        if bp.has_attribute("color"):
+            bp.set_attribute(
+                "color", random.choice(bp.get_attribute("color").recommended_values)
+            )
         batch.append(
-            carla.command.SpawnActor(bp, spawn_points[i + 1])
-            .then(carla.command.SetAutopilot(carla.command.FutureActor, True, port)))
+            carla.command.SpawnActor(bp, spawn_points[index + 1]).then(
+                carla.command.SetAutopilot(carla.command.FutureActor, True, port)
+            )
+        )
 
     ids = [r.actor_id for r in client.apply_batch_sync(batch, True) if not r.error]
-    for vid in ids:
-        v = world.get_actor(vid)
-        if v:
-            tm.vehicle_percentage_speed_difference(v, random.randint(-10, 40))
-    print(f"  🚗 {len(ids)} background vehicles")
+    for vehicle_id in ids:
+        actor = world.get_actor(vehicle_id)
+        if actor:
+            tm.vehicle_percentage_speed_difference(actor, random.randint(-10, 20))
+            tm.ignore_lights_percentage(actor, 0)
+            tm.ignore_signs_percentage(actor, 0)
+    print(f"  Spawned {len(ids)} background vehicles")
     return ids
 
 
 def spawn_background_pedestrians(world, count):
     bp_lib = world.get_blueprint_library()
-    walker_bps = bp_lib.filter('walker.pedestrian.*')
-    ctrl_bp = bp_lib.find('controller.ai.walker')
+    walker_bps = bp_lib.filter("walker.pedestrian.*")
+    ctrl_bp = bp_lib.find("controller.ai.walker")
 
-    walkers, controllers = [], []
+    walkers = []
     for _ in range(count):
         bp = random.choice(walker_bps)
-        if bp.has_attribute('is_invincible'):
-            bp.set_attribute('is_invincible', 'false')
+        if bp.has_attribute("is_invincible"):
+            bp.set_attribute("is_invincible", "false")
         loc = world.get_random_location_from_navigation()
         if loc:
-            w = world.try_spawn_actor(bp, carla.Transform(loc))
-            if w:
-                walkers.append(w)
-    for w in walkers:
-        c = world.spawn_actor(ctrl_bp, carla.Transform(), attach_to=w)
-        controllers.append(c)
+            walker = world.try_spawn_actor(bp, carla.Transform(loc))
+            if walker:
+                walkers.append(walker)
+
+    controllers = []
+    for walker in walkers:
+        controller = world.spawn_actor(ctrl_bp, carla.Transform(), attach_to=walker)
+        controllers.append(controller)
+
     world.tick()
-    for c in controllers:
+    for controller in controllers:
         dest = world.get_random_location_from_navigation()
         if dest:
-            c.start()
-            c.go_to_location(dest)
-            c.set_max_speed(1.0 + random.random() * 2.0)
+            controller.start()
+            controller.go_to_location(dest)
+            controller.set_max_speed(1.0 + random.random() * 2.0)
 
-    print(f"  🚶 {len(walkers)} background pedestrians")
+    print(f"  Spawned {len(walkers)} background pedestrians")
     return [w.id for w in walkers], [c.id for c in controllers]
 
 
-# ============================================================================
-# Main
-# ============================================================================
+def init_scenario_state():
+    return {
+        "name": None,
+        "vehicle": None,
+        "walker": None,
+        "controller": None,
+        "spawn_time": 0.0,
+        "brake_after": None,
+        "done": False,
+    }
+
+
+def destroy_scenario_state(state):
+    if state["controller"]:
+        try:
+            state["controller"].stop()
+        except RuntimeError:
+            pass
+    cleanup_actor(state["controller"])
+    cleanup_actor(state["walker"])
+    if state["vehicle"]:
+        try:
+            state["vehicle"].disable_constant_velocity()
+        except RuntimeError:
+            pass
+    cleanup_actor(state["vehicle"])
+
+
+def maybe_spawn_scenario(world, ego, carla_map, state):
+    choice = random.choice(["stopped_vehicle", "sudden_braker", "pedestrian"])
+    state["name"] = choice
+    state["spawn_time"] = time.time()
+    state["brake_after"] = None
+    state["done"] = False
+
+    if choice == "stopped_vehicle":
+        state["vehicle"] = spawn_stopped_vehicle(world, ego, carla_map)
+    elif choice == "sudden_braker":
+        state["vehicle"] = spawn_sudden_braker(world, ego, carla_map)
+        state["brake_after"] = state["spawn_time"] + 3.5
+    else:
+        state["walker"], state["controller"] = spawn_pedestrian_crossing(world, ego, carla_map)
+
+    if state["vehicle"] or state["walker"]:
+        return True
+
+    state["name"] = None
+    return False
+
+
+def update_scenario_state(state):
+    if state["name"] == "sudden_braker" and state["vehicle"] and state["brake_after"]:
+        if time.time() >= state["brake_after"] and not state["done"]:
+            try:
+                state["vehicle"].disable_constant_velocity()
+            except RuntimeError:
+                pass
+            try:
+                state["vehicle"].apply_control(carla.VehicleControl(brake=1.0))
+            except RuntimeError:
+                pass
+            state["done"] = True
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Test throttle/brake MLP with BasicAgent steering')
-    parser.add_argument('--host', default=CARLA_HOST)
-    parser.add_argument('--port', type=int, default=CARLA_PORT)
-    parser.add_argument('--model', default=MODEL_PATH)
-    parser.add_argument('--scaler', default=SCALER_PATH)
-    parser.add_argument('--duration', type=int, default=180, help='Test duration in seconds')
-    parser.add_argument('--vehicles', type=int, default=20, help='Background NPC vehicles')
-    parser.add_argument('--pedestrians', type=int, default=10, help='Background pedestrians')
+    parser = argparse.ArgumentParser(description="Live test target-speed sequence model")
+    parser.add_argument("--host", default=CARLA_HOST)
+    parser.add_argument("--port", type=int, default=CARLA_PORT)
+    parser.add_argument("--town", default=DEFAULT_TOWN)
+    parser.add_argument("--model", default=MODEL_PATH)
+    parser.add_argument("--scaler", default=SCALER_PATH)
+    parser.add_argument("--config", default=MODEL_CONFIG_PATH)
+    parser.add_argument("--duration", type=int, default=180)
+    parser.add_argument("--vehicles", type=int, default=20)
+    parser.add_argument("--pedestrians", type=int, default=10)
     args = parser.parse_args()
 
     total_frames = args.duration * FPS
 
-    # ---- Load model ----
-    print("=" * 70)
-    print("THROTTLE/BRAKE LIVE TEST")
-    print("=" * 70)
-    print(f"  Model:     {args.model}")
-    print(f"  Scaler:    {args.scaler}")
-    print(f"  Duration:  {args.duration}s")
-    print(f"  Vehicles:  {args.vehicles}")
-    print(f"  Peds:      {args.pedestrians}")
-    print()
+    with open(args.config, "r", encoding="utf-8") as fh:
+        model_config = json.load(fh)
+    with open(args.scaler, "rb") as fh:
+        scaler = pickle.load(fh)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    feature_cols = model_config["feature_cols"]
+    history_frames = int(model_config.get("history_frames") or 10)
+    base_feature_cols = model_config.get("base_feature_cols") or DEFAULT_BASE_FEATURE_COLS
+    speed_cap = float(model_config.get("speed_cap") or 20.0)
 
-    model = ThrottleBrakeMLP(input_dim=len(FEATURE_COLS)).to(device)
-    state = torch.load(args.model, map_location=device, weights_only=True)
-    model.load_state_dict(state)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = TargetSpeedMLP(input_dim=len(feature_cols)).to(device)
+    model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
     model.eval()
-    print(f"  ✅ Model loaded on {device}")
 
-    with open(args.scaler, 'rb') as f:
-        scaler = pickle.load(f)
-    print(f"  ✅ Scaler loaded")
+    print("=" * 76)
+    print("TARGET-SPEED LIVE TEST")
+    print("=" * 76)
+    print(f"  Model:          {args.model}")
+    print(f"  Scaler:         {args.scaler}")
+    print(f"  Config:         {args.config}")
+    print(f"  Town:           {args.town}")
+    print(f"  Duration:       {args.duration}s")
+    print(f"  History frames: {history_frames}")
+    print(f"  Feature count:  {len(feature_cols)}")
+    print("=" * 76)
 
-    # ---- Connect to CARLA ----
     client = carla.Client(args.host, args.port)
     client.set_timeout(30.0)
-
     world = client.get_world()
-    cur_map = world.get_map().name.split('/')[-1]
-    if cur_map != TOWN:
-        print(f"\n  🗺️  Loading {TOWN}...")
-        world = client.load_world(TOWN)
+    if world.get_map().name.split("/")[-1] != args.town:
+        print(f"  Loading {args.town} ...")
+        world = client.load_world(args.town)
         time.sleep(3)
 
     original_settings = world.get_settings()
@@ -414,97 +511,58 @@ def main():
 
     carla_map = world.get_map()
     spawn_points = carla_map.get_spawn_points()
-
-    # ---- Filter spawn points ----
     safe_spawns = []
     for sp in spawn_points:
-        wp = carla_map.get_waypoint(sp.location, project_to_road=True)
-        if wp and not wp.is_junction:
+        waypoint = carla_map.get_waypoint(sp.location, project_to_road=True)
+        if waypoint and not waypoint.is_junction:
             safe_spawns.append(sp)
     if not safe_spawns:
         safe_spawns = spawn_points
     random.shuffle(safe_spawns)
-    print(f"  🛣️  {len(safe_spawns)} safe spawn points (of {len(spawn_points)} total)")
 
-    # ---- Spawn ego ----
-    ego_bp = world.get_blueprint_library().find('vehicle.tesla.model3')
+    ego_bp = world.get_blueprint_library().find("vehicle.tesla.model3")
     ego = None
     for sp in safe_spawns:
         ego = world.try_spawn_actor(ego_bp, sp)
         if ego:
             break
-    if not ego:
-        print("  ❌ Failed to spawn ego!")
-        return
+    if ego is None:
+        raise RuntimeError("Failed to spawn ego vehicle")
 
-    # Tick the world once so the ego vehicle's location is updated from (0,0,0) to its actual spawn point
-    # This is critical for BasicAgent to generate a correct route!
     world.tick()
+    print(
+        f"  Ego spawned at ({ego.get_location().x:.1f}, {ego.get_location().y:.1f})"
+    )
 
-    print(f"\n  🚗 Ego spawned: {ego.type_id}")
-    print(f"     Location: ({ego.get_location().x:.0f}, {ego.get_location().y:.0f})")
+    lat_controller = PIDLateralController(
+        ego, K_P=1.95, K_D=0.2, K_I=0.05, dt=1.0 / FPS
+    )
+    speed_controller = PIDSpeedController(dt=1.0 / FPS)
 
-
-    # ---- Setup steering controller (BasicAgent for routing) ----
-    agent = None
-    if AGENT_AVAILABLE:
-        agent = BasicAgent(ego, target_speed=30)
-        agent.ignore_traffic_lights(active=False)
-        agent.ignore_stop_signs(active=False)
-        # Give it a random destination far away
-        destination = random.choice(spawn_points).location
-        agent.set_destination(destination)
-        print(f"  🧭 BasicAgent routing initialized")
-    else:
-        print(f"  🧭 Using manual waypoint steering fallback")
-
-    # ---- Sensors ----
     radar = FrontRadar(ego, world, MAX_RADAR_RANGE)
     collision = CollisionRecorder(ego, world)
-
-    # ---- Camera + YOLO ----
     camera = CameraManager(ego, world)
-    yolo = None
-    if YOLO_AVAILABLE:
-        yolo = YOLOPerception()
-        print(f"  📷 RGB camera + YOLOv8 traffic light detector attached")
-    else:
-        print(f"  📷 RGB camera attached (YOLO unavailable — traffic light state will be 0)")
-    print(f"  📡 Front radar + collision sensor attached")
+    yolo = YOLOPerception() if YOLO_AVAILABLE else None
+    if yolo is None:
+        print("  YOLO unavailable; traffic-light features will be zeroed")
 
-    # ---- Background traffic ----
     npc_ids = spawn_background_traffic(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_background_pedestrians(world, args.pedestrians)
 
-    # Let settle
     for _ in range(40):
         world.tick()
 
-    # ---- Test loop ----
-    print(f"\n{'=' * 70}")
-    print(f"  🏁 LIVE TEST STARTED — {args.duration}s")
-    print(f"  BasicAgent steering + MLP throttle/brake")
-    print(f"  Press Ctrl+C to stop")
-    print(f"{'=' * 70}")
-    print()
-    print(f"  {'Frame':>7} │ {'Speed':>8} │ {'Dist':>6} │ {'TTC':>6} │ "
-          f"{'Action':>7} │ {'Throttle':>8} │ {'Brake':>6} │ Status")
-    print(f"  {'─'*7}─┼─{'─'*8}─┼─{'─'*6}─┼─{'─'*6}─┼─"
-          f"{'─'*7}─┼─{'─'*8}─┼─{'─'*6}─┼─{'─'*20}")
-
+    feature_history = deque(maxlen=history_frames)
     prev_speed = 0.0
-
-    # Stats
+    smoothed_target_speed = 0.0
+    min_distance_seen = MAX_RADAR_RANGE
+    max_target_seen = 0.0
     total_brake_frames = 0
     total_throttle_frames = 0
-    near_miss_count = 0  # got close (<5m) but didn't collide
-    min_distance_seen = MAX_RADAR_RANGE
+    near_miss_count = 0
 
-    # ---- Manual obstacle spawning: press Enter ----
-    demo_obstacle = None
-    demo_count = 0
-    demo_stopped_frames = 0
-
+    scenario_state = init_scenario_state()
+    next_auto_scenario_time = time.time() + 25.0
     spawn_requested = threading.Event()
 
     def key_listener():
@@ -517,257 +575,182 @@ def main():
 
     listener_thread = threading.Thread(target=key_listener, daemon=True)
     listener_thread.start()
-    print(f"  ⌨️  Press ENTER to spawn an obstacle ahead!")
+    print("  Press ENTER to spawn a random test scenario ahead of the ego vehicle")
 
     try:
         for frame in range(total_frames):
             world.tick()
 
-            # ---- Ego state ----
-            try:
-                v = ego.get_velocity()
-                speed = math.sqrt(v.x**2 + v.y**2 + v.z**2)
-                # CRITICAL FIX: Match training script's signed acceleration exactly
-                accel = (speed - prev_speed) * FPS if frame > 0 else 0.0
-                prev_speed = speed
-            except:
-                print("  ⚠️  Ego lost!")
-                break
+            velocity = ego.get_velocity()
+            speed = math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
+            accel = (speed - prev_speed) * FPS if frame > 0 else 0.0
+            prev_speed = speed
 
-            # ---- Radar ----
             radar.update_ego_speed(speed)
-            r = radar.get()
-
-            if r['relative_velocity'] > 0.1:
-                ttc = min(r['distance'] / r['relative_velocity'], 10.0)
+            radar_state = radar.get()
+            if radar_state["relative_velocity"] > 0.1:
+                ttc = min(radar_state["distance"] / radar_state["relative_velocity"], 10.0)
             else:
                 ttc = 10.0
+            min_distance_seen = min(min_distance_seen, radar_state["distance"])
 
-            min_distance_seen = min(min_distance_seen, r['distance'])
+            cam_frame = camera.get_frame()
+            visual = empty_visual_features()
+            if yolo is not None and cam_frame is not None:
+                visual = yolo.extract_light_features(cam_frame)
 
-            # ---- YOLO traffic light + intersection detection ----
-            tl_state = 0
-            approaching_jct = 0
-            if yolo is not None:
-                cam_frame = camera.get_frame()
-                if cam_frame is not None:
-                    tl_state, tl_conf, tl_bbox = yolo.detect_traffic_light(cam_frame)
-                    approaching_jct = yolo.detect_intersection()  # uses cached YOLO results
+            speed_limit_target = max(5.0, ego.get_speed_limit() * 1.10 / 3.6)
+            speed_error = speed_limit_target - speed
+            current_features = {
+                "ego_speed": round(speed, 4),
+                "target_speed_limit": round(speed_limit_target, 4),
+                "speed_error": round(speed_error, 4),
+                "ego_acceleration": round(max(-20.0, min(20.0, accel)), 4),
+                "distance": round(radar_state["distance"], 4),
+                "relative_velocity": round(radar_state["relative_velocity"], 4),
+                "ttc": round(ttc, 4),
+                "obstacle_speed": round(radar_state["obstacle_speed"], 4),
+                "traffic_light_state": float(visual["traffic_light_state"]),
+                "tl_confidence": round(visual["tl_confidence"], 4),
+                "tl_bbox_area": round(visual["tl_bbox_area"], 6),
+                "tl_center_x": round(visual["tl_center_x"], 4),
+            }
+            feature_history.append(current_features)
 
-            # ---- MLP prediction ----
-            # Get target speed: speed_limit * 1.10 (matches collector)
-            try:
-                target_speed = (ego.get_speed_limit() * 1.10) / 3.6  # km/h → m/s
-            except:
-                target_speed = 10.0
-
-            features = np.array([[
-                speed,
-                target_speed,
-                max(-20, min(20, accel)),
-                r['distance'],
-                r['relative_velocity'],
-                ttc,
-                r['obstacle_speed'],
-                approaching_jct,
-                tl_state,
-            ]], dtype=np.float32)
-
-            scaled = scaler.transform(features)
-            with torch.no_grad():
-                tensor = torch.tensor(scaled, device=device)
-                output = model(tensor)  # shape: (1, 2) → [throttle, brake]
-                throttle = output[0, 0].item()
-                brake = output[0, 1].item()
-
-            # Clamp to [0, 1]
-            throttle = max(0.0, min(1.0, throttle))
-            brake = max(0.0, min(1.0, brake))
-
-            # Apply both pedals directly — CARLA physics resolves the conflict.
-            # The old "winner-takes-all" filter was killing subtle brake signals
-            # (e.g. brake=0.35 was zeroed because throttle=0.38).
-
-            # ---- Bad Data Override ----
-            # Because the model was trained on TM data, it learned to hold the brake
-            # indefinitely when stopped and there is ANY obstacle within 40m.
-            # We override this to "creep" forward if the obstacle is > 12m away.
-            override = ""
-            if speed < 0.5 and r['distance'] > 12.0 and brake > 0.1:
-                throttle = 0.35
-                brake = 0.0
-                override = "  [CREEP OVERRIDE]"
-
-            # ---- Get steering (BasicAgent) ----
-            if agent:
-                if agent.done():
-                    agent.set_destination(random.choice(safe_spawns).location)
-                agent_control = agent.run_step()
-                steer = agent_control.steer
+            if len(feature_history) == history_frames:
+                row = flatten_history(feature_history, base_feature_cols)
+                feature_vec = np.array([[row[name] for name in feature_cols]], dtype=np.float32)
+                scaled = scaler.transform(feature_vec)
+                with torch.no_grad():
+                    pred = model(torch.tensor(scaled, device=device))
+                    target_speed_pred = float(pred.item())
+                target_speed_pred = max(0.0, min(speed_cap * 1.2, target_speed_pred))
             else:
-                steer = compute_waypoint_steer(ego, carla_map)
+                target_speed_pred = speed_limit_target
 
-            action = throttle - brake  # for display only
+            smoothed_target_speed = 0.7 * smoothed_target_speed + 0.3 * target_speed_pred
+            smoothed_target_speed = min(smoothed_target_speed, speed_limit_target + 2.0)
+            max_target_seen = max(max_target_seen, smoothed_target_speed)
 
-            # Neural network is 100% in control of the pedals.
-            override = ""
-
-            # ---- Apply hybrid control ----
-            ego.apply_control(carla.VehicleControl(
-                throttle=throttle,
-                steer=steer,
-                brake=brake,
-            ))
-
-            # ---- Stats ----
+            throttle, brake = speed_controller.run_step(smoothed_target_speed, speed)
             if brake > 0.05:
                 total_brake_frames += 1
             if throttle > 0.05:
                 total_throttle_frames += 1
-            if r['distance'] < 5.0 and speed > 0.5:
+            if radar_state["distance"] < 5.0 and speed > 0.5:
                 near_miss_count += 1
 
-            # ---- Manual obstacle: spawn on Enter / auto-remove ----
-            if (spawn_requested.is_set()
-                    and demo_obstacle is None
-                    and speed > 5.0):
+            steer = 0.0
+            waypoint = carla_map.get_waypoint(ego.get_location(), project_to_road=True)
+            if waypoint:
+                lookahead = max(5.0, min(15.0, speed * 1.5))
+                next_wps = waypoint.next(lookahead)
+                if next_wps:
+                    steer = lat_controller.run_step(next_wps[0])
+            steer = max(-0.7, min(0.7, steer))
+
+            ego.apply_control(
+                carla.VehicleControl(
+                    throttle=throttle,
+                    steer=steer,
+                    brake=brake,
+                )
+            )
+
+            if (
+                scenario_state["name"] is None
+                and speed > 5.0
+                and (spawn_requested.is_set() or time.time() >= next_auto_scenario_time)
+            ):
                 spawn_requested.clear()
-                try:
-                    wp = carla_map.get_waypoint(ego.get_location(), project_to_road=True)
-                    spawn_dist = random.uniform(60.0, 80.0)
-                    fwd_wps = wp.next(spawn_dist)
-                    if fwd_wps:
-                        obs_bp = random.choice([
-                            bp for bp in world.get_blueprint_library().filter('vehicle.*')
-                            if int(bp.get_attribute('number_of_wheels')) == 4
-                        ])
-                        obs_tf = fwd_wps[0].transform
-                        obs_tf.location.z += 0.5
-                        demo_obstacle = world.try_spawn_actor(obs_bp, obs_tf)
-                        if demo_obstacle:
-                            demo_obstacle.apply_control(carla.VehicleControl(brake=1.0))
-                            demo_count += 1
-                            demo_stopped_frames = 0
-                            print(f"\n  🚧 OBSTACLE #{demo_count}: Spawned {spawn_dist:.0f}m ahead! "
-                                  f"(ego at {speed*3.6:.0f} km/h) — Model should BRAKE.\n")
-                except:
-                    pass
+                if maybe_spawn_scenario(world, ego, carla_map, scenario_state):
+                    next_auto_scenario_time = time.time() + 25.0
             elif spawn_requested.is_set():
                 spawn_requested.clear()
-                if demo_obstacle is not None:
-                    print("  ⚠️  Obstacle already active — wait for auto-removal")
-                else:
-                    print("  ⚠️  Ego too slow — speed up first!")
 
-            # Auto-remove after ego stops for 2s
-            if demo_obstacle is not None:
-                try:
-                    demo_obstacle.apply_control(carla.VehicleControl(brake=1.0))
-                except:
-                    pass
-                if speed < 0.3:
-                    demo_stopped_frames += 1
-                else:
-                    demo_stopped_frames = 0
-                if demo_stopped_frames >= FPS * 2:
-                    try:
-                        demo_obstacle.destroy()
-                    except:
-                        pass
-                    demo_obstacle = None
-                    demo_stopped_frames = 0
-                    print(f"\n  ✅ OBSTACLE #{demo_count}: Removed! "
-                          f"Model should RESUME. Press ENTER for another.\n")
+            if scenario_state["name"] is not None:
+                update_scenario_state(scenario_state)
+                elapsed = time.time() - scenario_state["spawn_time"]
+                scenario_vehicle = scenario_state["vehicle"]
+                scenario_walker = scenario_state["walker"]
 
+                if (
+                    elapsed > 12.0
+                    or (scenario_vehicle and ego.get_location().distance(scenario_vehicle.get_location()) > 70.0)
+                    or (scenario_walker and ego.get_location().distance(scenario_walker.get_location()) > 40.0)
+                ):
+                    destroy_scenario_state(scenario_state)
+                    scenario_state = init_scenario_state()
 
-            # ---- Spectator ----
-            try:
-                spec = world.get_spectator()
-                tf = ego.get_transform()
-                spec.set_transform(carla.Transform(
-                    tf.location - tf.get_forward_vector() * 12 + carla.Location(z=6),
-                    carla.Rotation(pitch=-20, yaw=tf.rotation.yaw)))
-            except:
-                pass
-
-            # ---- Print ----
-            if frame % (FPS * 1) == 0:  # every second
-                spd_kmh = speed * 3.6
-
-                if brake > 0.3:
-                    status = "🔴 BRAKING"
-                elif brake > 0.05:
-                    status = "🟡 SLOWING"
-                elif throttle > 0.5:
-                    status = "🟢 CRUISING"
-                elif speed < 0.3:
-                    status = "⬜ STOPPED"
-                else:
-                    status = "🔵 COASTING"
-
-                tl_str = TL_STATE_NAMES.get(tl_state, '?')
-                jct_str = '⚠️ JCT' if approaching_jct else ''
-
+            if frame % FPS == 0:
+                tl_name = TL_STATE_NAMES.get(int(visual["traffic_light_state"]), "none")
+                scenario_name = scenario_state["name"] or "none"
                 print(
-                    f"  {frame:>7,} │ {spd_kmh:5.1f}km/h │ {r['distance']:5.1f}m │ "
-                    f"{ttc:5.1f}s │ {action:+6.3f} │ {throttle:8.3f} │ {brake:5.3f} │ STR:{steer:+5.2f} │ "
-                    f"TL:{tl_str:6s} │ {jct_str:>6s} │ {status}{override}"
+                    f"  {frame:>6,} "
+                    f"spd={speed * 3.6:5.1f}km/h "
+                    f"target={smoothed_target_speed * 3.6:5.1f}km/h "
+                    f"dist={radar_state['distance']:5.1f}m "
+                    f"ttc={ttc:4.1f}s "
+                    f"thr={throttle:4.2f} "
+                    f"brk={brake:4.2f} "
+                    f"tl={tl_name:>6s} "
+                    f"area={visual['tl_bbox_area']:.4f} "
+                    f"scene={scenario_name}"
                 )
 
+            try:
+                spectator = world.get_spectator()
+                transform = ego.get_transform()
+                spectator.set_transform(
+                    carla.Transform(
+                        transform.location - transform.get_forward_vector() * 12
+                        + carla.Location(z=6),
+                        carla.Rotation(pitch=-20, yaw=transform.rotation.yaw),
+                    )
+                )
+            except RuntimeError:
+                pass
+
     except KeyboardInterrupt:
-        print(f"\n  ⚠️  Stopped at frame {frame}")
+        print("\n  Live test interrupted")
 
-    # ---- Summary ----
     total = max(1, frame + 1)
-    num_collisions = len(collision.collisions)
-
-    print(f"\n{'=' * 70}")
-    print(f"TEST RESULTS")
-    print(f"{'=' * 70}")
+    print("\n" + "=" * 76)
+    print("TEST RESULTS")
+    print("=" * 76)
     print(f"  Duration:          {total / FPS:.0f}s ({total:,} frames)")
-    print(f"  Collisions:        {num_collisions}")
-    print(f"  Near misses (<5m): {near_miss_count} frames")
-    print(f"  Min distance seen: {min_distance_seen:.1f}m")
-    print(f"  Braking frames:    {total_brake_frames} ({100*total_brake_frames/total:.1f}%)")
-    print(f"  Throttle frames:   {total_throttle_frames} ({100*total_throttle_frames/total:.1f}%)")
+    print(f"  Collisions:        {len(collision.collisions)}")
+    print(f"  Near misses <5m:   {near_miss_count}")
+    print(f"  Min distance:      {min_distance_seen:.2f}m")
+    print(f"  Max target speed:  {max_target_seen * 3.6:.1f}km/h")
+    print(f"  Brake frames:      {total_brake_frames} ({100 * total_brake_frames / total:.1f}%)")
+    print(f"  Throttle frames:   {total_throttle_frames} ({100 * total_throttle_frames / total:.1f}%)")
+    if collision.collisions:
+        for event in collision.collisions:
+            print(f"  - Hit {event['actor']} ({event['impulse']:.0f} N*s)")
+    print("=" * 76)
 
-    if num_collisions == 0:
-        print(f"\n  ✅ ZERO COLLISIONS — model successfully braked for all obstacles!")
-    else:
-        print(f"\n  ❌ {num_collisions} collisions occurred:")
-        for c in collision.collisions:
-            print(f"    → Hit {c['actor']} ({c['impulse']:.0f} N·s)")
-
-    print(f"{'=' * 70}")
-
-    # ---- Cleanup ----
-    print("\n  Cleaning up...")
+    destroy_scenario_state(scenario_state)
     radar.cleanup()
     collision.cleanup()
     camera.cleanup()
 
-
-    for cid in ctrl_ids:
-        try:
-            a = world.get_actor(cid)
-            if a:
-                a.stop()
-        except:
-            pass
+    for controller_id in ctrl_ids:
+        actor = world.get_actor(controller_id)
+        if actor:
+            try:
+                actor.stop()
+            except RuntimeError:
+                pass
 
     destroy_ids = npc_ids + ctrl_ids + walker_ids
     if destroy_ids:
-        client.apply_batch([carla.command.DestroyActor(x) for x in destroy_ids])
+        client.apply_batch([carla.command.DestroyActor(actor_id) for actor_id in destroy_ids])
 
-    try:
-        ego.destroy()
-    except:
-        pass
-
+    cleanup_actor(ego)
     world.apply_settings(original_settings)
     tm.set_synchronous_mode(False)
-    print("  ✅ Done!")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

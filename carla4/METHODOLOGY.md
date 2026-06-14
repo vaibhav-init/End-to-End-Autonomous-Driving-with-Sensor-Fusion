@@ -3,7 +3,7 @@
 ## System Overview
 
 An autonomous vehicle controller built in the CARLA simulator. The ego vehicle perceives the world through **sensors only** (front radar + RGB camera with YOLOv8) and uses a trained MLP neural network to control throttle and brake. Steering is handled separately by CARLA's BasicAgent.
-
+j
 ```
                     ┌─────────────┐
                     │  RGB Camera  │──→ YOLOv8n ──→ traffic_light_state
