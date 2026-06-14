@@ -51,7 +51,10 @@ LANE_HALF_WIDTH = 4.0
 # Feature columns (must match training)
 FEATURE_COLUMNS = [
     'ego_speed', 'ego_acceleration', 'nearest_distance',
-    'relative_velocity', 'ttc', 'obstacle_speed', 'obstacle_type'
+    'relative_velocity', 'ttc', 'obstacle_speed', 'obstacle_type',
+    'lateral_offset', 'ego_steering',
+    'rear_distance', 'rear_relative_velocity', 'rear_ttc',
+    'rear_obstacle_speed', 'rear_obstacle_type'
 ]
 
 
@@ -59,32 +62,27 @@ FEATURE_COLUMNS = [
 # MLP Model (must match train_mlp.py architecture)
 # ============================================================================
 class CrashMLP(nn.Module):
-    """MLP for crash probability prediction — architecture must match training."""
+    """MLP for crash probability prediction — must match train_mlp.py."""
 
-    def __init__(self, input_dim=7, hidden_dims=None, dropout=0.3):
-        super(CrashMLP, self).__init__()
-
-        if hidden_dims is None:
-            hidden_dims = [64, 32, 16]
-
-        layers = []
-        prev_dim = input_dim
-
-        for i, h_dim in enumerate(hidden_dims):
-            layers.append(nn.Linear(prev_dim, h_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.BatchNorm1d(h_dim))
-            drop_rate = max(0.1, dropout - 0.1 * i)
-            layers.append(nn.Dropout(drop_rate))
-            prev_dim = h_dim
-
-        layers.append(nn.Linear(prev_dim, 1))
-        layers.append(nn.Sigmoid())
-
-        self.network = nn.Sequential(*layers)
+    def __init__(self, input_dim=14):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
-        return self.network(x)
+        return self.net(x).squeeze(-1)
 
 
 # ============================================================================
@@ -185,6 +183,64 @@ class CollisionRecorder:
             'other_actor': event.other_actor.type_id,
             'impulse': event.normal_impulse.length(),
         })
+
+    def cleanup(self):
+        if self.sensor and self.sensor.is_alive:
+            self.sensor.destroy()
+
+
+# ============================================================================
+# Rear Radar Sensor
+# ============================================================================
+class RearRadarRecorder:
+    """Radar sensor pointing BACKWARD to detect rear-approaching vehicles."""
+
+    def __init__(self, vehicle, world, range_m=50.0):
+        self.latest_data = {
+            'rear_distance': range_m,
+            'rear_relative_velocity': 0.0,
+            'rear_obstacle_speed': 0.0,
+            'rear_obstacle_type': 2,
+        }
+        self._ego_speed = 0.0
+        self._range = range_m
+
+        bp = world.get_blueprint_library().find('sensor.other.radar')
+        bp.set_attribute('horizontal_fov', '30')
+        bp.set_attribute('vertical_fov', '10')
+        bp.set_attribute('range', str(range_m))
+        bp.set_attribute('points_per_second', '1500')
+        tf = carla.Transform(
+            carla.Location(x=-2.5, z=0.7),
+            carla.Rotation(pitch=0, yaw=180)
+        )
+        self.sensor = world.spawn_actor(bp, tf, attach_to=vehicle)
+        self.sensor.listen(self._on_radar)
+        print("  ✅ Rear radar sensor attached")
+
+    def update_ego_speed(self, speed):
+        self._ego_speed = speed
+
+    def _on_radar(self, data):
+        nearest_dist = self._range
+        nearest_vel = 0.0
+        for det in data:
+            if abs(det.azimuth) > 0.3 or det.depth < 1.0:
+                continue
+            if det.depth < nearest_dist:
+                nearest_dist = det.depth
+                nearest_vel = det.velocity
+        rel_vel = -nearest_vel
+        obs_speed = max(0, rel_vel + self._ego_speed)
+        self.latest_data = {
+            'rear_distance': nearest_dist,
+            'rear_relative_velocity': rel_vel,
+            'rear_obstacle_speed': obs_speed,
+            'rear_obstacle_type': 0 if nearest_dist < self._range else 2,
+        }
+
+    def get_nearest(self):
+        return self.latest_data.copy()
 
     def cleanup(self):
         if self.sensor and self.sensor.is_alive:
@@ -453,33 +509,16 @@ def main():
     # ----------------------------------------------------------
     print(f"\n🧠 Loading model from {args.model}...")
 
-    if not os.path.exists(args.model):
-        print(f"  ❌ Model file not found: {args.model}")
-        print(f"     Run train_mlp.py first to train the model.")
-        return
-
-    if not os.path.exists(args.scaler):
-        print(f"  ❌ Scaler file not found: {args.scaler}")
-        return
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    checkpoint = torch.load(args.model, map_location=device)
-    input_dim = checkpoint.get('input_dim', 7)
-    hidden_dims = checkpoint.get('hidden_dims', [64, 32, 16])
-    dropout = checkpoint.get('dropout', 0.3)
-
-    model = CrashMLP(
-        input_dim=input_dim,
-        hidden_dims=hidden_dims,
-        dropout=dropout
-    ).to(device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Load model
+    model = CrashMLP(input_dim=len(FEATURE_COLUMNS)).to(device)
+    state = torch.load(args.model, map_location=device, weights_only=True)
+    model.load_state_dict(state)
     model.eval()
 
-    print(f"  ✅ Model loaded (trained at epoch {checkpoint.get('epoch', '?')})")
-    print(f"     Architecture: {input_dim} → {' → '.join(map(str, hidden_dims))} → 1")
-    print(f"     Val AUC: {checkpoint.get('val_auc', '?')}")
+    print(f"  ✅ Model loaded")
+    print(f"     Architecture: {len(FEATURE_COLUMNS)} → 128 → 64 → 32 → 1")
     print(f"     Device: {device}")
 
     # Load scaler
@@ -533,6 +572,7 @@ def main():
 
     ego_vehicle = None
     collision_recorder = None
+    rear_radar = None
     npc_vehicle_ids = []
     walker_ids = []
     ctrl_ids = []
@@ -566,6 +606,9 @@ def main():
 
         # Collision sensor
         collision_recorder = CollisionRecorder(ego_vehicle, world)
+
+        # Rear radar
+        rear_radar = RearRadarRecorder(ego_vehicle, world, range_m=MAX_SEARCH_DISTANCE)
 
         # Let it settle
         for _ in range(20):
@@ -635,6 +678,15 @@ def main():
             else:
                 ttc = 10.0
 
+            # Rear radar
+            rear_radar.update_ego_speed(ego_speed)
+            rear_data = rear_radar.get_nearest()
+            if rear_data['rear_relative_velocity'] > 0.1:
+                rear_ttc = rear_data['rear_distance'] / rear_data['rear_relative_velocity']
+                rear_ttc = min(rear_ttc, 10.0)
+            else:
+                rear_ttc = 10.0
+
             # Build feature vector (same order as FEATURE_COLUMNS)
             raw_features = np.array([[
                 ego_speed,
@@ -643,7 +695,14 @@ def main():
                 np.clip(nearest['relative_velocity'], -20, 20),
                 ttc,
                 nearest['obstacle_speed'],
-                nearest['obstacle_type']
+                nearest['obstacle_type'],
+                nearest['lateral_offset'],
+                0.0,  # ego_steering (not available from TM autopilot, use 0)
+                rear_data['rear_distance'],
+                np.clip(rear_data['rear_relative_velocity'], -20, 20),
+                rear_ttc,
+                rear_data['rear_obstacle_speed'],
+                rear_data['rear_obstacle_type']
             ]], dtype=np.float32)
 
             # Normalize with scaler
@@ -799,6 +858,12 @@ def main():
         if collision_recorder:
             try:
                 collision_recorder.cleanup()
+            except Exception:
+                pass
+
+        if rear_radar:
+            try:
+                rear_radar.cleanup()
             except Exception:
                 pass
 
