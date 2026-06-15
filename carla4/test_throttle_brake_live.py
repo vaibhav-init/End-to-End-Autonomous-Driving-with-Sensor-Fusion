@@ -37,7 +37,7 @@ if AGENTS_PATH not in sys.path:
     sys.path.insert(0, AGENTS_PATH)
 
 try:
-    from agents.navigation.controller import PIDLateralController
+    from agents.navigation.basic_agent import BasicAgent
 except ImportError:
     print("ERROR: CARLA agents not found. Please ensure CARLA PythonAPI is in your PYTHONPATH.")
     print(f"       Tried: {AGENTS_PATH}")
@@ -226,6 +226,14 @@ def cleanup_actor(actor):
             actor.destroy()
         except RuntimeError:
             pass
+
+
+def choose_new_destination(ego, spawn_points, min_distance=35.0):
+    current_location = ego.get_location()
+    candidates = [sp.location for sp in spawn_points if sp.location.distance(current_location) >= min_distance]
+    if not candidates:
+        candidates = [sp.location for sp in spawn_points]
+    return random.choice(candidates)
 
 
 def waypoint_ahead(carla_map, location, distance_m):
@@ -534,8 +542,13 @@ def main():
         f"  Ego spawned at ({ego.get_location().x:.1f}, {ego.get_location().y:.1f})"
     )
 
-    lat_controller = PIDLateralController(
-        ego, K_P=1.95, K_D=0.2, K_I=0.05, dt=1.0 / FPS
+    route_agent = BasicAgent(ego, target_speed=30)
+    route_agent.follow_speed_limits(True)
+    initial_destination = choose_new_destination(ego, spawn_points)
+    route_agent.set_destination(initial_destination)
+    print(
+        "  BasicAgent route follower initialized "
+        f"-> ({initial_destination.x:.1f}, {initial_destination.y:.1f})"
     )
     speed_controller = PIDSpeedController(dt=1.0 / FPS)
 
@@ -640,14 +653,16 @@ def main():
             if radar_state["distance"] < 5.0 and speed > 0.5:
                 near_miss_count += 1
 
-            steer = 0.0
-            waypoint = carla_map.get_waypoint(ego.get_location(), project_to_road=True)
-            if waypoint:
-                lookahead = max(5.0, min(15.0, speed * 1.5))
-                next_wps = waypoint.next(lookahead)
-                if next_wps:
-                    steer = lat_controller.run_step(next_wps[0])
-            steer = max(-0.7, min(0.7, steer))
+            if route_agent.done():
+                destination = choose_new_destination(ego, spawn_points)
+                route_agent.set_destination(destination)
+                print(
+                    "  New destination -> "
+                    f"({destination.x:.1f}, {destination.y:.1f})"
+                )
+
+            agent_control = route_agent.run_step()
+            steer = max(-0.7, min(0.7, agent_control.steer))
 
             ego.apply_control(
                 carla.VehicleControl(
