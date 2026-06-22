@@ -16,6 +16,7 @@ import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
+from speed_model import TargetSpeedMLP, feature_sort_key
 
 
 DATA_PATH = "dataset_throttle_brake/data.csv"
@@ -23,36 +24,10 @@ DATASET_CONFIG_PATH = "dataset_throttle_brake/dataset_config.json"
 MODEL_DIR = "model_throttle_brake"
 
 
-class TargetSpeedMLP(nn.Module):
-    """Feed-forward network over flattened temporal history."""
-
-    def __init__(self, input_dim):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(0.20),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.10),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-        )
-
-    def forward(self, x):
-        return self.net(x).squeeze(-1)
-
-
 def infer_feature_columns(df, dataset_config):
     if dataset_config and "stacked_feature_cols" in dataset_config:
         return dataset_config["stacked_feature_cols"]
     return sorted([col for col in df.columns if "_t-" in col], key=feature_sort_key)
-
-
-def feature_sort_key(name):
-    base, lag = name.rsplit("_t-", 1)
-    return int(lag), base
 
 
 def main():
@@ -62,9 +37,11 @@ def main():
     parser.add_argument("--batch", type=int, default=256)
     parser.add_argument("--data", default=DATA_PATH)
     parser.add_argument("--config", default=DATASET_CONFIG_PATH)
+    parser.add_argument("--output", default=MODEL_DIR, help="Directory to save model artifacts")
     args = parser.parse_args()
 
-    os.makedirs(MODEL_DIR, exist_ok=True)
+    model_dir = args.output
+    os.makedirs(model_dir, exist_ok=True)
 
     print("=" * 64)
     print("TARGET-SPEED MLP TRAINER")
@@ -130,7 +107,7 @@ def main():
     X_train = scaler.fit_transform(X_train)
     X_val = scaler.transform(X_val)
 
-    scaler_path = os.path.join(MODEL_DIR, "scaler.pkl")
+    scaler_path = os.path.join(model_dir, "scaler.pkl")
     with open(scaler_path, "wb") as fh:
         pickle.dump(scaler, fh)
     print(f"  Saved scaler to {scaler_path}")
@@ -160,7 +137,7 @@ def main():
 
     best_val_loss = float("inf")
     best_epoch = 0
-    model_path = os.path.join(MODEL_DIR, "target_speed_mlp.pt")
+    model_path = os.path.join(model_dir, "target_speed_mlp.pt")
     train_start = time.time()
 
     for epoch in range(1, args.epochs + 1):
@@ -255,10 +232,9 @@ def main():
         "label_col": label_col,
         "history_frames": dataset_config.get("history_frames") if dataset_config else None,
         "base_feature_cols": dataset_config.get("base_feature_cols") if dataset_config else None,
-        "speed_cap": float(max(df[label_col].max(), df.get("target_speed_limit_now", pd.Series([0])).max())),
         "fps": dataset_config.get("fps") if dataset_config else None,
     }
-    model_config_path = os.path.join(MODEL_DIR, "model_config.json")
+    model_config_path = os.path.join(model_dir, "model_config.json")
     with open(model_config_path, "w", encoding="utf-8") as fh:
         json.dump(model_config, fh, indent=2)
     print(f"  Model config:     {model_config_path}")

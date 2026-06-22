@@ -1,10 +1,28 @@
 #!/usr/bin/env python3
 """
-Collect non-GT longitudinal driving data for target-speed imitation.
+Vision-Only Data Collector for Target-Speed Imitation
+=====================================================
 
-The collector now saves stacked temporal history instead of single-frame rows.
-Each sample contains the latest N frames of radar + vision features, and the
-training label is built later as a smoothed future speed target.
+Mirrors collect_throttle_brake_data.py but replaces the front radar sensor
+with YOLO-based obstacle detection + monocular distance estimation.
+
+The 10 base feature columns are IDENTICAL to the radar version so the same
+train_throttle_brake.py script can be used without modification:
+
+  Kept as-is (vehicle physics / camera):
+    ego_speed, ego_acceleration,
+    traffic_light_state, tl_confidence, tl_bbox_area, tl_center_x
+
+  Replaced (radar → YOLO vision):
+    distance           ← pinhole-camera distance from YOLO bbox height
+    relative_velocity  ← frame-to-frame distance change (EMA smoothed)
+    ttc                ← distance / relative_velocity
+    obstacle_speed     ← ego_speed − relative_velocity
+
+Usage:
+    python collect_vision_only_data.py --duration 900
+    python train_throttle_brake.py --data dataset_vision_only/data.csv \\
+                                   --config dataset_vision_only/dataset_config.json
 """
 
 import argparse
@@ -23,10 +41,11 @@ import pandas as pd
 from yolo_perception import (
     CameraManager,
     TL_STATE_NAMES,
+    VisionDistanceTracker,
     YOLO_AVAILABLE,
     YOLOPerception,
-    empty_obstacle_features,
     empty_visual_features,
+    empty_obstacle_features,
 )
 from speed_model import BASE_FEATURE_COLS, flatten_history
 from weather_utils import apply_random_fog
@@ -40,17 +59,20 @@ except ImportError:
     print("WARNING: OpenCV not available; camera preview disabled")
 
 
+# ============================================================================
+# Configuration
+# ============================================================================
 CARLA_HOST = "127.0.0.1"
 CARLA_PORT = 2000
 DEFAULT_TOWN = "Town01"
 FPS = 20
-MAX_RADAR_RANGE = 50.0
+MAX_VISION_RANGE = 50.0
 
 NPC_VEHICLES = 45
 NPC_PEDESTRIANS = 25
 HISTORY_FRAMES = 10
 LABEL_HORIZON = 10
-SAVE_DIR = "dataset_throttle_brake"
+SAVE_DIR = "dataset_vision_only"
 
 SCENARIOS = ("traffic_light", "car_following", "emergency")
 STALL_SPEED_MPS = 0.3
@@ -60,66 +82,19 @@ STALL_MAX_BRAKE = 0.1
 STALL_MIN_CLEAR_DISTANCE_M = 12.0
 RESPAWN_Z_OFFSET = 0.5
 
+# EMA smoothing factor for vision-derived distance (lower = smoother)
+DISTANCE_EMA_ALPHA = 0.4
+
+
+# ============================================================================
+# Helpers (reused from collect_throttle_brake_data.py)
+# ============================================================================
 def stacked_feature_names(base_cols, history_frames):
     cols = []
     for lag in range(history_frames):
         for name in base_cols:
             cols.append(f"{name}_t-{lag}")
     return cols
-
-
-class FrontRadar:
-    """Track the closest object in a narrow forward cone."""
-
-    def __init__(self, vehicle, world, range_m=50.0):
-        self.latest = {
-            "distance": range_m,
-            "relative_velocity": 0.0,
-            "obstacle_speed": 0.0,
-        }
-        self._ego_speed = 0.0
-        self._range = range_m
-
-        bp = world.get_blueprint_library().find("sensor.other.radar")
-        bp.set_attribute("horizontal_fov", "10")
-        bp.set_attribute("vertical_fov", "2")
-        bp.set_attribute("range", str(range_m))
-        bp.set_attribute("points_per_second", "1500")
-
-        transform = carla.Transform(
-            carla.Location(x=2.5, z=1.0),
-            carla.Rotation(pitch=2.0),
-        )
-        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
-        self.sensor.listen(self._on_radar)
-
-    def _on_radar(self, data):
-        nearest_dist = self._range
-        nearest_vel = 0.0
-        for det in data:
-            if abs(det.azimuth) > 0.3 or det.depth < 1.0 or det.altitude < -0.02:
-                continue
-            if det.depth < nearest_dist:
-                nearest_dist = det.depth
-                nearest_vel = det.velocity
-
-        rel_vel = -nearest_vel
-        obs_speed = max(0.0, self._ego_speed - rel_vel)
-        self.latest = {
-            "distance": nearest_dist,
-            "relative_velocity": rel_vel,
-            "obstacle_speed": obs_speed,
-        }
-
-    def update_ego_speed(self, speed):
-        self._ego_speed = speed
-
-    def get(self):
-        return self.latest.copy()
-
-    def cleanup(self):
-        if self.sensor and self.sensor.is_alive:
-            self.sensor.destroy()
 
 
 def spawn_vehicles(world, client, tm, count):
@@ -287,7 +262,10 @@ def safe_respawn_ego(world, ego, spawn_transform, tm, port):
     world.tick()
 
 
-def draw_camera_overlay(frame, visual, obstacle, speed, scenario, radar_state, ttc, weather_name):
+# ============================================================================
+# Camera overlay
+# ============================================================================
+def draw_camera_overlay(frame, visual, obstacle, speed, scenario, vision_state, ttc, weather_name):
     if not CV2_AVAILABLE or frame is None:
         return
 
@@ -340,12 +318,12 @@ def draw_camera_overlay(frame, visual, obstacle, speed, scenario, radar_state, t
         )
 
     hud_lines = [
-        f"Scenario: {scenario}",
+        f"VISION-ONLY | Scenario: {scenario}",
         f"Weather: {weather_name}",
         f"Speed: {speed * 3.6:.1f} km/h",
         f"TL: {TL_STATE_NAMES.get(tl_state, 'none')}",
-        f"TL center_x: {visual['tl_center_x']:.2f}",
-        f"Dist: {radar_state['distance']:.1f}m TTC: {ttc:.1f}s",
+        f"Vis Dist: {vision_state['distance']:.1f}m  TTC: {ttc:.1f}s",
+        f"Rel Vel: {vision_state['relative_velocity']:.1f}m/s",
     ]
     for line_index, line in enumerate(hud_lines):
         cv2.putText(
@@ -354,16 +332,19 @@ def draw_camera_overlay(frame, visual, obstacle, speed, scenario, radar_state, t
             (10, 25 + line_index * 22),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
-            (0, 255, 0),
+            (0, 200, 255),
             2,
         )
 
-    cv2.imshow("CARLA Collector Camera", display)
+    cv2.imshow("CARLA Vision-Only Collector", display)
     cv2.waitKey(1)
 
 
+# ============================================================================
+# Main
+# ============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="Collect target-speed imitation data")
+    parser = argparse.ArgumentParser(description="Collect vision-only target-speed data")
     parser.add_argument("--host", default=CARLA_HOST)
     parser.add_argument("--port", type=int, default=CARLA_PORT)
     parser.add_argument("--town", default=DEFAULT_TOWN)
@@ -381,7 +362,7 @@ def main():
     config_path = os.path.join(args.output, "dataset_config.json")
 
     print("=" * 72)
-    print("TARGET-SPEED DATA COLLECTOR")
+    print("VISION-ONLY TARGET-SPEED DATA COLLECTOR")
     print("=" * 72)
     print(f"  Town:            {args.town}")
     print(f"  Duration:        {args.duration}s")
@@ -391,6 +372,7 @@ def main():
     print(f"  Pedestrians:     {args.pedestrians}")
     print(f"  Output:          {csv_path}")
     print(f"  Scenarios:       {', '.join(SCENARIOS)}")
+    print(f"  Distance source: YOLO bbox (NO RADAR)")
     print("=" * 72)
 
     client = carla.Client(args.host, args.port)
@@ -438,11 +420,14 @@ def main():
     npc_ids = spawn_vehicles(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_pedestrians(world, args.pedestrians)
 
-    radar = FrontRadar(ego, world, MAX_RADAR_RANGE)
+    # Camera + YOLO — the ONLY perception sensors (no radar!)
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
     if yolo is None:
-        print("  YOLO unavailable; traffic-light features will be zeroed")
+        raise RuntimeError(
+            "Vision-only collection requires YOLO. Install ultralytics on the remote machine first."
+        )
+    vision_tracker = VisionDistanceTracker(alpha=DISTANCE_EMA_ALPHA, max_range=MAX_VISION_RANGE, fps=FPS)
     current_weather_name = apply_random_fog(world)
     print(f"  Weather:         {current_weather_name}")
 
@@ -488,6 +473,7 @@ def main():
             prev_speed = speed
             control = ego.get_control()
 
+            # --- Scenario management (identical to radar version) ---
             progress = frame / max(1, total_frames)
             scenario_index = min(len(SCENARIOS) - 1, int(progress * len(SCENARIOS)))
             scenario = SCENARIOS[scenario_index]
@@ -578,22 +564,28 @@ def main():
                         tm.auto_lane_change(ego, True)
                         print("  Emergency obstacle removed")
 
-            radar.update_ego_speed(speed)
-            radar_state = radar.get()
-            if radar_state["relative_velocity"] > 0.1:
-                ttc = min(radar_state["distance"] / radar_state["relative_velocity"], 10.0)
+            # --- Feature extraction (VISION ONLY, no radar) ---
+            cam_frame = camera.get_frame()
+            scene_features = {
+                "visual": empty_visual_features(),
+                "obstacle": empty_obstacle_features(),
+            }
+            if cam_frame is not None:
+                scene_features = yolo.extract_scene_features(cam_frame)
+            visual = scene_features["visual"]
+            obstacle = scene_features["obstacle"]
+
+            vision_tracker.update_ego_speed(speed)
+            vision_state = vision_tracker.update(obstacle)
+
+            if vision_state["relative_velocity"] > 0.1:
+                ttc = min(
+                    vision_state["distance"] / vision_state["relative_velocity"], 10.0
+                )
             else:
                 ttc = 10.0
 
-            cam_frame = camera.get_frame()
-            visual = empty_visual_features()
-            obstacle = empty_obstacle_features()
-            if yolo is not None and cam_frame is not None:
-                scene_features = yolo.extract_scene_features(cam_frame)
-                visual = scene_features["visual"]
-                obstacle = scene_features["obstacle"]
-
-            blocked_by_obstacle = radar_state["distance"] < STALL_MIN_CLEAR_DISTANCE_M
+            blocked_by_obstacle = vision_state["distance"] < STALL_MIN_CLEAR_DISTANCE_M
             trying_to_move = (
                 control.throttle > STALL_MIN_THROTTLE and control.brake < STALL_MAX_BRAKE
             )
@@ -608,6 +600,7 @@ def main():
                 new_spawn = random.choice(safe_spawns)
                 safe_respawn_ego(world, ego, new_spawn, tm, port)
                 feature_history.clear()
+                vision_tracker.reset()
                 prev_speed = 0.0
                 lead_last_change = time.time()
                 print(f"  Ego safely respawned after confirmed stall ({respawn_count})")
@@ -619,18 +612,19 @@ def main():
                 obstacle,
                 speed,
                 scenario,
-                radar_state,
+                vision_state,
                 ttc,
                 current_weather_name,
             )
 
+            # Build feature dict — SAME column names as radar version
             base_features = {
                 "ego_speed": round(speed, 4),
                 "ego_acceleration": round(max(-20.0, min(20.0, accel)), 4),
-                "distance": round(radar_state["distance"], 4),
-                "relative_velocity": round(radar_state["relative_velocity"], 4),
+                "distance": vision_state["distance"],
+                "relative_velocity": vision_state["relative_velocity"],
                 "ttc": round(ttc, 4),
-                "obstacle_speed": round(radar_state["obstacle_speed"], 4),
+                "obstacle_speed": vision_state["obstacle_speed"],
                 "traffic_light_state": float(visual["traffic_light_state"]),
                 "tl_confidence": round(visual["tl_confidence"], 4),
                 "tl_bbox_area": round(visual["tl_bbox_area"], 6),
@@ -659,7 +653,7 @@ def main():
                     f"scene={scenario:>13s} "
                     f"weather={current_weather_name:>11s} "
                     f"spd={speed * 3.6:5.1f}km/h "
-                    f"dist={radar_state['distance']:5.1f}m "
+                    f"vdist={vision_state['distance']:5.1f}m "
                     f"ttc={ttc:4.1f}s "
                     f"tl={tl_name:>6s} "
                     f"area={visual['tl_bbox_area']:.4f}"
@@ -696,12 +690,13 @@ def main():
             "base_feature_cols": BASE_FEATURE_COLS,
             "stacked_feature_cols": stacked_feature_names(BASE_FEATURE_COLS, args.history),
             "label_col": "teacher_target_speed",
+            "distance_source": "yolo_vision",
         }
         with open(config_path, "w", encoding="utf-8") as fh:
             json.dump(config, fh, indent=2)
 
         print("\n" + "=" * 72)
-        print("COLLECTION COMPLETE")
+        print("COLLECTION COMPLETE (VISION-ONLY)")
         print("=" * 72)
         print(f"  Samples saved:      {len(df):,}")
         print(f"  Emergency events:   {emergency_count}")
@@ -713,7 +708,6 @@ def main():
 
     cleanup_actor(lead_actor)
     cleanup_actor(emergency_actor)
-    radar.cleanup()
     camera.cleanup()
     if CV2_AVAILABLE:
         cv2.destroyAllWindows()

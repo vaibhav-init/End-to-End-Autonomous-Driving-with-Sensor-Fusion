@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
 Live test for the target-speed sequence model.
-
-The neural network predicts desired speed from recent radar + vision history.
-A classic PID controller converts that desired speed into throttle and brake.
 """
 
 import argparse
@@ -20,15 +17,19 @@ import time
 import carla
 import numpy as np
 import torch
-import torch.nn as nn
 
 from yolo_perception import (
     CameraManager,
     TL_STATE_NAMES,
+    VisionDistanceTracker,
     YOLO_AVAILABLE,
     YOLOPerception,
+    empty_obstacle_features,
     empty_visual_features,
 )
+from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS
+from speed_model import TargetSpeedMLP, flatten_history
+from weather_utils import apply_random_fog
 
 
 CARLA_ROOT = os.environ.get("CARLA_ROOT", "/opt/carla-simulator")
@@ -49,59 +50,15 @@ CARLA_PORT = 2000
 DEFAULT_TOWN = "Town01"
 FPS = 20
 MAX_RADAR_RANGE = 50.0
+BOOTSTRAP_TARGET_SPEED_MPS = 12.0 / 3.6
+LAUNCH_HOLD_SPEED_MPS = 0.5
+LAUNCH_CLEAR_DISTANCE_M = 15.0
+LAUNCH_ASSIST_FRAMES = FPS * 5
 
-MODEL_PATH = "model_throttle_brake/target_speed_mlp.pt"
-SCALER_PATH = "model_throttle_brake/scaler.pkl"
-MODEL_CONFIG_PATH = "model_throttle_brake/model_config.json"
-
-DEFAULT_BASE_FEATURE_COLS = [
-    "ego_speed",
-    "target_speed_limit",
-    "speed_error",
-    "ego_acceleration",
-    "distance",
-    "relative_velocity",
-    "ttc",
-    "obstacle_speed",
-    "traffic_light_state",
-    "tl_confidence",
-    "tl_bbox_area",
-    "tl_center_x",
-]
-
-
-def feature_sort_key(name):
-    base, lag = name.rsplit("_t-", 1)
-    return int(lag), base
-
-
-def flatten_history(history, base_cols):
-    row = {}
-    frames = list(history)
-    for lag, feature_dict in enumerate(reversed(frames)):
-        for name in base_cols:
-            row[f"{name}_t-{lag}"] = feature_dict[name]
-    return row
-
-
-class TargetSpeedMLP(nn.Module):
-    def __init__(self, input_dim):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(0.20),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.10),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-        )
-
-    def forward(self, x):
-        return self.net(x).squeeze(-1)
-
+MODEL_DIRS = {
+    "cameraplusradar": "model_throttle_brake",
+    "cameraonly": "model_vision_only",
+}
 
 class FrontRadar:
     def __init__(self, vehicle, world, range_m=50.0):
@@ -213,10 +170,29 @@ class PIDSpeedController:
             throttle = 0.0
             brake = -accel_cmd
 
-        if target_speed < 0.3 and current_speed < 0.8:
-            throttle = 0.0
-            brake = max(brake, 0.35)
+        return throttle, brake
 
+
+class HybridStateMachineController:
+    """
+    Manages transitions between continuous dynamic control (PID) 
+    and discrete static states (Brake Hold) for safe boundary conditions.
+    """
+    def __init__(self, pid_controller, hold_speed_threshold=0.3, stop_current_speed_threshold=0.8, hold_brake_force=0.35):
+        self.pid = pid_controller
+        self.hold_speed_threshold = hold_speed_threshold
+        self.stop_current_speed_threshold = stop_current_speed_threshold
+        self.hold_brake_force = hold_brake_force
+        self.state = "CONTINUOUS"
+
+    def run_step(self, target_speed, current_speed):
+        throttle, brake = self.pid.run_step(target_speed, current_speed)
+        
+        if target_speed < self.hold_speed_threshold and current_speed < self.stop_current_speed_threshold:
+            self.state = "HOLD"
+            return 0.0, max(brake, self.hold_brake_force)
+        
+        self.state = "CONTINUOUS"
         return throttle, brake
 
 
@@ -462,13 +438,31 @@ def main():
     parser.add_argument("--host", default=CARLA_HOST)
     parser.add_argument("--port", type=int, default=CARLA_PORT)
     parser.add_argument("--town", default=DEFAULT_TOWN)
-    parser.add_argument("--model", default=MODEL_PATH)
-    parser.add_argument("--scaler", default=SCALER_PATH)
-    parser.add_argument("--config", default=MODEL_CONFIG_PATH)
+    parser.add_argument(
+        "--mode",
+        choices=["cameraonly", "cameraplusradar"],
+        default="cameraplusradar",
+        help="cameraonly = YOLO-based distance (no radar); "
+             "cameraplusradar = radar + camera (default)",
+    )
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--scaler", default=None)
+    parser.add_argument("--config", default=None)
     parser.add_argument("--duration", type=int, default=180)
     parser.add_argument("--vehicles", type=int, default=20)
     parser.add_argument("--pedestrians", type=int, default=10)
     args = parser.parse_args()
+
+    # Resolve model paths from --mode if not explicitly given
+    model_dir = MODEL_DIRS[args.mode]
+    if args.model is None:
+        args.model = os.path.join(model_dir, "target_speed_mlp.pt")
+    if args.scaler is None:
+        args.scaler = os.path.join(model_dir, "scaler.pkl")
+    if args.config is None:
+        args.config = os.path.join(model_dir, "model_config.json")
+
+    use_vision_only = args.mode == "cameraonly"
 
     total_frames = args.duration * FPS
 
@@ -480,8 +474,6 @@ def main():
     feature_cols = model_config["feature_cols"]
     history_frames = int(model_config.get("history_frames") or 10)
     base_feature_cols = model_config.get("base_feature_cols") or DEFAULT_BASE_FEATURE_COLS
-    speed_cap = float(model_config.get("speed_cap") or 20.0)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TargetSpeedMLP(input_dim=len(feature_cols)).to(device)
     model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
@@ -490,6 +482,8 @@ def main():
     print("=" * 76)
     print("TARGET-SPEED LIVE TEST")
     print("=" * 76)
+    print(f"  Mode:           {args.mode.upper()}")
+    print(f"  Distance src:   {'YOLO vision' if use_vision_only else 'Front radar'}")
     print(f"  Model:          {args.model}")
     print(f"  Scaler:         {args.scaler}")
     print(f"  Config:         {args.config}")
@@ -543,7 +537,6 @@ def main():
     )
 
     route_agent = BasicAgent(ego, target_speed=30)
-    route_agent.follow_speed_limits(True)
     initial_destination = choose_new_destination(ego, spawn_points)
     route_agent.set_destination(initial_destination)
     print(
@@ -551,23 +544,38 @@ def main():
         f"-> ({initial_destination.x:.1f}, {initial_destination.y:.1f})"
     )
     speed_controller = PIDSpeedController(dt=1.0 / FPS)
+    hybrid_controller = HybridStateMachineController(speed_controller)
 
-    radar = FrontRadar(ego, world, MAX_RADAR_RANGE)
     collision = CollisionRecorder(ego, world)
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
+    if use_vision_only and yolo is None:
+        raise RuntimeError(
+            "Camera-only live testing requires YOLO. Install ultralytics on the remote machine first."
+        )
     if yolo is None:
         print("  YOLO unavailable; traffic-light features will be zeroed")
 
+    # Distance source: radar or vision
+    radar = None
+    vision_tracker = None
+    if use_vision_only:
+        vision_tracker = VisionDistanceTracker(fps=FPS, max_range=MAX_RADAR_RANGE)
+        print("  Distance source: YOLO vision (camera-only mode)")
+    else:
+        radar = FrontRadar(ego, world, MAX_RADAR_RANGE)
+        print("  Distance source: Front radar")
+
     npc_ids = spawn_background_traffic(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_background_pedestrians(world, args.pedestrians)
+    current_weather_name = apply_random_fog(world)
+    print(f"  Weather:        {current_weather_name}")
 
     for _ in range(40):
         world.tick()
 
     feature_history = deque(maxlen=history_frames)
     prev_speed = 0.0
-    smoothed_target_speed = 0.0
     min_distance_seen = MAX_RADAR_RANGE
     max_target_seen = 0.0
     total_brake_frames = 0
@@ -599,30 +607,38 @@ def main():
             accel = (speed - prev_speed) * FPS if frame > 0 else 0.0
             prev_speed = speed
 
-            radar.update_ego_speed(speed)
-            radar_state = radar.get()
-            if radar_state["relative_velocity"] > 0.1:
-                ttc = min(radar_state["distance"] / radar_state["relative_velocity"], 10.0)
+            # Get distance features from radar or vision depending on mode
+            if use_vision_only:
+                vision_tracker.update_ego_speed(speed)
+                dist_state = None
             else:
-                ttc = 10.0
-            min_distance_seen = min(min_distance_seen, radar_state["distance"])
+                radar.update_ego_speed(speed)
+                dist_state = radar.get()
 
             cam_frame = camera.get_frame()
             visual = empty_visual_features()
+            obstacle = empty_obstacle_features()
             if yolo is not None and cam_frame is not None:
-                visual = yolo.extract_light_features(cam_frame)
+                scene_features = yolo.extract_scene_features(cam_frame)
+                visual = scene_features["visual"]
+                obstacle = scene_features["obstacle"]
 
-            speed_limit_target = max(5.0, ego.get_speed_limit() * 1.10 / 3.6)
-            speed_error = speed_limit_target - speed
+            if use_vision_only:
+                dist_state = vision_tracker.update(obstacle)
+
+            if dist_state["relative_velocity"] > 0.1:
+                ttc = min(dist_state["distance"] / dist_state["relative_velocity"], 10.0)
+            else:
+                ttc = 10.0
+            min_distance_seen = min(min_distance_seen, dist_state["distance"])
+
             current_features = {
                 "ego_speed": round(speed, 4),
-                "target_speed_limit": round(speed_limit_target, 4),
-                "speed_error": round(speed_error, 4),
                 "ego_acceleration": round(max(-20.0, min(20.0, accel)), 4),
-                "distance": round(radar_state["distance"], 4),
-                "relative_velocity": round(radar_state["relative_velocity"], 4),
+                "distance": round(dist_state["distance"], 4),
+                "relative_velocity": round(dist_state["relative_velocity"], 4),
                 "ttc": round(ttc, 4),
-                "obstacle_speed": round(radar_state["obstacle_speed"], 4),
+                "obstacle_speed": round(dist_state["obstacle_speed"], 4),
                 "traffic_light_state": float(visual["traffic_light_state"]),
                 "tl_confidence": round(visual["tl_confidence"], 4),
                 "tl_bbox_area": round(visual["tl_bbox_area"], 6),
@@ -637,20 +653,26 @@ def main():
                 with torch.no_grad():
                     pred = model(torch.tensor(scaled, device=device))
                     target_speed_pred = float(pred.item())
-                target_speed_pred = max(0.0, min(speed_cap * 1.2, target_speed_pred))
+                target_speed_pred = max(0.0, target_speed_pred)
             else:
-                target_speed_pred = speed_limit_target
+                target_speed_pred = BOOTSTRAP_TARGET_SPEED_MPS
 
-            smoothed_target_speed = 0.7 * smoothed_target_speed + 0.3 * target_speed_pred
-            smoothed_target_speed = min(smoothed_target_speed, speed_limit_target + 2.0)
-            max_target_seen = max(max_target_seen, smoothed_target_speed)
+            if (
+                use_vision_only
+                and frame < LAUNCH_ASSIST_FRAMES
+                and speed < LAUNCH_HOLD_SPEED_MPS
+                and dist_state["distance"] > LAUNCH_CLEAR_DISTANCE_M
+            ):
+                target_speed_pred = max(target_speed_pred, BOOTSTRAP_TARGET_SPEED_MPS)
 
-            throttle, brake = speed_controller.run_step(smoothed_target_speed, speed)
+            max_target_seen = max(max_target_seen, target_speed_pred)
+
+            throttle, brake = hybrid_controller.run_step(target_speed_pred, speed)
             if brake > 0.05:
                 total_brake_frames += 1
             if throttle > 0.05:
                 total_throttle_frames += 1
-            if radar_state["distance"] < 5.0 and speed > 0.5:
+            if dist_state["distance"] < 5.0 and speed > 0.5:
                 near_miss_count += 1
 
             if route_agent.done():
@@ -679,6 +701,8 @@ def main():
             ):
                 spawn_requested.clear()
                 if maybe_spawn_scenario(world, ego, carla_map, scenario_state):
+                    current_weather_name = apply_random_fog(world)
+                    print(f"  Fog preset -> {current_weather_name}")
                     next_auto_scenario_time = time.time() + 25.0
             elif spawn_requested.is_set():
                 spawn_requested.clear()
@@ -703,14 +727,16 @@ def main():
                 print(
                     f"  {frame:>6,} "
                     f"spd={speed * 3.6:5.1f}km/h "
-                    f"target={smoothed_target_speed * 3.6:5.1f}km/h "
-                    f"dist={radar_state['distance']:5.1f}m "
+                    f"target={target_speed_pred * 3.6:5.1f}km/h "
+                    f"dist={dist_state['distance']:5.1f}m "
                     f"ttc={ttc:4.1f}s "
                     f"thr={throttle:4.2f} "
                     f"brk={brake:4.2f} "
+                    f"fog={current_weather_name:>11s} "
                     f"tl={tl_name:>6s} "
                     f"area={visual['tl_bbox_area']:.4f} "
-                    f"scene={scenario_name}"
+                    f"scene={scenario_name} "
+                    f"state={hybrid_controller.state}"
                 )
 
             try:
@@ -746,7 +772,8 @@ def main():
     print("=" * 76)
 
     destroy_scenario_state(scenario_state)
-    radar.cleanup()
+    if radar is not None:
+        radar.cleanup()
     collision.cleanup()
     camera.cleanup()
 
