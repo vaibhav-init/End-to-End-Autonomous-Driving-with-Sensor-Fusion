@@ -6,7 +6,7 @@ Vision-Only Data Collector for Target-Speed Imitation
 Mirrors collect_throttle_brake_data.py but replaces the front radar sensor
 with YOLO-based obstacle detection + monocular distance estimation.
 
-The 10 base feature columns are IDENTICAL to the radar version so the same
+Most base feature columns match the radar version so the same
 train_throttle_brake.py script can be used without modification:
 
   Kept as-is (vehicle physics / camera):
@@ -18,6 +18,9 @@ train_throttle_brake.py script can be used without modification:
     relative_velocity  ← frame-to-frame distance change (EMA smoothed)
     ttc                ← distance / relative_velocity
     obstacle_speed     ← ego_speed − relative_velocity
+
+  Added (binary signal):
+    obstacle_detected  ← 1 if distance < MAX_VISION_RANGE * 0.95
 
 Usage:
     python collect_vision_only_data.py --duration 900
@@ -47,7 +50,10 @@ from yolo_perception import (
     empty_visual_features,
     empty_obstacle_features,
 )
-from speed_model import BASE_FEATURE_COLS, flatten_history
+from speed_model import BASE_FEATURE_COLS as _BASE_FEATURE_COLS, flatten_history
+
+# Vision-only extends the base with obstacle_detected for clean signal separation
+VISION_FEATURE_COLS = _BASE_FEATURE_COLS + ["obstacle_detected"]
 from weather_utils import apply_random_fog
 
 try:
@@ -83,7 +89,7 @@ STALL_MIN_CLEAR_DISTANCE_M = 12.0
 RESPAWN_Z_OFFSET = 0.5
 
 # EMA smoothing factor for vision-derived distance (lower = smoother)
-DISTANCE_EMA_ALPHA = 0.4
+DISTANCE_EMA_ALPHA = 0.15
 
 
 # ============================================================================
@@ -449,6 +455,11 @@ def main():
     respawn_count = 0
     stuck_frames = 0
 
+    # Detection-gap holdout state
+    MAX_DETECTION_GAP_FRAMES = 8
+    no_detection_frames = 0
+    last_valid_obstacle = empty_obstacle_features()
+
     spawn_requested = threading.Event()
 
     def key_listener():
@@ -575,6 +586,19 @@ def main():
             visual = scene_features["visual"]
             obstacle = scene_features["obstacle"]
 
+            # Detection-gap holdout: hold last valid detection for N frames
+            # to avoid distance snapping to 50m on every YOLO miss.
+            if obstacle["has_detection"] and obstacle["vision_distance"] < MAX_VISION_RANGE:
+                no_detection_frames = 0
+                last_valid_obstacle = obstacle
+            else:
+                no_detection_frames += 1
+
+            if no_detection_frames < MAX_DETECTION_GAP_FRAMES:
+                obstacle = last_valid_obstacle
+            else:
+                obstacle = empty_obstacle_features()
+
             vision_tracker.update_ego_speed(speed)
             vision_state = vision_tracker.update(obstacle)
 
@@ -618,6 +642,7 @@ def main():
             )
 
             # Build feature dict — SAME column names as radar version
+            obstacle_detected = float(vision_state["distance"] < MAX_VISION_RANGE * 0.95)
             base_features = {
                 "ego_speed": round(speed, 4),
                 "ego_acceleration": round(max(-20.0, min(20.0, accel)), 4),
@@ -625,6 +650,7 @@ def main():
                 "relative_velocity": vision_state["relative_velocity"],
                 "ttc": round(ttc, 4),
                 "obstacle_speed": vision_state["obstacle_speed"],
+                "obstacle_detected": obstacle_detected,
                 "traffic_light_state": float(visual["traffic_light_state"]),
                 "tl_confidence": round(visual["tl_confidence"], 4),
                 "tl_bbox_area": round(visual["tl_bbox_area"], 6),
@@ -633,7 +659,7 @@ def main():
             feature_history.append(base_features)
 
             if len(feature_history) == args.history:
-                row = flatten_history(feature_history, BASE_FEATURE_COLS)
+                row = flatten_history(feature_history, VISION_FEATURE_COLS)
                 row.update(
                     {
                         "frame": frame,
@@ -687,8 +713,8 @@ def main():
             "fps": FPS,
             "history_frames": args.history,
             "label_horizon": args.label_horizon,
-            "base_feature_cols": BASE_FEATURE_COLS,
-            "stacked_feature_cols": stacked_feature_names(BASE_FEATURE_COLS, args.history),
+            "base_feature_cols": VISION_FEATURE_COLS,
+            "stacked_feature_cols": stacked_feature_names(VISION_FEATURE_COLS, args.history),
             "label_col": "teacher_target_speed",
             "distance_source": "yolo_vision",
         }

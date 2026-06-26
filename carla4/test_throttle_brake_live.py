@@ -20,6 +20,7 @@ import torch
 
 from yolo_perception import (
     CameraManager,
+    TL_RED,
     TL_STATE_NAMES,
     VisionDistanceTracker,
     YOLO_AVAILABLE,
@@ -51,6 +52,8 @@ DEFAULT_TOWN = "Town01"
 FPS = 20
 MAX_RADAR_RANGE = 50.0
 BOOTSTRAP_TARGET_SPEED_MPS = 12.0 / 3.6
+# Default cruising speed when no obstacle is detected (~30 km/h)
+CRUISE_SPEED_MPS = 30.0 / 3.6
 LAUNCH_HOLD_SPEED_MPS = 0.5
 LAUNCH_CLEAR_DISTANCE_M = 15.0
 LAUNCH_ASSIST_FRAMES = FPS * 5
@@ -632,6 +635,7 @@ def main():
                 ttc = 10.0
             min_distance_seen = min(min_distance_seen, dist_state["distance"])
 
+            obstacle_detected = float(dist_state["distance"] < MAX_RADAR_RANGE * 0.95)
             current_features = {
                 "ego_speed": round(speed, 4),
                 "ego_acceleration": round(max(-20.0, min(20.0, accel)), 4),
@@ -639,6 +643,7 @@ def main():
                 "relative_velocity": round(dist_state["relative_velocity"], 4),
                 "ttc": round(ttc, 4),
                 "obstacle_speed": round(dist_state["obstacle_speed"], 4),
+                "obstacle_detected": obstacle_detected,
                 "traffic_light_state": float(visual["traffic_light_state"]),
                 "tl_confidence": round(visual["tl_confidence"], 4),
                 "tl_bbox_area": round(visual["tl_bbox_area"], 6),
@@ -656,6 +661,14 @@ def main():
                 target_speed_pred = max(0.0, target_speed_pred)
             else:
                 target_speed_pred = BOOTSTRAP_TARGET_SPEED_MPS
+
+            # Key fix: no obstacle detected → just cruise at a sensible speed.
+            # The ML model is unreliable on open road because training data had
+            # mixed red-light stops and cruising, so it learns a confused average.
+            # This hybrid approach: ML handles obstacles, simple rule handles open
+            # road. Red light check prevents trying to drive through a red.
+            if obstacle_detected < 0.5 and int(visual["traffic_light_state"]) != TL_RED:
+                target_speed_pred = max(target_speed_pred, CRUISE_SPEED_MPS)
 
             if (
                 use_vision_only

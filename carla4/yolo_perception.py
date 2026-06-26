@@ -286,7 +286,7 @@ class YOLOPerception:
                 }
             )
 
-            if 0.25 <= center_x <= 0.75 and est_dist < best_distance:
+            if 0.325 <= center_x <= 0.675 and est_dist < best_distance and area > 0.002:
                 best_distance = est_dist
                 primary_idx = len(detections) - 1
 
@@ -419,7 +419,9 @@ class VisionDistanceTracker:
             release_rate_mps if release_rate_mps is not None else self.DEFAULT_RELEASE_RATE_MPS
         )
         self._smoothed = self.max_range
-        self._prev_smoothed = self.max_range
+        self._raw_prev = self.max_range
+        self._smoothed_velocity = 0.0
+        self.vel_alpha = 0.25
         self._ego_speed = 0.0
         self._missed_frames = 0
 
@@ -427,32 +429,50 @@ class VisionDistanceTracker:
         self._ego_speed = speed
 
     def update(self, obstacle_features):
-        """Update the tracked obstacle state from already-extracted perception data."""
-        self._prev_smoothed = self._smoothed
+        """Update the tracked obstacle state from already-extracted perception data.
+
+        Velocity is computed from raw (pre-smoothing) distance to reduce lag,
+        then smoothed separately with its own EMA. On missed detections, the
+        smoothed distance releases gradually and velocity decays toward zero.
+        """
         obstacle_features = obstacle_features or empty_obstacle_features()
 
         if obstacle_features.get("has_detection"):
             raw_distance = float(obstacle_features["vision_distance"])
+
+            # Velocity from raw signal (less lag than from smoothed distance)
+            raw_velocity = (self._raw_prev - raw_distance) * self.fps
+            raw_velocity = np.clip(raw_velocity, -8.0, 8.0)
+            self._raw_prev = raw_distance
+
+            # Smooth distance separately
             self._smoothed = self.alpha * raw_distance + (1.0 - self.alpha) * self._smoothed
+
+            # Smooth velocity separately with its own alpha
+            self._smoothed_velocity = (
+                self.vel_alpha * raw_velocity
+                + (1.0 - self.vel_alpha) * self._smoothed_velocity
+            )
             self._missed_frames = 0
-            relative_velocity = (self._prev_smoothed - self._smoothed) * self.fps
-            relative_velocity = max(-5.0, min(15.0, relative_velocity))
-            obstacle_speed = max(0.0, self._ego_speed - relative_velocity)
         else:
             self._missed_frames += 1
             if self._missed_frames > self.hold_missing_frames:
                 release_step = self.release_rate_mps / max(1.0, float(self.fps))
                 self._smoothed = min(self.max_range, self._smoothed + release_step)
-            relative_velocity = 0.0
-            obstacle_speed = 0.0
+                self._raw_prev = self._smoothed
+            # Decay velocity on missed frames
+            self._smoothed_velocity = self._smoothed_velocity * 0.85
+
+        obstacle_speed = max(0.0, self._ego_speed - self._smoothed_velocity)
 
         return {
             "distance": round(self._smoothed, 4),
-            "relative_velocity": round(relative_velocity, 4),
+            "relative_velocity": round(self._smoothed_velocity, 4),
             "obstacle_speed": round(obstacle_speed, 4),
         }
 
     def reset(self):
         self._smoothed = self.max_range
-        self._prev_smoothed = self.max_range
+        self._raw_prev = self.max_range
+        self._smoothed_velocity = 0.0
         self._missed_frames = 0
