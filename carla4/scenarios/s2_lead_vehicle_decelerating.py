@@ -100,7 +100,7 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 stage_approach=False, stage_gap=30.0, scenario_id=2):
+                 stage_approach=False, stage_gap=20.0, scenario_id=2):
     """Run S2: Lead Vehicle Decelerating at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -303,7 +303,7 @@ def main():
                         help="PCLA agent name (for --driver pcla)")
     parser.add_argument("--stage-approach", action="store_true",
                         help="Tailgate the NPC with a gap-keeper, hand to the model when it brakes")
-    parser.add_argument("--stage-gap", type=float, default=30.0,
+    parser.add_argument("--stage-gap", type=float, default=20.0,
                         help="Target following gap in metres during staging")
     args = parser.parse_args()
 
