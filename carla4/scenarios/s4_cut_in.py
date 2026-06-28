@@ -49,6 +49,7 @@ except ImportError:
 
 from ground_truth_logger import GroundTruthLogger, compute_vehicle_speed, distance_between
 from drivers import make_driver
+from staging import GapKeepController
 from spawn_utils import get_highway_spawns
 from config import (
     CARLA_HOST, CARLA_PORT, DEFAULT_TOWN, FPS,
@@ -67,6 +68,12 @@ def set_fog_density(world, density):
         weather.fog_distance = 100.0
         weather.fog_falloff = 0.0
     world.set_weather(weather)
+
+
+# Staging-mode overrides (used only with --stage-approach): spawn the NPC closer
+# and trigger the cut-in later so the gap-keeper can settle a tight following gap.
+STAGE_NPC_AHEAD_M = 20.0
+STAGE_CUT_IN_STEP = 120
 
 
 def spawn_npc_adjacent_lane(world, carla_map, ego, ahead_m):
@@ -148,10 +155,17 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 scenario_id=4):
+                 stage_approach=False, stage_gap=15.0, scenario_id=4):
     """Run S4: Cut-In from Adjacent Lane at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
+
+    # Staging: when enabled, spawn the NPC closer and trigger the cut-in later,
+    # hold a fixed gap behind it until the cut-in, then hand to the model.
+    npc_ahead_m = STAGE_NPC_AHEAD_M if stage_approach else S4_NPC_AHEAD_M
+    cut_in_step = STAGE_CUT_IN_STEP if stage_approach else S4_CUT_IN_TRIGGER_STEP
+    gapkeep = GapKeepController(stage_gap, dt=1.0 / FPS) if stage_approach else None
+    handover_announced = False
 
     # Get highway-only spawn points (multi-lane straight roads)
     highway_spawns = get_highway_spawns(carla_map)
@@ -191,13 +205,13 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
 
     # Spawn NPC in adjacent lane
     npc, cut_in_direction = spawn_npc_adjacent_lane(
-        world, carla_map, ego, S4_NPC_AHEAD_M)
+        world, carla_map, ego, npc_ahead_m)
     if npc is None:
         cleanup_actor(ego)
         raise RuntimeError("Failed to spawn NPC in adjacent lane (no parallel lane?)")
 
     direction_str = "right" if cut_in_direction else "left"
-    print(f"  NPC spawned in {direction_str} lane, {S4_NPC_AHEAD_M:.0f}m ahead")
+    print(f"  NPC spawned in {direction_str} lane, {npc_ahead_m:.0f}m ahead")
 
     # NPC on Traffic Manager at constant speed in adjacent lane
     tm = client.get_trafficmanager(8000)
@@ -239,13 +253,26 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     cut_in_complete = False
     cut_in_complete_step = None
 
+    if gapkeep is not None:
+        print(f"  Staging ON: hold {stage_gap:.0f}m gap, hand over at step "
+              f"{cut_in_step} (cut-in)")
     print(f"  S4 | fog={fog_density} | seed={seed} | "
-          f"NPC at {S4_NPC_SPEED_KMH} km/h in adjacent lane, cut-in at step {S4_CUT_IN_TRIGGER_STEP}")
+          f"NPC at {S4_NPC_SPEED_KMH} km/h in adjacent lane, cut-in at step {cut_in_step}")
 
     try:
         for step in range(max_steps):
-            # BasicAgent drives the ego
+            # Driver runs every tick (keeps an end-to-end model warm + supplies steer)
             control = driver.get_control(ego, world)
+            # Staging: hold a fixed gap behind the NPC until the cut-in fires,
+            # then hand longitudinal control to the model under test.
+            if gapkeep is not None and step < cut_in_step and npc and npc.is_alive:
+                gap = distance_between(ego, npc)
+                thr, brk = gapkeep.run_step(gap, compute_vehicle_speed(ego) / 3.6,
+                                            compute_vehicle_speed(npc) / 3.6)
+                control = carla.VehicleControl(throttle=thr, brake=brk, steer=control.steer)
+            elif gapkeep is not None and not handover_announced:
+                handover_announced = True
+                print(f"    🤝 Handover: model takes longitudinal control at step {step}")
             ego.apply_control(control)
 
             _tick_start = time.perf_counter()
@@ -255,7 +282,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 time.sleep(1.0 / FPS - _elapsed)
 
             # Trigger cut-in at configured step — take MANUAL control
-            if step >= S4_CUT_IN_TRIGGER_STEP and not cut_in_triggered and npc and npc.is_alive:
+            if step >= cut_in_step and not cut_in_triggered and npc and npc.is_alive:
                 npc.set_autopilot(False)
                 cut_in_triggered = True
                 print(f"    🔀 NPC cut-in triggered at step {step} "
@@ -432,6 +459,10 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
+    parser.add_argument("--stage-approach", action="store_true",
+                        help="Tailgate the NPC with a gap-keeper, hand to the model when it cuts in")
+    parser.add_argument("--stage-gap", type=float, default=15.0,
+                        help="Target following gap in metres during staging")
     args = parser.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -473,7 +504,9 @@ def main():
                 logger = run_scenario(client, world, settings, fog, seed,
                                       args.output, driver_name=args.driver,
                                       model_dir=args.model_dir,
-                                      pcla_agent=args.pcla_agent, scenario_id=4)
+                                      pcla_agent=args.pcla_agent,
+                                      stage_approach=args.stage_approach,
+                                      stage_gap=args.stage_gap, scenario_id=4)
                 results.append({
                     "fog": fog,
                     "seed": seed,
