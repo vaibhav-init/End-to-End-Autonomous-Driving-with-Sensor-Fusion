@@ -42,9 +42,9 @@ except ImportError:
 
 CARLA_HOST = "127.0.0.1"
 CARLA_PORT = 2000
-DEFAULT_TOWN = "Town01"
+DEFAULT_TOWN = "Town04"
 FPS = 20
-MAX_RADAR_RANGE = 50.0
+MAX_RADAR_RANGE = 100.0
 
 NPC_VEHICLES = 45
 NPC_PEDESTRIANS = 25
@@ -52,7 +52,16 @@ HISTORY_FRAMES = 10
 LABEL_HORIZON = 10
 SAVE_DIR = "dataset_throttle_brake"
 
-SCENARIOS = ("traffic_light", "car_following", "emergency")
+# Scenario phases the autopilot teacher is driven through; the MLP imitates it.
+#   traffic_light     - urban driving, obey lights
+#   car_following     - follow a lead at a lower constant speed (NHTSA S3)
+#   lead_decelerating - follow a lead that periodically slams its brakes (NHTSA S2)
+#   emergency         - stopped vehicle appears ahead, must brake hard (NHTSA S1)
+#   cut_in            - adjacent-lane vehicle forced into the ego's lane (NHTSA S4)
+SCENARIOS = ("traffic_light", "car_following", "lead_decelerating", "emergency", "cut_in")
+LEAD_BRAKE_PERIOD_S = 10.0    # how often the decelerating lead slams its brakes
+LEAD_BRAKE_DURATION_S = 2.5   # how long it holds the brake
+CUT_IN_PERIOD_S = 12.0        # how often a fresh cut-in is forced
 STALL_SPEED_MPS = 0.3
 STALL_FRAMES = FPS * 8
 STALL_MIN_THROTTLE = 0.2
@@ -84,7 +93,7 @@ class FrontRadar:
         bp.set_attribute("horizontal_fov", "10")
         bp.set_attribute("vertical_fov", "2")
         bp.set_attribute("range", str(range_m))
-        bp.set_attribute("points_per_second", "1500")
+        bp.set_attribute("points_per_second", "3000")
 
         transform = carla.Transform(
             carla.Location(x=2.5, z=1.0),
@@ -250,6 +259,46 @@ def spawn_lead_vehicle(world, ego, carla_map, tm, ahead_options=(22.0, 28.0, 34.
     return None
 
 
+def spawn_npc_adjacent_lane(world, ego, carla_map, tm, ahead_m=25.0):
+    """Spawn an NPC in a same-direction lane next to the ego, ahead_m ahead.
+
+    Returns (vehicle, to_right) where to_right is the force_lane_change direction
+    that moves the NPC INTO the ego's lane. Returns (None, True) on failure.
+    """
+    wp = carla_map.get_waypoint(ego.get_location(), project_to_road=True,
+                                lane_type=carla.LaneType.Driving)
+    if wp is None:
+        return None, True
+
+    right = wp.get_right_lane()
+    left = wp.get_left_lane()
+    if right and right.lane_type == carla.LaneType.Driving and right.lane_id * wp.lane_id > 0:
+        adj, to_right = right, False   # NPC on the right -> cuts left into ego's lane
+    elif left and left.lane_type == carla.LaneType.Driving and left.lane_id * wp.lane_id > 0:
+        adj, to_right = left, True     # NPC on the left -> cuts right into ego's lane
+    else:
+        return None, True
+
+    ahead = adj.next(ahead_m)
+    if not ahead:
+        return None, True
+
+    bp_lib = world.get_blueprint_library()
+    vehicle_bps = [
+        bp for bp in bp_lib.filter("vehicle.*")
+        if int(bp.get_attribute("number_of_wheels")) >= 4
+    ]
+    transform = ahead[0].transform
+    transform.location.z += 0.5
+    npc = world.try_spawn_actor(random.choice(vehicle_bps), transform)
+    if npc:
+        npc.set_autopilot(True, tm.get_port())
+        tm.auto_lane_change(npc, False)
+        set_tm_target_speed(npc, tm, 55.0)
+        return npc, to_right
+    return None, True
+
+
 def cleanup_actor(actor):
     if actor and actor.is_alive:
         try:
@@ -384,6 +433,7 @@ def main():
     print("TARGET-SPEED DATA COLLECTOR")
     print("=" * 72)
     print(f"  Town:            {args.town}")
+    print(f"  Radar range:     {MAX_RADAR_RANGE:.0f}m")
     print(f"  Duration:        {args.duration}s")
     print(f"  History frames:  {args.history}")
     print(f"  Label horizon:   {args.label_horizon}")
@@ -463,6 +513,11 @@ def main():
     emergency_count = 0
     respawn_count = 0
     stuck_frames = 0
+    lead_brake_until = 0
+    last_lead_brake_time = time.time()
+    cut_in_npc = None
+    cut_in_to_right = True
+    last_cut_in_time = time.time()
 
     spawn_requested = threading.Event()
 
@@ -496,7 +551,7 @@ def main():
                 current_weather_name = apply_random_fog(world)
                 print(f"\n  Switching scenario -> {scenario}")
                 print(f"  Fog preset -> {current_weather_name}")
-                if scenario == "car_following":
+                if scenario in ("car_following", "lead_decelerating"):
                     tm.auto_lane_change(ego, False)
                 else:
                     tm.auto_lane_change(ego, True)
@@ -506,22 +561,39 @@ def main():
                     cleanup_actor(emergency_actor)
                     emergency_actor = None
                     emergency_stopped_frames = 0
+                if scenario != "cut_in":
+                    cleanup_actor(cut_in_npc)
+                    cut_in_npc = None
 
-            if scenario == "car_following":
-                scenario_counts["car_following"] += 1
+            scenario_counts[scenario] += 1
+
+            if scenario in ("car_following", "lead_decelerating"):
                 if lead_actor is None or not lead_actor.is_alive:
                     lead_actor = spawn_lead_vehicle(world, ego, carla_map, tm)
                     lead_last_change = time.time()
+                    lead_brake_until = 0
                 elif ego.get_location().distance(lead_actor.get_location()) > 55.0:
                     cleanup_actor(lead_actor)
                     lead_actor = spawn_lead_vehicle(world, ego, carla_map, tm)
                     lead_last_change = time.time()
+                    lead_brake_until = 0
 
                 if lead_actor and time.time() - lead_last_change > 4.0:
                     set_tm_target_speed(lead_actor, tm, random.uniform(10.0, 40.0))
                     lead_last_change = time.time()
-            else:
-                scenario_counts[scenario] += 1
+
+                # S2: the decelerating lead periodically slams its brakes
+                if scenario == "lead_decelerating" and lead_actor and lead_actor.is_alive:
+                    if frame < lead_brake_until:
+                        lead_actor.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
+                        if frame == lead_brake_until - 1:
+                            lead_actor.set_autopilot(True, port)
+                            set_tm_target_speed(lead_actor, tm, random.uniform(20.0, 40.0))
+                    elif time.time() - last_lead_brake_time > LEAD_BRAKE_PERIOD_S:
+                        lead_actor.set_autopilot(False)
+                        lead_brake_until = frame + int(LEAD_BRAKE_DURATION_S * FPS)
+                        last_lead_brake_time = time.time()
+                        print("  Lead vehicle braking hard (S2)")
 
             if scenario == "emergency":
                 now = time.time()
@@ -577,6 +649,23 @@ def main():
                         emergency_stopped_frames = 0
                         tm.auto_lane_change(ego, True)
                         print("  Emergency obstacle removed")
+
+            if scenario == "cut_in":
+                if cut_in_npc is None or not cut_in_npc.is_alive:
+                    if speed > 5.0:
+                        cut_in_npc, cut_in_to_right = spawn_npc_adjacent_lane(
+                            world, ego, carla_map, tm)
+                        last_cut_in_time = time.time()
+                elif ego.get_location().distance(cut_in_npc.get_location()) > 60.0:
+                    cleanup_actor(cut_in_npc)
+                    cut_in_npc = None
+                elif time.time() - last_cut_in_time > CUT_IN_PERIOD_S:
+                    try:
+                        tm.force_lane_change(cut_in_npc, cut_in_to_right)
+                        print("  NPC forced cut-in (S4)")
+                    except RuntimeError:
+                        pass
+                    last_cut_in_time = time.time()
 
             radar.update_ego_speed(speed)
             radar_state = radar.get()
@@ -680,59 +769,72 @@ def main():
 
     except KeyboardInterrupt:
         print("\n  Collection interrupted")
+    finally:
+        # Save whatever was collected (best-effort), then ALWAYS clean the map —
+        # even on Ctrl+C or an error — so the next run starts from a clean world.
+        try:
+            if samples:
+                df = pd.DataFrame(samples)
+                df["teacher_target_speed"] = compute_future_speed_label(df, args.label_horizon)
+                df["teacher_target_speed"] = df["teacher_target_speed"].clip(lower=0.0)
+                df = df.dropna(subset=["teacher_target_speed"]).reset_index(drop=True)
+                df.to_csv(csv_path, index=False)
 
-    if samples:
-        df = pd.DataFrame(samples)
-        df["teacher_target_speed"] = compute_future_speed_label(df, args.label_horizon)
-        df["teacher_target_speed"] = df["teacher_target_speed"].clip(lower=0.0)
-        df = df.dropna(subset=["teacher_target_speed"]).reset_index(drop=True)
-        df.to_csv(csv_path, index=False)
+                config = {
+                    "town": args.town,
+                    "fps": FPS,
+                    "history_frames": args.history,
+                    "label_horizon": args.label_horizon,
+                    "base_feature_cols": BASE_FEATURE_COLS,
+                    "stacked_feature_cols": stacked_feature_names(BASE_FEATURE_COLS, args.history),
+                    "label_col": "teacher_target_speed",
+                }
+                with open(config_path, "w", encoding="utf-8") as fh:
+                    json.dump(config, fh, indent=2)
 
-        config = {
-            "town": args.town,
-            "fps": FPS,
-            "history_frames": args.history,
-            "label_horizon": args.label_horizon,
-            "base_feature_cols": BASE_FEATURE_COLS,
-            "stacked_feature_cols": stacked_feature_names(BASE_FEATURE_COLS, args.history),
-            "label_col": "teacher_target_speed",
-        }
-        with open(config_path, "w", encoding="utf-8") as fh:
-            json.dump(config, fh, indent=2)
+                print("\n" + "=" * 72)
+                print("COLLECTION COMPLETE")
+                print("=" * 72)
+                print(f"  Samples saved:      {len(df):,}")
+                print(f"  Emergency events:   {emergency_count}")
+                print(f"  Respawns:           {respawn_count}")
+                print(f"  Scenario coverage:  {scenario_counts}")
+                print(f"  Dataset:            {csv_path}")
+                print(f"  Config:             {config_path}")
+                print("=" * 72)
+        except KeyboardInterrupt:
+            print("  Save interrupted; cleaning up anyway")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  Save failed: {exc}")
 
-        print("\n" + "=" * 72)
-        print("COLLECTION COMPLETE")
-        print("=" * 72)
-        print(f"  Samples saved:      {len(df):,}")
-        print(f"  Emergency events:   {emergency_count}")
-        print(f"  Respawns:           {respawn_count}")
-        print(f"  Scenario coverage:  {scenario_counts}")
-        print(f"  Dataset:            {csv_path}")
-        print(f"  Config:             {config_path}")
-        print("=" * 72)
+        print("\n  Cleaning up the map ...")
+        cleanup_actor(lead_actor)
+        cleanup_actor(emergency_actor)
+        cleanup_actor(cut_in_npc)
+        radar.cleanup()
+        camera.cleanup()
+        if CV2_AVAILABLE:
+            cv2.destroyAllWindows()
 
-    cleanup_actor(lead_actor)
-    cleanup_actor(emergency_actor)
-    radar.cleanup()
-    camera.cleanup()
-    if CV2_AVAILABLE:
-        cv2.destroyAllWindows()
+        for controller_id in ctrl_ids:
+            actor = world.get_actor(controller_id)
+            if actor:
+                try:
+                    actor.stop()
+                except RuntimeError:
+                    pass
 
-    for controller_id in ctrl_ids:
-        actor = world.get_actor(controller_id)
-        if actor:
-            try:
-                actor.stop()
-            except RuntimeError:
-                pass
+        destroy_ids = npc_ids + ctrl_ids + walker_ids
+        if destroy_ids:
+            client.apply_batch([carla.command.DestroyActor(actor_id) for actor_id in destroy_ids])
 
-    destroy_ids = npc_ids + ctrl_ids + walker_ids
-    if destroy_ids:
-        client.apply_batch([carla.command.DestroyActor(actor_id) for actor_id in destroy_ids])
-
-    cleanup_actor(ego)
-    world.apply_settings(original_settings)
-    tm.set_synchronous_mode(False)
+        cleanup_actor(ego)
+        try:
+            world.apply_settings(original_settings)
+            tm.set_synchronous_mode(False)
+        except RuntimeError:
+            pass
+        print("  Cleanup done.")
 
 
 if __name__ == "__main__":
