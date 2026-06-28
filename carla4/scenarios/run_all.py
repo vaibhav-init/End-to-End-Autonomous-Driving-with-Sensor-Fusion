@@ -29,6 +29,7 @@ Output:
 
 import argparse
 import csv
+import os
 import subprocess
 import sys
 import time
@@ -56,13 +57,28 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--town", default="Town04")
+    parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
+                        help="Longitudinal control source for every run")
+    parser.add_argument("--model-dir", default="../model_vision_only",
+                        help="MLP model directory (for --driver mlp)")
+    parser.add_argument("--pcla-agent", default="tfv6_visiononly",
+                        help="PCLA agent name (for --driver pcla)")
+    parser.add_argument("--output-root", default=None,
+                        help="Root dir for results (default: results_<driver>)")
+    parser.add_argument("--timeout", type=int, default=300,
+                        help="Per-run subprocess timeout in seconds")
     args = parser.parse_args()
+    if args.output_root is None:
+        args.output_root = f"results_{args.driver}"
+    os.makedirs(args.output_root, exist_ok=True)
 
     total_runs = len(args.scenarios) * len(args.fog) * len(args.seeds)
     print("=" * 64)
     print("MASTER RUNNER — ALL NHTSA SCENARIOS")
     print("=" * 64)
     print(f"  Town:            {args.town}")
+    print(f"  Driver:          {args.driver}")
+    print(f"  Output root:     {args.output_root}")
     print(f"  Scenarios:       {args.scenarios}")
     print(f"  Fog levels:      {args.fog}")
     print(f"  Seeds:           {args.seeds}")
@@ -98,13 +114,16 @@ def main():
                         "--town", args.town,
                         "--fog", str(fog),
                         "--seeds", str(seed),
-                        "--output", output_dir,
+                        "--output", os.path.join(args.output_root, output_dir),
+                        "--driver", args.driver,
+                        "--model-dir", args.model_dir,
+                        "--pcla-agent", args.pcla_agent,
                     ]
                     result = subprocess.run(
                         cmd,
                         capture_output=True,
                         text=True,
-                        timeout=120,  # 2 min per run max
+                        timeout=args.timeout,
                     )
 
                     # Print live output
@@ -191,7 +210,7 @@ def main():
     print("=" * 64)
 
     # Save summary
-    summary_path = "summary_all.csv"
+    summary_path = os.path.join(args.output_root, "summary_all.csv")
     with open(summary_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=[
             "scenario", "fog", "seed", "collision", "min_distance_m", "rows"

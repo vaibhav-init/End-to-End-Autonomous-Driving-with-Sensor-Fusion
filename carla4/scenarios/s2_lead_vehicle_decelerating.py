@@ -46,6 +46,7 @@ except ImportError:
     BasicAgent = None
 
 from ground_truth_logger import GroundTruthLogger, compute_vehicle_speed, distance_between
+from drivers import make_driver
 from spawn_utils import get_highway_spawns, spawn_npc_in_ego_direction
 from config import (
     CARLA_HOST, CARLA_PORT, DEFAULT_TOWN, FPS,
@@ -96,7 +97,9 @@ def cleanup_actor(actor):
             pass
 
 
-def run_scenario(client, world, settings, fog_density, seed, output_dir, scenario_id=2):
+def run_scenario(client, world, settings, fog_density, seed, output_dir,
+                 driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
+                 scenario_id=2):
     """Run S2: Lead Vehicle Decelerating at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -127,21 +130,12 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir, scenari
     for _ in range(5):
         world.tick()
 
-    # Use BasicAgent for ego driving (no traffic lights, no stops)
-    agent = BasicAgent(ego, target_speed=60)
-    agent.ignore_traffic_lights(True)
-    agent.ignore_stop_signs(True)
-
-    # Set destination AFTER ego has settled in physics
-    settled_wp = carla_map.get_waypoint(ego.get_location(), project_to_road=True,
-                                         lane_type=carla.LaneType.Driving)
-    dest_wps = settled_wp.next(500.0)
-    if not dest_wps:
-        dest_wps = settled_wp.next(200.0)  # fallback to shorter distance
-    agent.set_destination(dest_wps[0].transform.location)
+    # Pluggable longitudinal driver; steering is delegated to BasicAgent inside it
+    driver = make_driver(driver_name, model_dir=model_dir, pcla_agent=pcla_agent)
+    driver.setup(world, ego, carla_map, client)
 
     for _ in range(20):
-        control = agent.run_step()
+        control = driver.get_control(ego, world)
         ego.apply_control(control)
         world.tick()
 
@@ -161,7 +155,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir, scenari
     tm.auto_lane_change(npc, False)
 
     for _ in range(30):
-        control = agent.run_step()
+        control = driver.get_control(ego, world)
         ego.apply_control(control)
         world.tick()
 
@@ -194,7 +188,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir, scenari
     try:
         for step in range(max_steps):
             # BasicAgent drives the ego
-            control = agent.run_step()
+            control = driver.get_control(ego, world)
             ego.apply_control(control)
 
             _tick_start = time.perf_counter()
@@ -259,7 +253,11 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir, scenari
 
     finally:
         logger.close()
-        collision_sensor.destroy()
+        driver.cleanup()
+        try:
+            collision_sensor.destroy()
+        except RuntimeError:
+            pass
         if npc and npc.is_alive:
             try:
                 npc.set_autopilot(False)
@@ -279,6 +277,12 @@ def main():
     parser.add_argument("--fog", type=int, nargs="+", default=FOG_LADDER)
     parser.add_argument("--seeds", type=int, nargs="+", default=RANDOM_SEEDS)
     parser.add_argument("--output", default="results_s2")
+    parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
+                        help="Longitudinal control source")
+    parser.add_argument("--model-dir", default="../model_vision_only",
+                        help="MLP model directory (for --driver mlp)")
+    parser.add_argument("--pcla-agent", default="tfv6_visiononly",
+                        help="PCLA agent name (for --driver pcla)")
     args = parser.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -317,7 +321,9 @@ def main():
             random.seed(seed)
             try:
                 logger = run_scenario(client, world, settings, fog, seed,
-                                      args.output, scenario_id=2)
+                                      args.output, driver_name=args.driver,
+                                      model_dir=args.model_dir,
+                                      pcla_agent=args.pcla_agent, scenario_id=2)
                 results.append({
                     "fog": fog,
                     "seed": seed,
