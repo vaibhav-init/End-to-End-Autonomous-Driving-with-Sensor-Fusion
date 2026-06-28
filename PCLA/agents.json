@@ -1,0 +1,172 @@
+{
+    "plant2":{
+        "plant2": {
+            "agent": "pcla_agents/plant2/PlanT_agent.py",
+            "config": "pcla_agents/plant2_pretrained/epoch=029_final_.ckpt"
+        }
+    },
+    "tfv5":{
+        "alltowns": {
+            "agent": "pcla_agents/transfuserv5/sensor_agent.py",
+            "config": "pcla_agents/transfuserv5_pretrained/all_towns"
+        },
+        "notown13": {
+            "agent": "pcla_agents/transfuserv5/sensor_agent.py",
+            "config": "pcla_agents/transfuserv5_pretrained/town13_withheld"
+        }
+    },
+    "tfv6":{
+        "regnet": {
+            "agent": "pcla_agents/transfuserv6/lead/inference/sensor_agent.py",
+            "config": "pcla_agents/transfuserv6_pretrained/tfv6_regnety032"
+        },
+        "resnet": {
+            "agent": "pcla_agents/transfuserv6/lead/inference/sensor_agent.py",
+            "config": "pcla_agents/transfuserv6_pretrained/tfv6_resnet34"
+        },
+        "4cameras": {
+            "agent": "pcla_agents/transfuserv6/lead/inference/sensor_agent.py",
+            "config": "pcla_agents/transfuserv6_pretrained/4cameras_resnet34"
+        },
+        "noradar": {
+            "agent": "pcla_agents/transfuserv6/lead/inference/sensor_agent.py",
+            "config": "pcla_agents/transfuserv6_pretrained/noradar_resnet34"
+        },
+        "visiononly": {
+            "agent": "pcla_agents/transfuserv6/lead/inference/sensor_agent.py",
+            "config": "pcla_agents/transfuserv6_pretrained/visiononly_resnet34"
+        },
+        "notown13": {
+            "agent": "pcla_agents/transfuserv6/lead/inference/sensor_agent.py",
+            "config": "pcla_agents/transfuserv6_pretrained/town13heldout_resnet34"
+        }
+    },
+    "carl":{
+        "carl": {
+            "agent": "pcla_agents/carl/eval_agent.py",
+            "config": "pcla_agents/carl_pretrained/CaRL_PY_0_"
+        },
+        "carlv11": {
+            "agent": "pcla_agents/carl/eval_agent.py",
+            "config": "pcla_agents/carl_pretrained/CaRL_v1_1_PY_01"
+        },
+        "roach": {
+            "agent": "pcla_agents/carl/eval_agent.py",
+            "config": "pcla_agents/carl_pretrained/Roach_0_"
+        },
+        "plant": {
+            "agent": "pcla_agents/plant/PlanT_agent.py",
+            "config": "pcla_agents/plant/config/eval.yaml"
+        }
+    },
+    "tfv3":{
+        "tf": {
+            "agent": "pcla_agents/transfuserv3/submission_agent.py",
+            "config": "pcla_agents/transfuserv3_pretrained/transfuser"
+        },
+        "ltf": {
+            "agent": "pcla_agents/transfuserv3/submission_agent.py",
+            "config": "pcla_agents/transfuserv3_pretrained/latentTF"
+        },
+        "lf": {
+            "agent": "pcla_agents/transfuserv3/submission_agent.py",
+            "config": "pcla_agents/transfuserv3_pretrained/late_fusion"
+        },
+        "gf": {
+            "agent": "pcla_agents/transfuserv3/submission_agent.py",
+            "config": "pcla_agents/transfuserv3_pretrained/geometric_fusion"
+        }
+    },
+    "lav":{
+        "lav": {
+            "agent": "pcla_agents/lav/lav/lav_agent.py",
+            "config": "pcla_agents/lav/lav/config.yaml"
+        },
+        "fast": {
+            "agent": "pcla_agents/lav/fast/lav_agent_fast.py",
+            "config": "pcla_agents/lav/fast/config.yaml"
+        }
+    },
+    "lbc":{
+        "lb": {
+            "agent": "pcla_agents/wor/lbc_agent.py",
+            "config": "pcla_agents/wor_pretrained/leaderboard_weights/config_leaderboard.yaml"
+        },
+        "nc": {
+            "agent": "pcla_agents/wor/lbc_agent.py",
+            "config": "pcla_agents/wor_pretrained/nocrash_weights/config_nocrash.yaml"
+        }
+    },
+    "wor":{
+        "lb": {
+            "agent": "pcla_agents/wor/image_agent.py",
+            "config": "pcla_agents/wor_pretrained/leaderboard_weights/config_leaderboard.yaml"
+        },
+        "nc": {
+            "agent": "pcla_agents/wor/image_agent.py",
+            "config": "pcla_agents/wor_pretrained/nocrash_weights/config_nocrash.yaml"
+        }
+    },
+    "lmdrive":{
+        "llava": {
+            "agent": "pcla_agents/lmdrive/lmdriver_agent.py",
+            "config": "pcla_agents/lmdrive/lmdriver_config_llava.py"
+        },
+        "vicuna": {
+            "agent": "pcla_agents/lmdrive/lmdriver_agent.py",
+            "config": "pcla_agents/lmdrive/lmdriver_config_vicuna.py"
+        },
+        "llama": {
+            "agent": "pcla_agents/lmdrive/lmdriver_agent.py",
+            "config": "pcla_agents/lmdrive/lmdriver_config_llama.py"
+        }
+    },
+    "simlingo":{
+        "simlingo": {
+            "agent": "pcla_agents/simlingo/agent_simlingo.py",
+            "config": "pcla_agents/simlingo_pretrained/checkpoints/epoch=013.ckpt/pytorch_model.pt"
+        }
+    },
+    "tfv4":{
+        "lav": {
+            "agent": "pcla_agents/transfuserv4/sensor_agent.py",
+            "config": "pcla_agents/transfuserv4_pretrained/lav/tfpp_02_05_withheld_"
+        },
+        "aim": {
+            "agent": "pcla_agents/transfuserv4/sensor_agent.py",
+            "config": "pcla_agents/transfuserv4_pretrained/lav/aim_02_05_withheld_"
+        },
+        "wp": {
+            "agent": "pcla_agents/transfuserv4/sensor_agent.py",
+            "config": "pcla_agents/transfuserv4_pretrained/leaderboard/tfpp_wp_all_"
+        },
+        "l6": {
+            "agent": "pcla_agents/transfuserv4/sensor_agent.py",
+            "config": "pcla_agents/transfuserv4_pretrained/longest6/tfpp_all_"
+        }
+    },
+    "neat": {
+        "neat": {
+            "agent": "pcla_agents/neat/neat_agent.py",
+            "config": "pcla_agents/neat_pretrained/neat"
+        },
+        "aimbev": {
+            "agent": "pcla_agents/neat/aim_mt_bev_agent.py",
+            "config": "pcla_agents/neat_pretrained/aim_mt_bev"
+        },
+        "aim2dsem": {
+            "agent": "pcla_agents/neat/aim_mt_2d_agent.py",
+            "config": "pcla_agents/neat_pretrained/aim_mt_sem"
+        },
+        "aim2ddepth": {
+            "agent": "pcla_agents/neat/aim_mt_2d_agent.py",
+            "config": "pcla_agents/neat_pretrained/aim_mt_sem_depth"
+        }
+    },
+    "if":{
+        "if":{
+            "agent": "pcla_agents/interfuser/interfuser_agent.py",
+            "config": "pcla_agents/interfuser/interfuser_config.py"
+        }
+    }
+}

@@ -1,0 +1,13 @@
+__pycache__/
+plant_viz/
+pcla_agents/*pretrained*/
+wandb/
+pretrained/
+eval/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+pcla_agents/pretrained.zip
+.vscode
