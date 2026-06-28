@@ -47,7 +47,8 @@ from speed_model import TargetSpeedMLP, flatten_history  # noqa: E402
 
 # Same constants as the live deployment (test_throttle_brake_live.py)
 FPS = 20
-MAX_RANGE = 50.0
+MAX_RANGE = 50.0          # vision (YOLO monocular) max range
+RADAR_RANGE = 100.0       # radar max range (matches collect_throttle_brake_data.py)
 BOOTSTRAP_TARGET_SPEED_MPS = 12.0 / 3.6
 CRUISE_SPEED_MPS = 30.0 / 3.6
 LAUNCH_HOLD_SPEED_MPS = 0.5
@@ -100,6 +101,49 @@ class HybridStateMachineController:
         return throttle, brake
 
 
+class FrontRadar:
+    """Narrow forward radar; mirrors VisionDistanceTracker.get() so they swap."""
+
+    def __init__(self, vehicle, world, range_m=RADAR_RANGE):
+        self.latest = {"distance": range_m, "relative_velocity": 0.0, "obstacle_speed": 0.0}
+        self._ego_speed = 0.0
+        self._range = range_m
+        bp = world.get_blueprint_library().find("sensor.other.radar")
+        bp.set_attribute("horizontal_fov", "10")
+        bp.set_attribute("vertical_fov", "2")
+        bp.set_attribute("range", str(range_m))
+        bp.set_attribute("points_per_second", "3000")
+        transform = carla.Transform(carla.Location(x=2.5, z=1.0), carla.Rotation(pitch=2.0))
+        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
+        self.sensor.listen(self._on_radar)
+
+    def _on_radar(self, data):
+        nearest_dist = self._range
+        nearest_vel = 0.0
+        for det in data:
+            if abs(det.azimuth) > 0.3 or det.depth < 1.0 or det.altitude < -0.02:
+                continue
+            if det.depth < nearest_dist:
+                nearest_dist = det.depth
+                nearest_vel = det.velocity
+        rel_vel = -nearest_vel
+        self.latest = {
+            "distance": nearest_dist,
+            "relative_velocity": rel_vel,
+            "obstacle_speed": max(0.0, self._ego_speed - rel_vel),
+        }
+
+    def update_ego_speed(self, speed):
+        self._ego_speed = speed
+
+    def get(self):
+        return self.latest.copy()
+
+    def cleanup(self):
+        if self.sensor and self.sensor.is_alive:
+            self.sensor.destroy()
+
+
 class MLPDriver(Driver):
     name = "mlp"
 
@@ -116,6 +160,9 @@ class MLPDriver(Driver):
         self.camera = None
         self.yolo = None
         self.vision_tracker = None
+        self.radar = None
+        self.use_radar = False
+        self.max_range = MAX_RANGE
         self.steering = None
         self.controller = None
         self.feature_history = None
@@ -123,12 +170,6 @@ class MLPDriver(Driver):
         self._prev_speed = 0.0
 
     def setup(self, world, ego, carla_map, client):
-        if not YOLO_AVAILABLE:
-            raise RuntimeError(
-                "MLP driver requires YOLO (ultralytics). Install it in the "
-                "carla4 conda env on the remote machine."
-            )
-
         model_path = os.path.join(self.model_dir, "target_speed_mlp.pt")
         scaler_path = os.path.join(self.model_dir, "scaler.pkl")
         config_path = os.path.join(self.model_dir, "model_config.json")
@@ -150,9 +191,29 @@ class MLPDriver(Driver):
         )
         self.model.eval()
 
+        # Distance source is chosen from the model's feature schema: the radar
+        # model (model_throttle_brake) has 10 base cols; the vision model adds
+        # 'obstacle_detected'. Radar models need radar at inference, not YOLO depth.
+        self.use_radar = "obstacle_detected" not in self.base_feature_cols
+        self.max_range = RADAR_RANGE if self.use_radar else MAX_RANGE
+
+        # Camera + YOLO give traffic-light features in both modes (and obstacle
+        # detection in vision mode). YOLO is required for vision, optional for radar.
         self.camera = CameraManager(ego, world)
-        self.yolo = YOLOPerception()
-        self.vision_tracker = VisionDistanceTracker(fps=self.fps, max_range=MAX_RANGE)
+        self.yolo = YOLOPerception() if YOLO_AVAILABLE else None
+        if self.use_radar:
+            self.radar = FrontRadar(ego, world, self.max_range)
+            self.vision_tracker = None
+            if self.yolo is None:
+                print("  [mlp] YOLO unavailable; traffic-light features zeroed")
+        else:
+            if self.yolo is None:
+                raise RuntimeError(
+                    "Vision MLP driver requires YOLO (ultralytics) in the carla4 env."
+                )
+            self.radar = None
+            self.vision_tracker = VisionDistanceTracker(fps=self.fps, max_range=self.max_range)
+
         self.steering = BasicAgentSteering(ego, carla_map)
         self.controller = HybridStateMachineController(
             PIDSpeedController(dt=1.0 / self.fps))
@@ -162,6 +223,8 @@ class MLPDriver(Driver):
 
         print("  [mlp] driver ready")
         print(f"  [mlp]   model:          {model_path}")
+        print(f"  [mlp]   sensor:         {'radar' if self.use_radar else 'vision (YOLO)'} "
+              f"(max {self.max_range:.0f}m)")
         print(f"  [mlp]   device:         {self.device}")
         print(f"  [mlp]   history_frames: {self.history_frames}")
         print(f"  [mlp]   feature_count:  {len(self.feature_cols)} "
@@ -173,22 +236,27 @@ class MLPDriver(Driver):
         accel = (speed - self._prev_speed) * self.fps if self._frame > 0 else 0.0
         self._prev_speed = speed
 
-        self.vision_tracker.update_ego_speed(speed)
         cam_frame = self.camera.get_frame()
         visual = empty_visual_features()
         obstacle = empty_obstacle_features()
-        if cam_frame is not None:
+        if self.yolo is not None and cam_frame is not None:
             scene_features = self.yolo.extract_scene_features(cam_frame)
             visual = scene_features["visual"]
             obstacle = scene_features["obstacle"]
-        dist_state = self.vision_tracker.update(obstacle)
+
+        if self.use_radar:
+            self.radar.update_ego_speed(speed)
+            dist_state = self.radar.get()
+        else:
+            self.vision_tracker.update_ego_speed(speed)
+            dist_state = self.vision_tracker.update(obstacle)
 
         if dist_state["relative_velocity"] > 0.1:
             ttc = min(dist_state["distance"] / dist_state["relative_velocity"], 10.0)
         else:
             ttc = 10.0
 
-        obstacle_detected = float(dist_state["distance"] < MAX_RANGE * 0.95)
+        obstacle_detected = float(dist_state["distance"] < self.max_range * 0.95)
         current_features = {
             "ego_speed": round(speed, 4),
             "ego_acceleration": round(max(-20.0, min(20.0, accel)), 4),
@@ -244,3 +312,6 @@ class MLPDriver(Driver):
         if self.camera is not None:
             self.camera.cleanup()
             self.camera = None
+        if self.radar is not None:
+            self.radar.cleanup()
+            self.radar = None
