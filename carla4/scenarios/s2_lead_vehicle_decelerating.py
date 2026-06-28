@@ -47,6 +47,7 @@ except ImportError:
 
 from ground_truth_logger import GroundTruthLogger, compute_vehicle_speed, distance_between
 from drivers import make_driver
+from staging import GapKeepController
 from spawn_utils import get_highway_spawns, spawn_npc_in_ego_direction
 from config import (
     CARLA_HOST, CARLA_PORT, DEFAULT_TOWN, FPS,
@@ -99,7 +100,7 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 scenario_id=2):
+                 stage_approach=False, stage_gap=30.0, scenario_id=2):
     """Run S2: Lead Vehicle Decelerating at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -181,14 +182,31 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     logger = GroundTruthLogger(output_dir, scenario_id, fog_density, seed)
     max_steps = SCENARIO_DURATION_S[scenario_id] * FPS
     npc_braked = False
+    # Optional staging: a gap-keep controller tailgates the NPC until it brakes,
+    # then control is handed to the driver/model for the deceleration response.
+    gapkeep = GapKeepController(stage_gap, dt=1.0 / FPS) if stage_approach else None
+    handover_announced = False
+    if gapkeep is not None:
+        print(f"  Staging ON: hold {stage_gap:.0f}m gap, hand over at step "
+              f"{S2_BRAKE_TRIGGER_STEP} (NPC brake)")
 
     print(f"  S2 | fog={fog_density} | seed={seed} | "
           f"NPC at {S2_NPC_SPEED_KMH} km/h, {S2_NPC_INITIAL_GAP}m ahead")
 
     try:
         for step in range(max_steps):
-            # BasicAgent drives the ego
+            # Driver runs every tick (keeps an end-to-end model warm + supplies steer)
             control = driver.get_control(ego, world)
+            # Staging: hold a fixed gap behind the NPC until it begins decelerating,
+            # then hand longitudinal control to the model under test.
+            if gapkeep is not None and step < S2_BRAKE_TRIGGER_STEP and npc and npc.is_alive:
+                gap = distance_between(ego, npc)
+                thr, brk = gapkeep.run_step(gap, compute_vehicle_speed(ego) / 3.6,
+                                            compute_vehicle_speed(npc) / 3.6)
+                control = carla.VehicleControl(throttle=thr, brake=brk, steer=control.steer)
+            elif gapkeep is not None and not handover_announced:
+                handover_announced = True
+                print(f"    🤝 Handover: model takes longitudinal control at step {step}")
             ego.apply_control(control)
 
             _tick_start = time.perf_counter()
@@ -283,6 +301,10 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
+    parser.add_argument("--stage-approach", action="store_true",
+                        help="Tailgate the NPC with a gap-keeper, hand to the model when it brakes")
+    parser.add_argument("--stage-gap", type=float, default=30.0,
+                        help="Target following gap in metres during staging")
     args = parser.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -323,7 +345,9 @@ def main():
                 logger = run_scenario(client, world, settings, fog, seed,
                                       args.output, driver_name=args.driver,
                                       model_dir=args.model_dir,
-                                      pcla_agent=args.pcla_agent, scenario_id=2)
+                                      pcla_agent=args.pcla_agent,
+                                      stage_approach=args.stage_approach,
+                                      stage_gap=args.stage_gap, scenario_id=2)
                 results.append({
                     "fog": fog,
                     "seed": seed,
