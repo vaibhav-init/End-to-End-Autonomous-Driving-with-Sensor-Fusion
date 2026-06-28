@@ -155,7 +155,8 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 stage_approach=False, stage_gap=15.0, scenario_id=4):
+                 stage_approach=False, stage_gap=15.0, cutin_stop=False,
+                 scenario_id=4):
     """Run S4: Cut-In from Adjacent Lane at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -256,6 +257,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     if gapkeep is not None:
         print(f"  Staging ON: hold {stage_gap:.0f}m gap, hand over at step "
               f"{cut_in_step} (cut-in)")
+    if cutin_stop:
+        print("  Cut-in mode: NPC brakes to a full stop after cutting in")
     print(f"  S4 | fog={fog_density} | seed={seed} | "
           f"NPC at {S4_NPC_SPEED_KMH} km/h in adjacent lane, cut-in at step {cut_in_step}")
 
@@ -345,7 +348,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                         print(f"    ✅ Cut-in complete at step {step} "
                               f"— NPC now in ego's lane, dist={dist_at_cutin:.1f}m")
 
-            # After cut-in is complete, NPC drives straight at constant speed
+            # After cut-in is complete: NPC holds speed, or brakes to a stop (cutin_stop)
             if cut_in_complete and npc and npc.is_alive:
                 npc_wp = carla_map.get_waypoint(npc.get_location(), project_to_road=True,
                                                  lane_type=carla.LaneType.Driving)
@@ -366,16 +369,24 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                         steer_npc = max(-0.3, min(0.3, yaw_err / math.radians(45)))
 
                         npc_speed_now = compute_vehicle_speed(npc) / 3.6
-                        target_speed_mps = S4_NPC_SPEED_KMH / 3.6 * 0.8  # slow down a bit after cut-in
-                        if npc_speed_now < target_speed_mps - 0.5:
-                            throttle_npc = 0.5
-                        elif npc_speed_now < target_speed_mps:
-                            throttle_npc = 0.2
-                        else:
+                        if cutin_stop:
+                            # Brake to a stop and hold — the severe cut-in variant.
+                            # Moderate brake (not instant) so a fast controller can
+                            # just avoid it while a slow one rear-ends it.
                             throttle_npc = 0.0
+                            brake_npc = 0.7 if npc_speed_now > 0.2 else 1.0
+                        else:
+                            target_speed_mps = S4_NPC_SPEED_KMH / 3.6 * 0.8  # slow a bit after cut-in
+                            brake_npc = 0.0
+                            if npc_speed_now < target_speed_mps - 0.5:
+                                throttle_npc = 0.5
+                            elif npc_speed_now < target_speed_mps:
+                                throttle_npc = 0.2
+                            else:
+                                throttle_npc = 0.0
 
                         npc.apply_control(carla.VehicleControl(
-                            throttle=throttle_npc, steer=steer_npc, brake=0.0))
+                            throttle=throttle_npc, steer=steer_npc, brake=brake_npc))
 
             # Measurements
             applied_control = ego.get_control() if ego.is_alive else None
@@ -463,6 +474,8 @@ def main():
                         help="Tailgate the NPC with a gap-keeper, hand to the model when it cuts in")
     parser.add_argument("--stage-gap", type=float, default=15.0,
                         help="Target following gap in metres during staging")
+    parser.add_argument("--cutin-stop", action="store_true",
+                        help="NPC brakes to a full stop after cutting in (severe variant)")
     args = parser.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -506,7 +519,8 @@ def main():
                                       model_dir=args.model_dir,
                                       pcla_agent=args.pcla_agent,
                                       stage_approach=args.stage_approach,
-                                      stage_gap=args.stage_gap, scenario_id=4)
+                                      stage_gap=args.stage_gap,
+                                      cutin_stop=args.cutin_stop, scenario_id=4)
                 results.append({
                     "fog": fog,
                     "seed": seed,
