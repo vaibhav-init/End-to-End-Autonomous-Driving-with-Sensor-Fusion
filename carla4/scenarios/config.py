@@ -15,6 +15,7 @@ FPS = 20
 # Scenario geometry
 # ============================================================================
 S1_OBSTACLE_DISTANCE = 35.0       # metres ahead to place stopped vehicle (S1)
+S1_SPAWN_SPEED_KMH = 60.0         # spawn S1 obstacle only once ego exceeds this speed
 S2_NPC_INITIAL_GAP = 25.0         # initial gap between ego and NPC (S2)
 S2_NPC_SPEED_KMH = 60.0           # NPC cruising speed (S2)
 S2_BRAKE_TRIGGER_STEP = 300       # step at which NPC slams brakes (S2)

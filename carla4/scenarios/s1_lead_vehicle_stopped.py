@@ -52,7 +52,7 @@ from drivers import make_driver
 from spawn_utils import get_highway_spawns, spawn_obstacle_in_ego_direction
 from config import (
     CARLA_HOST, CARLA_PORT, DEFAULT_TOWN, FPS,
-    S1_OBSTACLE_DISTANCE, FOG_LADDER, RANDOM_SEEDS,
+    S1_OBSTACLE_DISTANCE, S1_SPAWN_SPEED_KMH, FOG_LADDER, RANDOM_SEEDS,
     SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
     BACKGROUND_VEHICLES, BACKGROUND_PEDESTRIANS,
 )
@@ -176,7 +176,6 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
           f"spawned at ({ego.get_location().x:.0f}, {ego.get_location().y:.0f})")
 
     prev_speed = 0.0
-    obstacle_spawn_step = 5 * FPS  # spawn after 5 seconds
 
     try:
         for step in range(max_steps):
@@ -191,15 +190,15 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
             if _elapsed < 1.0 / FPS:
                 time.sleep(1.0 / FPS - _elapsed)
 
-            # Spawn obstacle after N ticks
-            if not obstacle_spawned and step >= obstacle_spawn_step:
+            # Spawn obstacle only once the ego exceeds the speed threshold
+            if not obstacle_spawned and compute_vehicle_speed(ego) >= S1_SPAWN_SPEED_KMH:
                 obstacle = spawn_obstacle_in_ego_direction(
                     world, carla_map, ego, S1_OBSTACLE_DISTANCE)
                 if obstacle:
                     obstacle_spawned = True
                     obs_dist = ego.get_location().distance(obstacle.get_location())
-                    print(f"    🚧 Obstacle spawned {obs_dist:.0f}m ahead " +
-                          f"at step {step}")
+                    print(f"    🚧 Obstacle spawned {obs_dist:.0f}m ahead "
+                          f"at {compute_vehicle_speed(ego):.0f} km/h (step {step})")
 
             # Measure
             control = ego.get_control() if ego.is_alive else None
