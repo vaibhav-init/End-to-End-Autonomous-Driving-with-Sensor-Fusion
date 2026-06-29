@@ -7,10 +7,10 @@ NHTSA Reference: Scenario #25 — Lead Vehicle Stopped (highest frequency crash,
 
 Setup:
   - Straight road, Town04 highway
-  - Ego on Traffic Manager autopilot (drives naturally)
-  - Static NPC vehicle placed 35m ahead, hand brake on
-  - Ego starts at 0 km/h, accelerates naturally
-  - Fog density: configurable (0, 40, 70, 100)
+  - Staging: SpeedController pushes ego to 60 km/h regardless of model
+  - Obstacle spawns ahead once ego reaches target speed
+  - Model takes longitudinal control → must detect obstacle and brake
+  - Fog density: configurable (0, 50, 100, 150)
 
 Measures:
   - Collision rate (primary safety metric)
@@ -19,8 +19,8 @@ Measures:
   - Steps from obstacle detection to full stop (if no collision)
 
 Expected finding:
-  - Ego (autopilot) stops safely at all fog densities
-  - This becomes the baseline that MLP models must match/exceed
+  - Both MLP and PCLA start at identical speeds (fair comparison)
+  - Fog degrades detection → affects braking distance
 """
 
 import argparse
@@ -50,50 +50,38 @@ except ImportError:
 from ground_truth_logger import GroundTruthLogger, compute_vehicle_speed, distance_between
 from drivers import make_driver
 from spawn_utils import get_highway_spawns, spawn_obstacle_in_ego_direction
+from staging import SpeedController
 from config import (
     CARLA_HOST, CARLA_PORT, DEFAULT_TOWN, FPS,
-    S1_OBSTACLE_DISTANCE, S1_SPAWN_SPEED_KMH, FOG_LADDER, RANDOM_SEEDS,
+    S1_OBSTACLE_DISTANCE, FOG_LADDER, RANDOM_SEEDS,
     SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
     BACKGROUND_VEHICLES, BACKGROUND_PEDESTRIANS,
 )
+
+# ---------------------------------------------------------------------------
+# Staging constants
+# ---------------------------------------------------------------------------
+STAGE_TARGET_SPEED_KMH = 60.0   # ego must reach this before obstacle spawns
+STAGE_MIN_STEPS = 60             # minimum staging steps (let model warm up)
+TL_CLEARANCE_M = 100.0           # min distance from traffic lights
+
+
 def set_fog_density(world, density):
     """Set a specific fog density on the current weather."""
     weather = world.get_weather()
     weather.fog_density = density
     if density > 0:
-        weather.fog_distance = max(5.0, 50.0 - density * 0.4)
-        weather.fog_falloff = min(3.0, 0.5 + density * 0.025)
+        # fog_distance: how far from camera fog starts (lower = thicker)
+        weather.fog_distance = max(0.0, 50.0 - density * 0.5)
+        # fog_falloff: ~2.0 gives uniform thick fog at all heights
+        weather.fog_falloff = min(2.0, 0.2 + density * 0.018)
+        # Wetness adds road glare and visual degradation on top of fog
+        weather.wetness = min(100.0, density * 0.8)
     else:
         weather.fog_distance = 100.0
         weather.fog_falloff = 0.0
+        weather.wetness = 0.0
     world.set_weather(weather)
-
-
-def spawn_stopped_obstacle(world, carla_map, ego_location, ahead_m):
-    """Spawn a stopped vehicle ahead of ego on the same lane."""
-    wp = carla_map.get_waypoint(ego_location, project_to_road=True)
-    if wp is None:
-        return None
-    travelled = 0.0
-    step = 3.0
-    while travelled < ahead_m:
-        next_wps = wp.next(step)
-        if not next_wps:
-            return None
-        wp = next_wps[0]
-        travelled += step
-
-    bp_lib = world.get_blueprint_library()
-    vehicle_bps = [b for b in bp_lib.filter("vehicle.*")
-                   if int(b.get_attribute("number_of_wheels")) >= 4]
-    bp = random.choice(vehicle_bps)
-    transform = wp.transform
-    transform.location.z += 0.5
-    vehicle = world.try_spawn_actor(bp, transform)
-    if vehicle:
-        vehicle.apply_control(carla.VehicleControl(brake=1.0, hand_brake=True))
-        vehicle.set_target_velocity(carla.Vector3D(0.0, 0.0, 0.0))
-    return vehicle
 
 
 def cleanup_actor(actor):
@@ -111,11 +99,34 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     carla_map = world.get_map()
     rng = random.Random(seed)
 
+    # SpeedController for staging — drives ego to target speed
+    speed_ctrl = SpeedController(
+        target_speed_mps=STAGE_TARGET_SPEED_KMH / 3.6, dt=1.0 / FPS)
+
     # Get highway-only spawn points (multi-lane straight roads)
     highway_spawns = get_highway_spawns(carla_map)
+
+    # Filter out spawns near traffic lights
+    traffic_lights = world.get_actors().filter("traffic.traffic_light")
+    tl_locations = [tl.get_location() for tl in traffic_lights]
+    if tl_locations:
+        clean_spawns = []
+        for sp_tf in highway_spawns:
+            sp_loc = sp_tf.location
+            too_close = any(
+                sp_loc.distance(tl_loc) < TL_CLEARANCE_M
+                for tl_loc in tl_locations
+            )
+            if not too_close:
+                clean_spawns.append(sp_tf)
+        print(f"  Found {len(highway_spawns)} highway spawns, "
+              f"{len(clean_spawns)} away from traffic lights")
+        highway_spawns = clean_spawns
+    else:
+        print(f"  Found {len(highway_spawns)} highway spawn points")
+
     if not highway_spawns:
-        raise RuntimeError("No highway spawn points found in this map")
-    print(f"  Found {len(highway_spawns)} highway spawn points")
+        raise RuntimeError("No highway spawn points found away from traffic lights")
 
     # Set fog
     set_fog_density(world, fog_density)
@@ -141,8 +152,12 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     driver = make_driver(driver_name, model_dir=model_dir, pcla_agent=pcla_agent)
     driver.setup(world, ego, carla_map, client)
 
-    for _ in range(30):
+    # Warm up with speed controller (staging)
+    for _ in range(60):
         control = driver.get_control(ego, world)
+        ego_spd = compute_vehicle_speed(ego) / 3.6  # m/s
+        thr, brk = speed_ctrl.run_step(ego_spd)
+        control = carla.VehicleControl(throttle=thr, brake=brk, steer=control.steer)
         ego.apply_control(control)
         world.tick()
 
@@ -167,9 +182,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     # Logger
     logger = GroundTruthLogger(output_dir, scenario_id, fog_density, seed)
 
-    # Phase 1: Drive for a bit, then spawn obstacle (after ~5s)
     obstacle = None
     obstacle_spawned = False
+    handover_done = False
     max_steps = SCENARIO_DURATION_S[scenario_id] * FPS
 
     print(f"  S1 | fog={fog_density} | seed={seed} | "
@@ -179,8 +194,37 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
 
     try:
         for step in range(max_steps):
-            # Driver produces longitudinal control; steer from BasicAgent helper
+            # Driver runs every tick (keeps model warm + supplies steer)
             control = driver.get_control(ego, world)
+
+            # ── Staging: speed controller holds ego at target speed ──
+            # Until the obstacle spawns, the speed controller overrides
+            # the model's longitudinal output to ensure both MLP and PCLA
+            # start the critical phase at identical speeds.
+            ego_spd_kmh = compute_vehicle_speed(ego)
+
+            if not obstacle_spawned:
+                # Still staging — force speed
+                ego_spd_mps = ego_spd_kmh / 3.6
+                thr, brk = speed_ctrl.run_step(ego_spd_mps)
+                control = carla.VehicleControl(
+                    throttle=thr, brake=brk, steer=control.steer)
+
+                # Spawn obstacle once at target speed AND past minimum steps
+                if (step >= STAGE_MIN_STEPS
+                        and ego_spd_kmh >= STAGE_TARGET_SPEED_KMH * 0.9):
+                    obstacle = spawn_obstacle_in_ego_direction(
+                        world, carla_map, ego, S1_OBSTACLE_DISTANCE)
+                    if obstacle:
+                        obstacle_spawned = True
+                        obs_dist = ego.get_location().distance(
+                            obstacle.get_location())
+                        print(f"    🚧 Obstacle spawned {obs_dist:.0f}m ahead "
+                              f"at {ego_spd_kmh:.0f} km/h (step {step})")
+                        print(f"    🤝 Handover: model takes longitudinal "
+                              f"control at {ego_spd_kmh:.1f} km/h")
+            # else: model has full control (staging done)
+
             ego.apply_control(control)
 
             _tick_start = time.perf_counter()
@@ -189,16 +233,6 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
             _elapsed = time.perf_counter() - _tick_start
             if _elapsed < 1.0 / FPS:
                 time.sleep(1.0 / FPS - _elapsed)
-
-            # Spawn obstacle only once the ego exceeds the speed threshold
-            if not obstacle_spawned and compute_vehicle_speed(ego) >= S1_SPAWN_SPEED_KMH:
-                obstacle = spawn_obstacle_in_ego_direction(
-                    world, carla_map, ego, S1_OBSTACLE_DISTANCE)
-                if obstacle:
-                    obstacle_spawned = True
-                    obs_dist = ego.get_location().distance(obstacle.get_location())
-                    print(f"    🚧 Obstacle spawned {obs_dist:.0f}m ahead "
-                          f"at {compute_vehicle_speed(ego):.0f} km/h (step {step})")
 
             # Measure
             control = ego.get_control() if ego.is_alive else None
@@ -234,7 +268,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
 
             # Stop early if collision
             if collision_occurred[0]:
-                print(f"    💥 COLLISION at step {step} (speed={ego_speed:.1f} km/h)")
+                print(f"    💥 COLLISION at step {step} "
+                      f"(speed={ego_speed:.1f} km/h)")
                 break
 
             # Stop early if ego stopped near obstacle
@@ -242,18 +277,26 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 if dist is not None and dist < 0.5:
                     break
                 if ego_speed < 0.1 and dist is not None and dist < 5.0:
+                    print(f"    ✅ Stopped safely at step {step} "
+                          f"(dist={dist:.1f}m)")
                     break
 
             # Log progress
-            if step % (FPS * 2) == 0 and obstacle_spawned:
-                dist_str = f"{dist:.1f}m" if dist else "N/A"
-                print(f"    step={step:4d}  spd={ego_speed:5.1f}km/h  dist={dist_str}")
+            if step % (FPS * 2) == 0:
+                if obstacle_spawned:
+                    dist_str = f"{dist:.1f}m" if dist else "N/A"
+                    print(f"    step={step:4d}  spd={ego_speed:5.1f}km/h  "
+                          f"dist={dist_str}")
+                else:
+                    print(f"    step={step:4d}  spd={ego_speed:5.1f}km/h  "
+                          f"[staging]")
 
             # Update spectator every tick (smooth chase cam)
             if ego.is_alive:
                 ego_t = ego.get_transform()
                 spectator.set_transform(carla.Transform(
-                    ego_t.location - ego_t.get_forward_vector() * 15 + carla.Location(z=8),
+                    ego_t.location - ego_t.get_forward_vector() * 15
+                    + carla.Location(z=8),
                     carla.Rotation(pitch=-20, yaw=ego_t.rotation.yaw)
                 ))
 
@@ -314,7 +357,9 @@ def main():
     print(f"  Seeds:           {args.seeds}")
     print(f"  Output dir:      {args.output}")
     print(f"  Obstacle at:     {S1_OBSTACLE_DISTANCE:.0f}m")
-    print(f"  Runs:            {len(args.fog)} × {len(args.seeds)} = {len(args.fog) * len(args.seeds)}")
+    print(f"  Staging:         ON (target speed={STAGE_TARGET_SPEED_KMH:.0f}km/h)")
+    print(f"  Runs:            {len(args.fog)} × {len(args.seeds)} = "
+          f"{len(args.fog) * len(args.seeds)}")
     print("=" * 64)
 
     results = []

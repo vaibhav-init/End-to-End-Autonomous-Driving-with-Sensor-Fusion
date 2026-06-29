@@ -7,6 +7,9 @@ vehicle using ground-truth positions/speeds. It lets a dynamic scenario stage a
 controlled tailgating state (so every run starts the critical phase identically)
 before handing longitudinal control to the model under test.
 
+SpeedController drives the ego to a fixed target speed. Used for S1/S2/S3 where
+there is no lead vehicle during the staging phase.
+
 Throttle/brake only — steering is handled elsewhere. Env-safe (no heavy deps).
 """
 
@@ -34,6 +37,36 @@ class GapKeepController:
     def run_step(self, current_gap_m, ego_speed_mps, lead_speed_mps):
         target_speed = self.desired_speed(current_gap_m, lead_speed_mps)
         error = target_speed - ego_speed_mps
+        self._integral = max(-5.0, min(5.0, self._integral + error * self.dt))
+        derivative = (error - self._prev_error) / max(self.dt, 1e-6)
+        self._prev_error = error
+        accel_cmd = self.kp * error + self.ki * self._integral + self.kd * derivative
+        accel_cmd = max(-1.0, min(1.0, accel_cmd))
+        if accel_cmd >= 0.0:
+            return accel_cmd, 0.0
+        return 0.0, -accel_cmd
+
+
+class SpeedController:
+    """Drive the ego to a fixed `target_speed_mps` (returns throttle, brake).
+
+    Simpler than GapKeepController — no lead vehicle needed. Used for staging
+    S1/S2/S3 where the ego just needs to reach a specific speed before the
+    critical event is triggered.
+    """
+
+    def __init__(self, target_speed_mps, dt, kp=0.8, ki=0.05, kd=0.10):
+        self.target_speed = target_speed_mps
+        self.dt = dt
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self._integral = 0.0
+        self._prev_error = 0.0
+
+    def run_step(self, ego_speed_mps):
+        """Returns (throttle, brake) to reach and hold target speed."""
+        error = self.target_speed - ego_speed_mps
         self._integral = max(-5.0, min(5.0, self._integral + error * self.dt))
         derivative = (error - self._prev_error) / max(self.dt, 1e-6)
         self._prev_error = error
