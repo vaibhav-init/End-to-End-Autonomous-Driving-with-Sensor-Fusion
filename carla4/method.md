@@ -1,41 +1,43 @@
-# Method: Vision vs Radar Comparison in Fog
+# Method: Camera+Radar MLP Pipeline + PCLA Agent Benchmarking
 
-## The Hypothesis
+## The Pipeline
 
-YOLO-based vision is degraded by heavy fog — the camera can't see through it,
-so distance estimates are garbage or missing entirely. Radar cuts through fog
-because it uses radio waves.
+The `carla4/` pipeline trains a target-speed MLP using camera+radar sensor
+fusion. The camera (YOLO) handles traffic-light detection while the CARLA
+radar sensor provides reliable distance/velocity measurements to obstacles.
 
-## The Test (scenario1.py)
+### Pipeline Steps
 
-Run `python3 scenario1.py` twice:
+1. **Collect data** — `collect_throttle_brake_data.py` drives on autopilot
+   (the "teacher") across 5 NHTSA-inspired scenarios, logging radar distance,
+   YOLO traffic-light features, and ego-vehicle state at 20 FPS.
 
-### Run 1: Camera-only model (`--mode vision`)
-- Extreme fog (density=100, distance=10m)
-- Ego drives at 30 km/h using PID + vision ML model
-- Stopped car spawns 45m ahead
-- **Expected:** YOLO can't see through fog, model doesn't brake → 💥 COLLISION
+2. **Train MLP** — `train_throttle_brake.py` trains a `TargetSpeedMLP` to
+   predict the teacher's future speed from stacked temporal features.
 
-### Run 2: Radar model (`--mode radar`)
-- Same extreme fog
-- Same 30 km/h, same obstacle
-- **Expected:** Radar sees through fog, model brakes in time → ✅ NO COLLISION
+3. **Live test** — `test_throttle_brake_live.py` runs the trained model in
+   the CARLA loop: radar + YOLO → features → MLP → target speed → PID →
+   throttle/brake. Includes automatic scenario spawning (stopped vehicles,
+   sudden brakers, pedestrian crossings) and fog variation.
 
-## What This Proves
+## PCLA Integration
 
-| | Camera-only (YOLO) | Camera + Radar |
-|---|---|---|
-| **Clear weather** | Works (barely, with hack) | Works |
-| **Heavy fog** | Fails — YOLO blind | Works — radar sees through |
-| **Open road cruising** | Needs rule hack (30 km/h floor) | Model works naturally |
-| **Obstacle braking** | Hoppy/jerky | Smoother |
+For comparison against state-of-the-art agents, we use **PCLA** (Pretrained
+CARLA Leaderboard Agents) — a framework that provides 36 pretrained agents
+(Transfuser, Interfuser, LAV, etc.) that can be deployed on any CARLA vehicle.
 
-## The Real Takeaway
+This allows benchmarking our radar MLP against established autonomous driving
+models under the same scenarios and weather conditions.
 
-Vision-only is a research novelty. It fails in the first bad weather condition
-you throw at it. Radar is cheap (~$50), works in all weather, and makes the
-control problem dramatically easier because distance is a direct measurement
-instead of a noisy geometric estimate.
+## Why Radar?
 
-If this project were production, the answer would be:
-**Add a radar sensor. Vision is a backup at best.**
+| | Camera + Radar |
+|---|---|
+| **Clear weather** | Works — radar gives precise distance |
+| **Heavy fog** | Works — radar sees through fog |
+| **Open road cruising** | Model works naturally with hybrid override |
+| **Obstacle braking** | Smooth — direct distance measurement |
+
+Radar is cheap (~$50), works in all weather, and makes the control problem
+dramatically easier because distance is a direct measurement instead of a
+noisy geometric estimate from camera images.

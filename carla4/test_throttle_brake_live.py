@@ -22,7 +22,6 @@ from yolo_perception import (
     CameraManager,
     TL_RED,
     TL_STATE_NAMES,
-    VisionDistanceTracker,
     YOLO_AVAILABLE,
     YOLOPerception,
     empty_obstacle_features,
@@ -54,14 +53,8 @@ MAX_RADAR_RANGE = 50.0
 BOOTSTRAP_TARGET_SPEED_MPS = 12.0 / 3.6
 # Default cruising speed when no obstacle is detected (~30 km/h)
 CRUISE_SPEED_MPS = 30.0 / 3.6
-LAUNCH_HOLD_SPEED_MPS = 0.5
-LAUNCH_CLEAR_DISTANCE_M = 15.0
-LAUNCH_ASSIST_FRAMES = FPS * 5
 
-MODEL_DIRS = {
-    "cameraplusradar": "model_throttle_brake",
-    "cameraonly": "model_vision_only",
-}
+MODEL_DIR = "model_throttle_brake"
 
 class FrontRadar:
     def __init__(self, vehicle, world, range_m=50.0):
@@ -441,13 +434,6 @@ def main():
     parser.add_argument("--host", default=CARLA_HOST)
     parser.add_argument("--port", type=int, default=CARLA_PORT)
     parser.add_argument("--town", default=DEFAULT_TOWN)
-    parser.add_argument(
-        "--mode",
-        choices=["cameraonly", "cameraplusradar"],
-        default="cameraplusradar",
-        help="cameraonly = YOLO-based distance (no radar); "
-             "cameraplusradar = radar + camera (default)",
-    )
     parser.add_argument("--model", default=None)
     parser.add_argument("--scaler", default=None)
     parser.add_argument("--config", default=None)
@@ -456,16 +442,13 @@ def main():
     parser.add_argument("--pedestrians", type=int, default=10)
     args = parser.parse_args()
 
-    # Resolve model paths from --mode if not explicitly given
-    model_dir = MODEL_DIRS[args.mode]
+    # Resolve model paths
     if args.model is None:
-        args.model = os.path.join(model_dir, "target_speed_mlp.pt")
+        args.model = os.path.join(MODEL_DIR, "target_speed_mlp.pt")
     if args.scaler is None:
-        args.scaler = os.path.join(model_dir, "scaler.pkl")
+        args.scaler = os.path.join(MODEL_DIR, "scaler.pkl")
     if args.config is None:
-        args.config = os.path.join(model_dir, "model_config.json")
-
-    use_vision_only = args.mode == "cameraonly"
+        args.config = os.path.join(MODEL_DIR, "model_config.json")
 
     total_frames = args.duration * FPS
 
@@ -485,8 +468,7 @@ def main():
     print("=" * 76)
     print("TARGET-SPEED LIVE TEST")
     print("=" * 76)
-    print(f"  Mode:           {args.mode.upper()}")
-    print(f"  Distance src:   {'YOLO vision' if use_vision_only else 'Front radar'}")
+    print(f"  Distance src:   Front radar")
     print(f"  Model:          {args.model}")
     print(f"  Scaler:         {args.scaler}")
     print(f"  Config:         {args.config}")
@@ -552,22 +534,11 @@ def main():
     collision = CollisionRecorder(ego, world)
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
-    if use_vision_only and yolo is None:
-        raise RuntimeError(
-            "Camera-only live testing requires YOLO. Install ultralytics on the remote machine first."
-        )
     if yolo is None:
         print("  YOLO unavailable; traffic-light features will be zeroed")
 
-    # Distance source: radar or vision
-    radar = None
-    vision_tracker = None
-    if use_vision_only:
-        vision_tracker = VisionDistanceTracker(fps=FPS, max_range=MAX_RADAR_RANGE)
-        print("  Distance source: YOLO vision (camera-only mode)")
-    else:
-        radar = FrontRadar(ego, world, MAX_RADAR_RANGE)
-        print("  Distance source: Front radar")
+    radar = FrontRadar(ego, world, MAX_RADAR_RANGE)
+    print("  Distance source: Front radar")
 
     npc_ids = spawn_background_traffic(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_background_pedestrians(world, args.pedestrians)
@@ -610,13 +581,9 @@ def main():
             accel = (speed - prev_speed) * FPS if frame > 0 else 0.0
             prev_speed = speed
 
-            # Get distance features from radar or vision depending on mode
-            if use_vision_only:
-                vision_tracker.update_ego_speed(speed)
-                dist_state = None
-            else:
-                radar.update_ego_speed(speed)
-                dist_state = radar.get()
+            # Get distance features from radar
+            radar.update_ego_speed(speed)
+            dist_state = radar.get()
 
             cam_frame = camera.get_frame()
             visual = empty_visual_features()
@@ -625,9 +592,6 @@ def main():
                 scene_features = yolo.extract_scene_features(cam_frame)
                 visual = scene_features["visual"]
                 obstacle = scene_features["obstacle"]
-
-            if use_vision_only:
-                dist_state = vision_tracker.update(obstacle)
 
             if dist_state["relative_velocity"] > 0.1:
                 ttc = min(dist_state["distance"] / dist_state["relative_velocity"], 10.0)
@@ -669,14 +633,6 @@ def main():
             # road. Red light check prevents trying to drive through a red.
             if obstacle_detected < 0.5 and int(visual["traffic_light_state"]) != TL_RED:
                 target_speed_pred = max(target_speed_pred, CRUISE_SPEED_MPS)
-
-            if (
-                use_vision_only
-                and frame < LAUNCH_ASSIST_FRAMES
-                and speed < LAUNCH_HOLD_SPEED_MPS
-                and dist_state["distance"] > LAUNCH_CLEAR_DISTANCE_M
-            ):
-                target_speed_pred = max(target_speed_pred, BOOTSTRAP_TARGET_SPEED_MPS)
 
             max_target_seen = max(max_target_seen, target_speed_pred)
 
@@ -785,8 +741,7 @@ def main():
     print("=" * 76)
 
     destroy_scenario_state(scenario_state)
-    if radar is not None:
-        radar.cleanup()
+    radar.cleanup()
     collision.cleanup()
     camera.cleanup()
 
