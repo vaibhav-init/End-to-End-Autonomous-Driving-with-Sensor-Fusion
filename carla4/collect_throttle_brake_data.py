@@ -513,6 +513,7 @@ def main():
     emergency_count = 0
     respawn_count = 0
     stuck_frames = 0
+    absolute_stuck_frames = 0
     lead_brake_until = 0
     last_lead_brake_time = time.time()
     cut_in_npc = None
@@ -686,13 +687,19 @@ def main():
             trying_to_move = (
                 control.throttle > STALL_MIN_THROTTLE and control.brake < STALL_MAX_BRAKE
             )
-            if speed < STALL_SPEED_MPS and emergency_actor is None and trying_to_move and not blocked_by_obstacle:
-                stuck_frames += 1
+            if speed < STALL_SPEED_MPS:
+                absolute_stuck_frames += 1
+                if emergency_actor is None and trying_to_move and not blocked_by_obstacle:
+                    stuck_frames += 1
+                else:
+                    stuck_frames = 0 
             else:
                 stuck_frames = 0
+                absolute_stuck_frames = 0
 
-            if stuck_frames >= STALL_FRAMES:
+            if stuck_frames >= STALL_FRAMES or absolute_stuck_frames >= FPS * 30:
                 stuck_frames = 0
+                absolute_stuck_frames = 0
                 respawn_count += 1
                 new_spawn = random.choice(safe_spawns)
                 safe_respawn_ego(world, ego, new_spawn, tm, port)
@@ -770,8 +777,8 @@ def main():
     except KeyboardInterrupt:
         print("\n  Collection interrupted")
     finally:
-        # Save whatever was collected (best-effort), then ALWAYS clean the map —
-        # even on Ctrl+C or an error — so the next run starts from a clean world.
+        # Save whatever was collected (best-effort), then ALWAYS clean the map \u2014
+        # even on Ctrl+C or an error \u2014 so the next run starts from a clean world.
         try:
             if samples:
                 df = pd.DataFrame(samples)
