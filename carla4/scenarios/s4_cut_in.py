@@ -62,18 +62,28 @@ def set_fog_density(world, density):
     weather = world.get_weather()
     weather.fog_density = density
     if density > 0:
-        weather.fog_distance = max(5.0, 50.0 - density * 0.4)
-        weather.fog_falloff = min(3.0, 0.5 + density * 0.025)
+        # fog_distance: how far from camera fog starts (lower = thicker)
+        #   density  0 → 50m,  50 → 25m,  100 → 0m
+        weather.fog_distance = max(0.0, 50.0 - density * 0.5)
+        # fog_falloff: controls height-based fog concentration.
+        #   ~2.0 gives uniform thick fog at all heights (best for camera).
+        #   Too high (5+) concentrates fog at ground but thins above camera.
+        weather.fog_falloff = min(2.0, 0.2 + density * 0.018)
+        # Wetness adds road glare and visual degradation on top of fog
+        weather.wetness = min(100.0, density * 0.8)
     else:
         weather.fog_distance = 100.0
         weather.fog_falloff = 0.0
+        weather.wetness = 0.0
     world.set_weather(weather)
 
 
-# Staging-mode overrides (used only with --stage-approach): spawn the NPC closer
-# and trigger the cut-in later so the gap-keeper can settle a tight following gap.
-STAGE_NPC_AHEAD_M = 20.0
-STAGE_CUT_IN_STEP = 120
+# Staging constants: NPC spawns just barely ahead in adjacent lane so when
+# it cuts in it's RIGHT IN FRONT of the ego — a dangerous, realistic cut-in.
+STAGE_NPC_AHEAD_M = 8.0    # just barely ahead; cut-in lands right in front
+STAGE_CUT_IN_STEP = 120    # earliest step the cut-in can fire
+STAGE_MIN_SPEED_KMH = 50.0 # both vehicles must exceed this before cut-in fires
+TL_CLEARANCE_M = 100.0     # min distance from traffic lights for spawn points
 
 
 def spawn_npc_adjacent_lane(world, carla_map, ego, ahead_m):
@@ -136,9 +146,9 @@ def spawn_npc_adjacent_lane(world, carla_map, ego, ahead_m):
         return None, None
 
     bp_lib = world.get_blueprint_library()
-    vehicle_bps = [b for b in bp_lib.filter("vehicle.*")
-                   if int(b.get_attribute("number_of_wheels")) >= 4]
-    bp = random.choice(vehicle_bps)
+    # Use a sedan-sized car — trucks/buses accelerate too slowly and
+    # behave unrealistically in a cut-in scenario.
+    bp = bp_lib.find("vehicle.audi.a2")
     transform = adj_wp.transform
     transform.location.z += 0.5
     vehicle = world.try_spawn_actor(bp, transform)
@@ -155,24 +165,44 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 stage_approach=False, stage_gap=15.0, cutin_stop=False,
+                 stage_approach=True, stage_gap=8.0, cutin_stop=True,
                  scenario_id=4):
     """Run S4: Cut-In from Adjacent Lane at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
 
-    # Staging: when enabled, spawn the NPC closer and trigger the cut-in later,
-    # hold a fixed gap behind it until the cut-in, then hand to the model.
+    # Staging: gap-keeper holds ego at a fixed gap behind the NPC (in the
+    # adjacent lane) until both reach highway speed, then the NPC cuts in.
     npc_ahead_m = STAGE_NPC_AHEAD_M if stage_approach else S4_NPC_AHEAD_M
     cut_in_step = STAGE_CUT_IN_STEP if stage_approach else S4_CUT_IN_TRIGGER_STEP
-    gapkeep = GapKeepController(stage_gap, dt=1.0 / FPS) if stage_approach else None
+    gapkeep = GapKeepController(stage_gap, dt=1.0 / FPS,
+                                max_speed_mps=25.0) if stage_approach else None
     handover_announced = False
 
     # Get highway-only spawn points (multi-lane straight roads)
     highway_spawns = get_highway_spawns(carla_map)
+
+    # Filter out spawns near traffic lights so the ego gets a clean highway run
+    traffic_lights = world.get_actors().filter("traffic.traffic_light")
+    tl_locations = [tl.get_location() for tl in traffic_lights]
+    if tl_locations:
+        clean_spawns = []
+        for sp_tf in highway_spawns:
+            sp_loc = sp_tf.location
+            too_close = any(
+                sp_loc.distance(tl_loc) < TL_CLEARANCE_M
+                for tl_loc in tl_locations
+            )
+            if not too_close:
+                clean_spawns.append(sp_tf)
+        print(f"  Found {len(highway_spawns)} highway spawns, "
+              f"{len(clean_spawns)} away from traffic lights")
+        highway_spawns = clean_spawns
+    else:
+        print(f"  Found {len(highway_spawns)} highway spawn points")
+
     if not highway_spawns:
-        raise RuntimeError("No highway spawn points found in this map")
-    print(f"  Found {len(highway_spawns)} highway spawn points")
+        raise RuntimeError("No highway spawn points found away from traffic lights")
 
     # Set fog
     set_fog_density(world, fog_density)
@@ -198,13 +228,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     driver = make_driver(driver_name, model_dir=model_dir, pcla_agent=pcla_agent)
     driver.setup(world, ego, carla_map, client)
 
-    # Warm up ego
-    for _ in range(30):
-        control = driver.get_control(ego, world)
-        ego.apply_control(control)
-        world.tick()
-
-    # Spawn NPC in adjacent lane
+    # Spawn NPC in adjacent lane BEFORE any warmup so both vehicles
+    # start from rest together and the gap-keeper can keep them matched.
     npc, cut_in_direction = spawn_npc_adjacent_lane(
         world, carla_map, ego, npc_ahead_m)
     if npc is None:
@@ -223,9 +248,17 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     tm.ignore_signs_percentage(npc, 100)
     tm.auto_lane_change(npc, False)  # don't change lane on its own
 
-    # Let NPC settle and start driving
-    for _ in range(30):
+    # Warm up BOTH vehicles together. The gap-keeper (if staging) keeps the
+    # ego matched to the NPC so they accelerate in formation.
+    for _ in range(60):
         control = driver.get_control(ego, world)
+        if gapkeep is not None and npc and npc.is_alive:
+            gap = distance_between(ego, npc)
+            ego_spd = compute_vehicle_speed(ego) / 3.6
+            npc_spd = compute_vehicle_speed(npc) / 3.6
+            thr, brk = gapkeep.run_step(gap, ego_spd, npc_spd)
+            control = carla.VehicleControl(throttle=thr, brake=brk,
+                                           steer=control.steer)
         ego.apply_control(control)
         world.tick()
 
@@ -255,8 +288,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     cut_in_complete_step = None
 
     if gapkeep is not None:
-        print(f"  Staging ON: hold {stage_gap:.0f}m gap, hand over at step "
-              f"{cut_in_step} (cut-in)")
+        print(f"  Staging ON: hold {stage_gap:.0f}m gap, hand over when "
+              f"both vehicles >{STAGE_MIN_SPEED_KMH:.0f} km/h (earliest step {cut_in_step})")
     if cutin_stop:
         print("  Cut-in mode: NPC brakes to a full stop after cutting in")
     print(f"  S4 | fog={fog_density} | seed={seed} | "
@@ -268,14 +301,23 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
             control = driver.get_control(ego, world)
             # Staging: hold a fixed gap behind the NPC until the cut-in fires,
             # then hand longitudinal control to the model under test.
-            if gapkeep is not None and step < cut_in_step and npc and npc.is_alive:
-                gap = distance_between(ego, npc)
-                thr, brk = gapkeep.run_step(gap, compute_vehicle_speed(ego) / 3.6,
-                                            compute_vehicle_speed(npc) / 3.6)
-                control = carla.VehicleControl(throttle=thr, brake=brk, steer=control.steer)
-            elif gapkeep is not None and not handover_announced:
-                handover_announced = True
-                print(f"    🤝 Handover: model takes longitudinal control at step {step}")
+            # Staging: gap-keeper holds until BOTH the minimum step has passed
+            # AND both vehicles are above the speed threshold.
+            if gapkeep is not None and not cut_in_triggered and npc and npc.is_alive:
+                ego_spd_kmh = compute_vehicle_speed(ego)
+                npc_spd_kmh = compute_vehicle_speed(npc)
+                speeds_ok = (ego_spd_kmh >= STAGE_MIN_SPEED_KMH
+                             and npc_spd_kmh >= STAGE_MIN_SPEED_KMH)
+                if step < cut_in_step or not speeds_ok:
+                    # Still staging — hold the gap
+                    gap = distance_between(ego, npc)
+                    thr, brk = gapkeep.run_step(gap, ego_spd_kmh / 3.6,
+                                                npc_spd_kmh / 3.6)
+                    control = carla.VehicleControl(throttle=thr, brake=brk, steer=control.steer)
+                elif not handover_announced:
+                    handover_announced = True
+                    print(f"    🤝 Handover: model takes longitudinal control at step {step} "
+                          f"(ego={ego_spd_kmh:.1f} npc={npc_spd_kmh:.1f} km/h)")
             ego.apply_control(control)
 
             _tick_start = time.perf_counter()
@@ -284,12 +326,16 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
             if _elapsed < 1.0 / FPS:
                 time.sleep(1.0 / FPS - _elapsed)
 
-            # Trigger cut-in at configured step — take MANUAL control
+            # Trigger cut-in: must pass minimum step AND both vehicles above speed gate
             if step >= cut_in_step and not cut_in_triggered and npc and npc.is_alive:
-                npc.set_autopilot(False)
-                cut_in_triggered = True
-                print(f"    🔀 NPC cut-in triggered at step {step} "
-                      f"(from {direction_str} lane) — manual steering")
+                ego_spd_now = compute_vehicle_speed(ego)
+                npc_spd_now = compute_vehicle_speed(npc)
+                if ego_spd_now >= STAGE_MIN_SPEED_KMH and npc_spd_now >= STAGE_MIN_SPEED_KMH:
+                    npc.set_autopilot(False)
+                    cut_in_triggered = True
+                    print(f"    🔀 NPC cut-in triggered at step {step} "
+                          f"(from {direction_str} lane) — manual steering "
+                          f"(ego={ego_spd_now:.1f} npc={npc_spd_now:.1f} km/h)")
 
             # Manually steer NPC into ego's lane
             if cut_in_triggered and not cut_in_complete and npc and npc.is_alive:
@@ -370,11 +416,10 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
 
                         npc_speed_now = compute_vehicle_speed(npc) / 3.6
                         if cutin_stop:
-                            # Brake to a stop and hold — the severe cut-in variant.
-                            # Moderate brake (not instant) so a fast controller can
-                            # just avoid it while a slow one rear-ends it.
+                            # Full emergency brake after cut-in — the model must
+                            # react immediately or it will rear-end the NPC.
                             throttle_npc = 0.0
-                            brake_npc = 0.7 if npc_speed_now > 0.2 else 1.0
+                            brake_npc = 1.0
                         else:
                             target_speed_mps = S4_NPC_SPEED_KMH / 3.6 * 0.8  # slow a bit after cut-in
                             brake_npc = 0.0
@@ -466,16 +511,22 @@ def main():
     parser.add_argument("--output", default="results_s4")
     parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
                         help="Longitudinal control source")
-    parser.add_argument("--model-dir", default="../model_vision_only",
+    parser.add_argument("--model-dir", default="../model_throttle_brake",
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
-    parser.add_argument("--stage-approach", action="store_true",
-                        help="Tailgate the NPC with a gap-keeper, hand to the model when it cuts in")
-    parser.add_argument("--stage-gap", type=float, default=15.0,
-                        help="Target following gap in metres during staging")
-    parser.add_argument("--cutin-stop", action="store_true",
-                        help="NPC brakes to a full stop after cutting in (severe variant)")
+    parser.add_argument("--stage-approach", action="store_true", default=True,
+                        help="Stage the scenario: gap-keeper holds close follow, "
+                             "then hand over on cut-in (default: on)")
+    parser.add_argument("--no-stage-approach", dest="stage_approach",
+                        action="store_false",
+                        help="Disable staging; cut-in fires at a fixed step")
+    parser.add_argument("--stage-gap", type=float, default=8.0,
+                        help="Target following gap in metres during staging (default: 8)")
+    parser.add_argument("--cutin-stop", action="store_true", default=True,
+                        help="NPC brakes to a full stop after cutting in (default: on)")
+    parser.add_argument("--no-cutin-stop", dest="cutin_stop", action="store_false",
+                        help="NPC holds speed after cutting in instead of braking")
     args = parser.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -496,6 +547,9 @@ def main():
     tm.set_synchronous_mode(True)
     world.tick()
 
+    npc_ahead = STAGE_NPC_AHEAD_M if args.stage_approach else S4_NPC_AHEAD_M
+    cutin_step = STAGE_CUT_IN_STEP if args.stage_approach else S4_CUT_IN_TRIGGER_STEP
+
     print("=" * 64)
     print("SCENARIO S4 — CUT-IN FROM ADJACENT LANE")
     print("=" * 64)
@@ -503,8 +557,10 @@ def main():
     print(f"  Seeds:           {args.seeds}")
     print(f"  Output dir:      {args.output}")
     print(f"  NPC speed:       {S4_NPC_SPEED_KMH} km/h (adjacent lane)")
-    print(f"  NPC ahead:       {S4_NPC_AHEAD_M:.0f}m")
-    print(f"  Cut-in trigger:  step {S4_CUT_IN_TRIGGER_STEP}")
+    print(f"  NPC ahead:       {npc_ahead:.0f}m")
+    print(f"  Staging:         {'ON (gap={:.0f}m, min speed={:.0f}km/h)'.format(args.stage_gap, STAGE_MIN_SPEED_KMH) if args.stage_approach else 'OFF'}")
+    print(f"  Cut-in stop:     {'YES (full emergency brake)' if args.cutin_stop else 'NO (hold speed)'}")
+    print(f"  Cut-in trigger:  step {cutin_step} (earliest)")
     print(f"  Runs:            {len(args.fog)} × {len(args.seeds)} = "
           f"{len(args.fog) * len(args.seeds)}")
     print("=" * 64)

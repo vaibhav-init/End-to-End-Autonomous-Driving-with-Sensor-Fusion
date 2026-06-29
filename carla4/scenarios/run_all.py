@@ -59,7 +59,7 @@ def main():
     parser.add_argument("--town", default="Town04")
     parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
                         help="Longitudinal control source for every run")
-    parser.add_argument("--model-dir", default="../model_vision_only",
+    parser.add_argument("--model-dir", default="../model_throttle_brake",
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
