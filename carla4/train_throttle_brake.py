@@ -4,6 +4,7 @@ Train a sequence-aware MLP that predicts desired target speed.
 """
 
 import argparse
+import glob
 import json
 import os
 import pickle
@@ -19,7 +20,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from speed_model import TargetSpeedMLP, feature_sort_key
 
 
-DATA_PATH = "dataset_throttle_brake/data.csv"
+DATA_PATH = "dataset_throttle_brake"
 DATASET_CONFIG_PATH = "dataset_throttle_brake/dataset_config.json"
 MODEL_DIR = "model_throttle_brake"
 
@@ -53,8 +54,22 @@ def main():
             dataset_config = json.load(fh)
         print(f"  Loaded dataset config: {args.config}")
 
-    df = pd.read_csv(args.data)
-    print(f"  Loaded {len(df):,} rows from {args.data}")
+    # --data may be a single CSV (back-compat) or a folder: load every *.csv in it
+    # and concatenate, so base data + staged-scenario data train together.
+    if os.path.isdir(args.data):
+        csv_paths = sorted(glob.glob(os.path.join(args.data, "*.csv")))
+        if not csv_paths:
+            raise RuntimeError(f"No CSV files found in {args.data}")
+        frames = []
+        for path in csv_paths:
+            part = pd.read_csv(path)
+            frames.append(part)
+            print(f"  Loaded {len(part):,} rows from {path}")
+        df = pd.concat(frames, ignore_index=True)
+        print(f"  Combined {len(df):,} rows from {len(csv_paths)} CSV file(s)")
+    else:
+        df = pd.read_csv(args.data)
+        print(f"  Loaded {len(df):,} rows from {args.data}")
 
     feature_cols = infer_feature_columns(df, dataset_config)
     label_col = (
@@ -70,6 +85,9 @@ def main():
     distance_col = "distance_t-0"
     if ego_speed_col not in df.columns or distance_col not in df.columns:
         raise RuntimeError("Dataset does not contain expected current-frame columns")
+
+    # Guard against column mismatches when concatenating multiple CSVs.
+    df = df.dropna(subset=feature_cols + [label_col]).reset_index(drop=True)
 
     initial_len = len(df)
     df = df[~((df[ego_speed_col] < 0.1) & (df[distance_col] > 49.0))].reset_index(drop=True)
