@@ -40,7 +40,7 @@ from config import FOG_LADDER, RANDOM_SEEDS
 SCENARIO_MODULES = {
     1: ("s1_lead_vehicle_stopped", "results_s1"),
     2: ("s2_lead_vehicle_decelerating", "results_s2"),
-    3: ("s3_lead_vehicle_constant_speed", "results_s3"),
+    # 3: ("s3_lead_vehicle_constant_speed", "results_s3"),  # S3 disabled for now
     4: ("s4_cut_in", "results_s4"),
 }
 
@@ -48,8 +48,8 @@ SCENARIO_MODULES = {
 def main():
     parser = argparse.ArgumentParser(description="Run all NHTSA scenarios")
     parser.add_argument("--scenarios", type=int, nargs="+",
-                        default=[1, 2, 3, 4],
-                        help="Scenarios to run (1, 2, 3, 4)")
+                        default=[1, 2, 4],  # S3 disabled for now
+                        help="Scenarios to run (1, 2, 4; 3 is disabled)")
     parser.add_argument("--fog", type=int, nargs="+", default=FOG_LADDER,
                         help="Fog densities to test")
     parser.add_argument("--seeds", type=int, nargs="+", default=RANDOM_SEEDS,
