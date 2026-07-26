@@ -122,12 +122,85 @@ def build_summary(df):
     return summary[cols].sort_values(["scenario", "fog", "driver"])
 
 
-def _cdf(ax, values, label):
-    vals = np.sort(np.asarray([v for v in values if not np.isnan(v)], dtype=float))
-    if vals.size == 0:
+def _cdf(ax, values, label, point_labels=None, unit="", driver_idx=0):
+    """Plot a smooth CDF curve, labelling each point with what it represents.
+
+    Uses monotonic interpolation (PCHIP) to draw a smooth S-curve through the
+    empirical CDF points, with markers at the actual data points.
+
+    Args:
+        point_labels: list of strings parallel to *values* (before NaN removal
+            and sorting) describing each point, e.g. weather condition names.
+        unit: suffix like 'm' or 's' appended after the numeric value.
+        driver_idx: index of this driver (0, 1, …) — used to alternate label
+            placement above vs below the curve so different drivers don't overlap.
+    """
+    from scipy.interpolate import PchipInterpolator
+
+    # Pair values with labels, drop NaNs, sort by value
+    if point_labels is not None:
+        pairs = [(v, lbl) for v, lbl in zip(values, point_labels)
+                 if not np.isnan(v)]
+    else:
+        pairs = [(v, None) for v in values if not np.isnan(v)]
+    if not pairs:
         return
-    y = np.arange(1, vals.size + 1) / vals.size
-    ax.step(vals, y, where="post", label=f"{label} (n={vals.size})")
+    pairs.sort(key=lambda p: p[0])
+    vals = np.array([p[0] for p in pairs])
+    plabels = [p[1] for p in pairs]
+
+    # Empirical CDF: (x_i, i/n)
+    y_cdf = np.arange(1, vals.size + 1) / vals.size
+
+    # Build knot points for smooth interpolation:
+    #   start at (x_min - margin, 0), pass through data, end at (x_max + margin, 1)
+    x_range = vals[-1] - vals[0] if vals.size > 1 else 1.0
+    margin = max(x_range * 0.15, 0.1)
+    x_knots = np.concatenate([[vals[0] - margin], vals, [vals[-1] + margin]])
+    y_knots = np.concatenate([[0.0], y_cdf, [1.0]])
+
+    # Smooth interpolation (monotonic so CDF never decreases)
+    if x_knots.size >= 2:
+        # Need unique x values for interpolation
+        # If duplicates exist, nudge them slightly
+        for j in range(1, len(x_knots)):
+            if x_knots[j] <= x_knots[j - 1]:
+                x_knots[j] = x_knots[j - 1] + 1e-6
+
+        interp = PchipInterpolator(x_knots, y_knots)
+        x_smooth = np.linspace(x_knots[0], x_knots[-1], 200)
+        y_smooth = np.clip(interp(x_smooth), 0.0, 1.0)
+
+        # Plot smooth curve
+        line = ax.plot(x_smooth, y_smooth, linewidth=2,
+                       label=f"{label} (n={vals.size})")
+    else:
+        line = ax.plot(vals, y_cdf, linewidth=2,
+                       label=f"{label} (n={vals.size})")
+
+    color = line[0].get_color()
+
+    # Plot actual data points as markers
+    ax.scatter(vals, y_cdf, color=color, s=40, zorder=5, edgecolors="white",
+               linewidths=0.8)
+
+    # Alternate label placement: even drivers above, odd drivers below.
+    base_y_sign = 1 if driver_idx % 2 == 0 else -1
+    va = "bottom" if base_y_sign > 0 else "top"
+
+    for i, (xv, yv) in enumerate(zip(vals, y_cdf)):
+        plbl = plabels[i]
+        if plbl:
+            txt = f"{plbl}: {xv:.1f}{unit}"
+        else:
+            txt = f"{xv:.1f}{unit}"
+        # Stagger: alternate between two vertical offsets per point index
+        y_offset = base_y_sign * (10 + 12 * (i % 2))
+        ax.annotate(txt,
+                    xy=(xv, yv),
+                    textcoords="offset points", xytext=(6, y_offset),
+                    fontsize=6.5, color=color, fontweight="bold",
+                    va=va, ha="left")
 
 
 def plot_cdfs(df, out_dir):
@@ -142,13 +215,23 @@ def plot_cdfs(df, out_dir):
     drivers = sorted(df["driver"].unique())
     scenarios = sorted(df["scenario"].unique())
 
+    # Weather fog-code → human-readable name (matches compare_drivers.py)
+    weather_names = {
+        1: "Dark Night", 2: "Dense Fog", 3: "Clear Day", 4: "Night+Fog+Rain",
+        80: "Heavy Rain", 50: "Moderate Rain", 20: "Light Rain", 0: "Clear",
+    }
+
     for sid in scenarios:
         sdf = df[df["scenario"] == sid]
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        for label in drivers:
+        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+        for didx, label in enumerate(drivers):
             ddf = sdf[sdf["driver"] == label]
-            _cdf(axes[0], ddf["min_dist_m"].tolist(), label)
-            _cdf(axes[1], ddf["min_ttc_s"].tolist(), label)
+            # Build per-point weather labels aligned with the value lists
+            wlabels = [weather_names.get(int(f), f"fog={f}") for f in ddf["fog"]]
+            _cdf(axes[0], ddf["min_dist_m"].tolist(), label,
+                 point_labels=wlabels, unit="m", driver_idx=didx)
+            _cdf(axes[1], ddf["min_ttc_s"].tolist(), label,
+                 point_labels=wlabels, unit="s", driver_idx=didx)
         axes[0].set(title=f"S{sid} — closest approach CDF",
                     xlabel="min distance to NPC (m)", ylabel="P(X ≤ x)")
         axes[1].set(title=f"S{sid} — min TTC CDF",
@@ -158,28 +241,65 @@ def plot_cdfs(df, out_dir):
             ax.legend()
         fig.tight_layout()
         path = os.path.join(out_dir, f"cdf_s{sid}.png")
-        fig.savefig(path, dpi=120)
+        fig.savefig(path, dpi=150)
         plt.close(fig)
         print(f"  wrote {path}")
 
     # Collision-rate by fog, one line per (driver, scenario)
     summary = build_summary(df)
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    # Track annotations at each (fog, rate) coordinate to stagger overlaps
+    coord_count = {}  # (fog, rate) -> number of labels already placed there
+    series_idx = 0
     for label in drivers:
         for sid in scenarios:
             sub = summary[(summary["driver"] == label) & (summary["scenario"] == sid)]
             sub = sub.sort_values("fog")
             if sub.empty:
                 continue
-            ax.plot(sub["fog"], sub["collision_rate"], marker="o",
-                    label=f"{label} S{sid}")
-    ax.set(title="Collision rate by fog density", xlabel="fog density",
-           ylabel="collision rate", ylim=(-0.05, 1.05))
+            line = ax.plot(sub["fog"], sub["collision_rate"], marker="o",
+                           label=f"{label} S{sid}")
+            color = line[0].get_color()
+
+            # Label each point with driver, scenario, and rate
+            for _, row in sub.iterrows():
+                fog_val = int(row["fog"])
+                rate_pct = row["collision_rate"] * 100
+                # Compact label: "MLP S4: 25%"
+                point_label = f"{label.upper()} S{sid}: {rate_pct:.0f}%"
+
+                # Stagger vertically when multiple labels land on same coords
+                key = (fog_val, round(row["collision_rate"], 3))
+                n_prev = coord_count.get(key, 0)
+                coord_count[key] = n_prev + 1
+
+                # Spread labels: alternate above/below, increasing offset
+                direction = 1 if n_prev % 2 == 0 else -1
+                y_offset = direction * (8 + 12 * (n_prev // 2))
+                va = "bottom" if direction > 0 else "top"
+
+                ax.annotate(point_label,
+                            xy=(row["fog"], row["collision_rate"]),
+                            textcoords="offset points",
+                            xytext=(6, y_offset),
+                            fontsize=6.5, color=color, fontweight="bold",
+                            ha="left", va=va)
+            series_idx += 1
+
+    ax.set(title="Collision rate by weather condition",
+           xlabel="Weather preset", ylabel="collision rate",
+           ylim=(-0.05, 1.05))
+    # Use weather names on x-axis instead of raw fog codes
+    fog_vals = sorted(summary["fog"].unique())
+    ax.set_xticks(fog_vals)
+    ax.set_xticklabels([weather_names.get(int(f), f"fog={f}") for f in fog_vals],
+                       rotation=30, ha="right", fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
     path = os.path.join(out_dir, "collision_rate.png")
-    fig.savefig(path, dpi=120)
+    fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"  wrote {path}")
 

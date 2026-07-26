@@ -51,6 +51,7 @@ from ground_truth_logger import GroundTruthLogger, compute_vehicle_speed, distan
 from drivers import make_driver
 from spawn_utils import get_highway_spawns, spawn_obstacle_in_ego_direction
 from staging import SpeedController
+from scenario_weather import set_weather_condition
 from config import (
     CARLA_HOST, CARLA_PORT, DEFAULT_TOWN, FPS,
     S1_OBSTACLE_DISTANCE, FOG_LADDER, RANDOM_SEEDS,
@@ -66,22 +67,7 @@ STAGE_MIN_STEPS = 60             # minimum staging steps (let model warm up)
 TL_CLEARANCE_M = 100.0           # min distance from traffic lights
 
 
-def set_fog_density(world, density):
-    """Set a specific fog density on the current weather."""
-    weather = world.get_weather()
-    weather.fog_density = density
-    if density > 0:
-        # fog_distance: how far from camera fog starts (lower = thicker)
-        weather.fog_distance = max(0.0, 50.0 - density * 0.5)
-        # fog_falloff: ~2.0 gives uniform thick fog at all heights
-        weather.fog_falloff = min(2.0, 0.2 + density * 0.018)
-        # Wetness adds road glare and visual degradation on top of fog
-        weather.wetness = min(100.0, density * 0.8)
-    else:
-        weather.fog_distance = 100.0
-        weather.fog_falloff = 0.0
-        weather.wetness = 0.0
-    world.set_weather(weather)
+# Weather is now handled by the shared set_weather_condition() from scenario_weather.py
 
 
 def cleanup_actor(actor):
@@ -128,8 +114,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     if not highway_spawns:
         raise RuntimeError("No highway spawn points found away from traffic lights")
 
-    # Set fog
-    set_fog_density(world, fog_density)
+    # Set weather (rain-to-clear gradient)
+    set_weather_condition(world, fog_density)
     for _ in range(FOG_SETTLE_STEPS):
         world.tick()
 
@@ -274,9 +260,10 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
 
             # Stop early if ego stopped near obstacle
             if obstacle_spawned and obstacle and obstacle.is_alive:
-                if dist is not None and dist < 0.5:
+                if dist is not None and dist < 1.0:
+                    print(f"    ✅ Stopped at step {step} (dist={dist:.1f}m)")
                     break
-                if ego_speed < 0.1 and dist is not None and dist < 5.0:
+                if ego_speed < 1.0 and dist is not None and dist < 10.0:
                     print(f"    ✅ Stopped safely at step {step} "
                           f"(dist={dist:.1f}m)")
                     break

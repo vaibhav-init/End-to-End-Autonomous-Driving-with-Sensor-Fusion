@@ -294,7 +294,28 @@ class MLPDriver(Driver):
                 and dist_state["distance"] > LAUNCH_CLEAR_DISTANCE_M):
             target_speed_pred = max(target_speed_pred, BOOTSTRAP_TARGET_SPEED_MPS)
 
-        throttle, brake = self.controller.run_step(target_speed_pred, speed)
+        # ── Hardcoded safety overrides ──────────────────────────────────
+        # Rule 1: Model predicts < 1 km/h → full emergency brake.
+        if target_speed_pred < (1.0 / 3.6):
+            throttle, brake = 0.0, 1.0
+
+        # Rule 2: Obstacle within 30m AND actively closing → full brake.
+        #         (requires relv > 0.5 so it doesn't fire during stable
+        #          following — fixes over-conservative S2 behavior)
+        elif (obstacle_detected > 0.5
+              and dist_state["distance"] < 30.0
+              and dist_state["relative_velocity"] > 0.5):
+            throttle, brake = 0.0, 1.0
+
+        # Rule 3: TTC < 3.0s → full emergency brake.
+        #         Catches fast-closing scenarios like cut-ins where distance
+        #         alone doesn't trigger in time.
+        elif obstacle_detected > 0.5 and ttc < 3.0:
+            throttle, brake = 0.0, 1.0
+
+        else:
+            throttle, brake = self.controller.run_step(target_speed_pred, speed)
+        # ────────────────────────────────────────────────────────────────
         steer = self.steering.get_steer()
 
         if self.debug_every and self._frame % self.debug_every == 0:

@@ -49,21 +49,15 @@ from ground_truth_logger import GroundTruthLogger, compute_vehicle_speed, distan
 from drivers import make_driver
 from staging import GapKeepController
 from spawn_utils import get_highway_spawns, spawn_npc_in_ego_direction
+from scenario_weather import set_weather_condition
 from config import (
     CARLA_HOST, CARLA_PORT, DEFAULT_TOWN, FPS,
     S2_NPC_INITIAL_GAP, S2_NPC_SPEED_KMH, S2_BRAKE_TRIGGER_STEP,
     FOG_LADDER, RANDOM_SEEDS, SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
 )
-def set_fog_density(world, density):
-    weather = world.get_weather()
-    weather.fog_density = density
-    if density > 0:
-        weather.fog_distance = max(5.0, 50.0 - density * 0.4)
-        weather.fog_falloff = min(3.0, 0.5 + density * 0.025)
-    else:
-        weather.fog_distance = 100.0
-        weather.fog_falloff = 0.0
-    world.set_weather(weather)
+
+# Weather is now handled by the shared set_weather_condition() from scenario_weather.py
+
 
 
 def spawn_npc_ahead(world, carla_map, ego_location, ahead_m):
@@ -100,7 +94,7 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 stage_approach=False, stage_gap=20.0, scenario_id=2):
+                 stage_approach=True, stage_gap=15.0, scenario_id=2):
     """Run S2: Lead Vehicle Decelerating at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -111,8 +105,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         raise RuntimeError("No highway spawn points found in this map")
     print(f"  Found {len(highway_spawns)} highway spawn points")
 
-    # Set fog
-    set_fog_density(world, fog_density)
+    # Set weather (rain-to-clear gradient)
+    set_weather_condition(world, fog_density)
     for _ in range(FOG_SETTLE_STEPS):
         world.tick()
 
@@ -255,6 +249,12 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                       f"(speed={ego_speed:.1f} km/h, dist={dist:.1f}m)")
                 break
 
+            # Stop early if ego stopped near NPC after it braked
+            if npc_braked and ego_speed < 1.0 and dist is not None and dist < 10.0:
+                print(f"    ✅ Stopped safely at step {step} "
+                      f"(dist={dist:.1f}m)")
+                break
+
             if step % (FPS * 2) == 0:
                 npc_status = "braking" if npc_braked else "cruising"
                 dist_str = f"{dist:.1f}m" if dist else "N/A"
@@ -301,9 +301,12 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
-    parser.add_argument("--stage-approach", action="store_true",
-                        help="Tailgate the NPC with a gap-keeper, hand to the model when it brakes")
-    parser.add_argument("--stage-gap", type=float, default=20.0,
+    parser.add_argument("--stage-approach", action="store_true", default=True,
+                        help="Tailgate the NPC with a gap-keeper, hand to the model when it brakes (default: on)")
+    parser.add_argument("--no-stage-approach", dest="stage_approach",
+                        action="store_false",
+                        help="Disable staging; model controls from the start")
+    parser.add_argument("--stage-gap", type=float, default=15.0,
                         help="Target following gap in metres during staging")
     args = parser.parse_args()
 

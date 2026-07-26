@@ -14,26 +14,29 @@ FPS = 20
 # ============================================================================
 # Scenario geometry
 # ============================================================================
-S1_OBSTACLE_DISTANCE = 35.0       # metres ahead to place stopped vehicle (S1)
+S1_OBSTACLE_DISTANCE = 25.0       # metres ahead to place stopped vehicle (S1) — tight!
 S1_SPAWN_SPEED_KMH = 60.0         # spawn S1 obstacle only once ego exceeds this speed
-S2_NPC_INITIAL_GAP = 25.0         # initial gap between ego and NPC (S2)
+S2_NPC_INITIAL_GAP = 15.0         # initial gap between ego and NPC (S2) — tight!
 S2_NPC_SPEED_KMH = 60.0           # NPC cruising speed (S2)
-S2_BRAKE_TRIGGER_STEP = 300       # step at which NPC slams brakes (S2)
+S2_BRAKE_TRIGGER_STEP = 200       # step at which NPC slams brakes (S2) — earlier
 S3_NPC_CONSTANT_SPEED_KMH = 20.0  # NPC constant speed (S3)
 S4_NPC_SPEED_KMH = 60.0           # NPC cruising speed in adjacent lane (S4)
-S4_NPC_AHEAD_M = 40.0             # NPC starts 40m ahead in adjacent lane (S4)
-S4_CUT_IN_TRIGGER_STEP = 80       # step at which NPC begins lane change (S4)
+S4_NPC_AHEAD_M = 25.0             # NPC starts 25m ahead in adjacent lane (S4) — tighter
+S4_CUT_IN_TRIGGER_STEP = 60       # step at which NPC begins lane change (S4) — earlier
 
 # ============================================================================
-# Fog ladder
+# Weather presets (IDs matching scenario_weather.py):
+#   1 = Dark Night (headlights only, cameras blind)
+#   2 = Dense Fog (0 visibility, cameras blind)
+#   3 = Clear Day (both drivers should work)
+#   4 = Night + Fog + Rain (worst-case for cameras)
 # ============================================================================
-FOG_LADDER = [0]                    # clear weather only for now
-RANDOM_SEEDS = [42]                 # one seed only
+FOG_LADDER = [1, 2, 3, 4]  # dark night → dense fog → clear → night+fog+rain
 
 # ============================================================================
 # Run configuration
 # ============================================================================
-RANDOM_SEEDS = [42, 123, 256]     # 3 seeds for statistical robustness
+RANDOM_SEEDS = [42]               # 1 seed
 SCENARIO_DURATION_S = {
     1: 30,     # S1: accelerate from 0, detect static obstacle, stop
     2: 35,     # S2: follow NPC, react to sudden brake

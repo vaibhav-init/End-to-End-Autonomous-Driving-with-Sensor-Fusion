@@ -51,6 +51,7 @@ from ground_truth_logger import GroundTruthLogger, compute_vehicle_speed, distan
 from drivers import make_driver
 from staging import GapKeepController
 from spawn_utils import get_highway_spawns
+from scenario_weather import set_weather_condition
 from config import (
     CARLA_HOST, CARLA_PORT, DEFAULT_TOWN, FPS,
     S4_NPC_SPEED_KMH, S4_NPC_AHEAD_M, S4_CUT_IN_TRIGGER_STEP,
@@ -58,31 +59,16 @@ from config import (
 )
 
 
-def set_fog_density(world, density):
-    weather = world.get_weather()
-    weather.fog_density = density
-    if density > 0:
-        # fog_distance: how far from camera fog starts (lower = thicker)
-        #   density  0 → 50m,  50 → 25m,  100 → 0m
-        weather.fog_distance = max(0.0, 50.0 - density * 0.5)
-        # fog_falloff: controls height-based fog concentration.
-        #   ~2.0 gives uniform thick fog at all heights (best for camera).
-        #   Too high (5+) concentrates fog at ground but thins above camera.
-        weather.fog_falloff = min(2.0, 0.2 + density * 0.018)
-        # Wetness adds road glare and visual degradation on top of fog
-        weather.wetness = min(100.0, density * 0.8)
-    else:
-        weather.fog_distance = 100.0
-        weather.fog_falloff = 0.0
-        weather.wetness = 0.0
-    world.set_weather(weather)
+
+# Weather is now handled by the shared set_weather_condition() from scenario_weather.py
+
 
 
 # Staging constants: NPC spawns just barely ahead in adjacent lane so when
 # it cuts in it's RIGHT IN FRONT of the ego — a dangerous, realistic cut-in.
-STAGE_NPC_AHEAD_M = 8.0    # just barely ahead; cut-in lands right in front
-STAGE_CUT_IN_STEP = 120    # earliest step the cut-in can fire
-STAGE_MIN_SPEED_KMH = 50.0 # both vehicles must exceed this before cut-in fires
+STAGE_NPC_AHEAD_M = 5.0    # very close ahead; cut-in lands right in front — tight!
+STAGE_CUT_IN_STEP = 80     # earliest step the cut-in can fire — earlier
+STAGE_MIN_SPEED_KMH = 45.0 # both vehicles must exceed this before cut-in fires
 TL_CLEARANCE_M = 100.0     # min distance from traffic lights for spawn points
 
 
@@ -204,8 +190,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     if not highway_spawns:
         raise RuntimeError("No highway spawn points found away from traffic lights")
 
-    # Set fog
-    set_fog_density(world, fog_density)
+    # Set weather (rain-to-clear gradient)
+    set_weather_condition(world, fog_density)
     for _ in range(FOG_SETTLE_STEPS):
         world.tick()
 
@@ -464,6 +450,12 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
             if collision_occurred[0]:
                 print(f"    💥 COLLISION at step {step} "
                       f"(speed={ego_speed:.1f} km/h, dist={dist:.1f}m)")
+                break
+
+            # Stop early if ego stopped near NPC after cut-in completed
+            if cut_in_complete and ego_speed < 1.0 and dist is not None and dist < 10.0:
+                print(f"    ✅ Stopped safely at step {step} "
+                      f"(dist={dist:.1f}m)")
                 break
 
             # Log progress every 2 seconds
