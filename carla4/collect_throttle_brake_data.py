@@ -20,6 +20,7 @@ import carla
 import numpy as np
 import pandas as pd
 
+from radar import FrontRadar, add_radar_arguments, create_front_radar
 from yolo_perception import (
     CameraManager,
     TL_STATE_NAMES,
@@ -75,60 +76,6 @@ def stacked_feature_names(base_cols, history_frames):
         for name in base_cols:
             cols.append(f"{name}_t-{lag}")
     return cols
-
-
-class FrontRadar:
-    """Track the closest object in a narrow forward cone."""
-
-    def __init__(self, vehicle, world, range_m=50.0):
-        self.latest = {
-            "distance": range_m,
-            "relative_velocity": 0.0,
-            "obstacle_speed": 0.0,
-        }
-        self._ego_speed = 0.0
-        self._range = range_m
-
-        bp = world.get_blueprint_library().find("sensor.other.radar")
-        bp.set_attribute("horizontal_fov", "10")
-        bp.set_attribute("vertical_fov", "2")
-        bp.set_attribute("range", str(range_m))
-        bp.set_attribute("points_per_second", "3000")
-
-        transform = carla.Transform(
-            carla.Location(x=2.5, z=1.0),
-            carla.Rotation(pitch=2.0),
-        )
-        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
-        self.sensor.listen(self._on_radar)
-
-    def _on_radar(self, data):
-        nearest_dist = self._range
-        nearest_vel = 0.0
-        for det in data:
-            if abs(det.azimuth) > 0.3 or det.depth < 1.0 or det.altitude < -0.02:
-                continue
-            if det.depth < nearest_dist:
-                nearest_dist = det.depth
-                nearest_vel = det.velocity
-
-        rel_vel = -nearest_vel
-        obs_speed = max(0.0, self._ego_speed - rel_vel)
-        self.latest = {
-            "distance": nearest_dist,
-            "relative_velocity": rel_vel,
-            "obstacle_speed": obs_speed,
-        }
-
-    def update_ego_speed(self, speed):
-        self._ego_speed = speed
-
-    def get(self):
-        return self.latest.copy()
-
-    def cleanup(self):
-        if self.sensor and self.sensor.is_alive:
-            self.sensor.destroy()
 
 
 def spawn_vehicles(world, client, tm, count):
@@ -422,6 +369,7 @@ def main():
     parser.add_argument("--history", type=int, default=HISTORY_FRAMES)
     parser.add_argument("--label-horizon", type=int, default=LABEL_HORIZON)
     parser.add_argument("--output", default=SAVE_DIR)
+    add_radar_arguments(parser)
     args = parser.parse_args()
 
     total_frames = args.duration * FPS
@@ -434,6 +382,7 @@ def main():
     print("=" * 72)
     print(f"  Town:            {args.town}")
     print(f"  Radar range:     {MAX_RADAR_RANGE:.0f}m")
+    print(f"  Radar backend:   {args.radar_backend}")
     print(f"  Duration:        {args.duration}s")
     print(f"  History frames:  {args.history}")
     print(f"  Label horizon:   {args.label_horizon}")
@@ -488,7 +437,13 @@ def main():
     npc_ids = spawn_vehicles(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_pedestrians(world, args.pedestrians)
 
-    radar = FrontRadar(ego, world, MAX_RADAR_RANGE)
+    radar = create_front_radar(
+        ego,
+        world,
+        MAX_RADAR_RANGE,
+        backend=args.radar_backend,
+        fps=FPS,
+    )
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
     if yolo is None:
@@ -790,6 +745,7 @@ def main():
                 config = {
                     "town": args.town,
                     "fps": FPS,
+                    "radar_backend": args.radar_backend,
                     "history_frames": args.history,
                     "label_horizon": args.label_horizon,
                     "base_feature_cols": BASE_FEATURE_COLS,

@@ -63,13 +63,19 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
+    parser.add_argument("--radar-backend", choices=["native", "cshenron"],
+                        default=os.environ.get("CARLA_RADAR_BACKEND", "native"),
+                        help="MLP forward-radar backend")
     parser.add_argument("--output-root", default=None,
                         help="Root dir for results (default: results_<driver>)")
     parser.add_argument("--timeout", type=int, default=300,
                         help="Per-run subprocess timeout in seconds")
     args = parser.parse_args()
     if args.output_root is None:
-        args.output_root = f"results_{args.driver}"
+        if args.driver == "mlp" and args.radar_backend == "cshenron":
+            args.output_root = "results_mlp_cshenron"
+        else:
+            args.output_root = f"results_{args.driver}"
     os.makedirs(args.output_root, exist_ok=True)
 
     total_runs = len(args.scenarios) * len(args.fog) * len(args.seeds)
@@ -78,6 +84,7 @@ def main():
     print("=" * 64)
     print(f"  Town:            {args.town}")
     print(f"  Driver:          {args.driver}")
+    print(f"  Radar backend:   {args.radar_backend}")
     print(f"  Output root:     {args.output_root}")
     print(f"  Scenarios:       {args.scenarios}")
     print(f"  Fog levels:      {args.fog}")
@@ -118,6 +125,7 @@ def main():
                         "--driver", args.driver,
                         "--model-dir", args.model_dir,
                         "--pcla-agent", args.pcla_agent,
+                        "--radar-backend", args.radar_backend,
                     ]
                     result = subprocess.run(
                         cmd,

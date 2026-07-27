@@ -18,6 +18,7 @@ import carla
 import numpy as np
 import torch
 
+from radar import add_radar_arguments, create_front_radar
 from yolo_perception import (
     CameraManager,
     TL_RED,
@@ -55,57 +56,6 @@ BOOTSTRAP_TARGET_SPEED_MPS = 12.0 / 3.6
 CRUISE_SPEED_MPS = 30.0 / 3.6
 
 MODEL_DIR = "model_throttle_brake"
-
-class FrontRadar:
-    def __init__(self, vehicle, world, range_m=50.0):
-        self.latest = {
-            "distance": range_m,
-            "relative_velocity": 0.0,
-            "obstacle_speed": 0.0,
-        }
-        self._ego_speed = 0.0
-        self._range = range_m
-
-        bp = world.get_blueprint_library().find("sensor.other.radar")
-        bp.set_attribute("horizontal_fov", "10")
-        bp.set_attribute("vertical_fov", "2")
-        bp.set_attribute("range", str(range_m))
-        bp.set_attribute("points_per_second", "1500")
-        transform = carla.Transform(
-            carla.Location(x=2.5, z=1.0),
-            carla.Rotation(pitch=2.0),
-        )
-        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
-        self.sensor.listen(self._on_radar)
-
-    def _on_radar(self, data):
-        nearest_dist = self._range
-        nearest_vel = 0.0
-        for det in data:
-            if abs(det.azimuth) > 0.3 or det.depth < 1.0 or det.altitude < -0.02:
-                continue
-            if det.depth < nearest_dist:
-                nearest_dist = det.depth
-                nearest_vel = det.velocity
-
-        rel_vel = -nearest_vel
-        obs_speed = max(0.0, self._ego_speed - rel_vel)
-        self.latest = {
-            "distance": nearest_dist,
-            "relative_velocity": rel_vel,
-            "obstacle_speed": obs_speed,
-        }
-
-    def update_ego_speed(self, speed):
-        self._ego_speed = speed
-
-    def get(self):
-        return self.latest.copy()
-
-    def cleanup(self):
-        if self.sensor and self.sensor.is_alive:
-            self.sensor.destroy()
-
 
 class CollisionRecorder:
     COOLDOWN = 3.0
@@ -440,6 +390,7 @@ def main():
     parser.add_argument("--duration", type=int, default=180)
     parser.add_argument("--vehicles", type=int, default=20)
     parser.add_argument("--pedestrians", type=int, default=10)
+    add_radar_arguments(parser)
     args = parser.parse_args()
 
     # Resolve model paths
@@ -460,6 +411,7 @@ def main():
     feature_cols = model_config["feature_cols"]
     history_frames = int(model_config.get("history_frames") or 10)
     base_feature_cols = model_config.get("base_feature_cols") or DEFAULT_BASE_FEATURE_COLS
+    trained_radar_backend = model_config.get("radar_backend", "native")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TargetSpeedMLP(input_dim=len(feature_cols)).to(device)
     model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
@@ -468,7 +420,7 @@ def main():
     print("=" * 76)
     print("TARGET-SPEED LIVE TEST")
     print("=" * 76)
-    print(f"  Distance src:   Front radar")
+    print(f"  Distance src:   Front radar ({args.radar_backend})")
     print(f"  Model:          {args.model}")
     print(f"  Scaler:         {args.scaler}")
     print(f"  Config:         {args.config}")
@@ -476,6 +428,12 @@ def main():
     print(f"  Duration:       {args.duration}s")
     print(f"  History frames: {history_frames}")
     print(f"  Feature count:  {len(feature_cols)}")
+    if args.radar_backend != trained_radar_backend:
+        print(
+            "  WARNING: model data used radar backend "
+            f"'{trained_radar_backend}', runtime uses '{args.radar_backend}'."
+        )
+        print("           Recollect and retrain before reporting final results.")
     print("=" * 76)
 
     client = carla.Client(args.host, args.port)
@@ -537,8 +495,15 @@ def main():
     if yolo is None:
         print("  YOLO unavailable; traffic-light features will be zeroed")
 
-    radar = FrontRadar(ego, world, MAX_RADAR_RANGE)
-    print("  Distance source: Front radar")
+    radar = create_front_radar(
+        ego,
+        world,
+        MAX_RADAR_RANGE,
+        backend=args.radar_backend,
+        fps=FPS,
+        points_per_second=1500 if args.radar_backend == "native" else 240000,
+    )
+    print(f"  Distance source: Front radar ({args.radar_backend})")
 
     npc_ids = spawn_background_traffic(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_background_pedestrians(world, args.pedestrians)

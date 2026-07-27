@@ -251,6 +251,11 @@ def main():
         "history_frames": dataset_config.get("history_frames") if dataset_config else None,
         "base_feature_cols": dataset_config.get("base_feature_cols") if dataset_config else None,
         "fps": dataset_config.get("fps") if dataset_config else None,
+        "radar_backend": (
+            dataset_config.get("radar_backend", "native")
+            if dataset_config
+            else "native"
+        ),
     }
     model_config_path = os.path.join(model_dir, "model_config.json")
     with open(model_config_path, "w", encoding="utf-8") as fh:

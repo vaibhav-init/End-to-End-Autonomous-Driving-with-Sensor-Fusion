@@ -99,7 +99,7 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 scenario_id=3):
+                 radar_backend=None, scenario_id=3):
     """Run S3: Lead Vehicle at Lower Constant Speed at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -131,7 +131,12 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         world.tick()
 
     # Pluggable longitudinal driver; steering is delegated to BasicAgent inside it
-    driver = make_driver(driver_name, model_dir=model_dir, pcla_agent=pcla_agent)
+    driver = make_driver(
+        driver_name,
+        model_dir=model_dir,
+        pcla_agent=pcla_agent,
+        radar_backend=radar_backend,
+    )
     driver.setup(world, ego, carla_map, client)
 
     for _ in range(20):
@@ -272,6 +277,9 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
+    parser.add_argument("--radar-backend", choices=["native", "cshenron"],
+                        default=os.environ.get("CARLA_RADAR_BACKEND", "native"),
+                        help="MLP forward-radar backend")
     args = parser.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -312,7 +320,9 @@ def main():
                 logger = run_scenario(client, world, settings, fog, seed,
                                       args.output, driver_name=args.driver,
                                       model_dir=args.model_dir,
-                                      pcla_agent=args.pcla_agent, scenario_id=3)
+                                      pcla_agent=args.pcla_agent,
+                                      radar_backend=args.radar_backend,
+                                      scenario_id=3)
                 results.append({
                     "fog": fog,
                     "seed": seed,

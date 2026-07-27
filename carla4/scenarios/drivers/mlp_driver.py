@@ -43,6 +43,7 @@ from yolo_perception import (  # noqa: E402
 )
 from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS  # noqa: E402
 from speed_model import TargetSpeedMLP, flatten_history  # noqa: E402
+from radar import create_front_radar, normalize_radar_backend  # noqa: E402
 
 
 # Same constants as the live deployment (test_throttle_brake_live.py)
@@ -101,56 +102,21 @@ class HybridStateMachineController:
         return throttle, brake
 
 
-class FrontRadar:
-    """Narrow forward radar; mirrors VisionDistanceTracker.get() so they swap."""
-
-    def __init__(self, vehicle, world, range_m=RADAR_RANGE):
-        self.latest = {"distance": range_m, "relative_velocity": 0.0, "obstacle_speed": 0.0}
-        self._ego_speed = 0.0
-        self._range = range_m
-        bp = world.get_blueprint_library().find("sensor.other.radar")
-        bp.set_attribute("horizontal_fov", "10")
-        bp.set_attribute("vertical_fov", "2")
-        bp.set_attribute("range", str(range_m))
-        bp.set_attribute("points_per_second", "3000")
-        transform = carla.Transform(carla.Location(x=2.5, z=1.0), carla.Rotation(pitch=2.0))
-        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
-        self.sensor.listen(self._on_radar)
-
-    def _on_radar(self, data):
-        nearest_dist = self._range
-        nearest_vel = 0.0
-        for det in data:
-            if abs(det.azimuth) > 0.3 or det.depth < 1.0 or det.altitude < -0.02:
-                continue
-            if det.depth < nearest_dist:
-                nearest_dist = det.depth
-                nearest_vel = det.velocity
-        rel_vel = -nearest_vel
-        self.latest = {
-            "distance": nearest_dist,
-            "relative_velocity": rel_vel,
-            "obstacle_speed": max(0.0, self._ego_speed - rel_vel),
-        }
-
-    def update_ego_speed(self, speed):
-        self._ego_speed = speed
-
-    def get(self):
-        return self.latest.copy()
-
-    def cleanup(self):
-        if self.sensor and self.sensor.is_alive:
-            self.sensor.destroy()
-
-
 class MLPDriver(Driver):
     name = "mlp"
 
-    def __init__(self, model_dir, fps=FPS, debug_every=20, **_ignored):
+    def __init__(
+        self,
+        model_dir,
+        fps=FPS,
+        debug_every=20,
+        radar_backend=None,
+        **_ignored,
+    ):
         self.model_dir = model_dir
         self.fps = fps
         self.debug_every = debug_every
+        self.radar_backend = normalize_radar_backend(radar_backend)
         self.device = None
         self.model = None
         self.scaler = None
@@ -184,6 +150,7 @@ class MLPDriver(Driver):
         self.base_feature_cols = (
             model_config.get("base_feature_cols") or DEFAULT_BASE_FEATURE_COLS
         )
+        trained_radar_backend = model_config.get("radar_backend", "native")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = TargetSpeedMLP(input_dim=len(self.feature_cols)).to(self.device)
         self.model.load_state_dict(
@@ -196,13 +163,28 @@ class MLPDriver(Driver):
         # 'obstacle_detected'. Radar models need radar at inference, not YOLO depth.
         self.use_radar = "obstacle_detected" not in self.base_feature_cols
         self.max_range = RADAR_RANGE if self.use_radar else MAX_RANGE
+        if (
+            self.use_radar
+            and self.radar_backend != trained_radar_backend
+        ):
+            print(
+                "  [mlp] WARNING: model data used radar backend "
+                f"'{trained_radar_backend}', runtime uses '{self.radar_backend}'. "
+                "Recollect and retrain for final results."
+            )
 
         # Camera + YOLO give traffic-light features in both modes (and obstacle
         # detection in vision mode). YOLO is required for vision, optional for radar.
         self.camera = CameraManager(ego, world)
         self.yolo = YOLOPerception() if YOLO_AVAILABLE else None
         if self.use_radar:
-            self.radar = FrontRadar(ego, world, self.max_range)
+            self.radar = create_front_radar(
+                ego,
+                world,
+                self.max_range,
+                backend=self.radar_backend,
+                fps=self.fps,
+            )
             self.vision_tracker = None
             if self.yolo is None:
                 print("  [mlp] YOLO unavailable; traffic-light features zeroed")
@@ -223,7 +205,12 @@ class MLPDriver(Driver):
 
         print("  [mlp] driver ready")
         print(f"  [mlp]   model:          {model_path}")
-        print(f"  [mlp]   sensor:         {'radar' if self.use_radar else 'vision (YOLO)'} "
+        sensor_name = (
+            f"radar ({self.radar_backend})"
+            if self.use_radar
+            else "vision (YOLO)"
+        )
+        print(f"  [mlp]   sensor:         {sensor_name} "
               f"(max {self.max_range:.0f}m)")
         print(f"  [mlp]   device:         {self.device}")
         print(f"  [mlp]   history_frames: {self.history_frames}")

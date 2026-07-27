@@ -24,6 +24,7 @@ Usage:
 
 import argparse
 from collections import deque
+import json
 import math
 import os
 import random
@@ -46,12 +47,12 @@ from yolo_perception import (
 )
 from speed_model import BASE_FEATURE_COLS, flatten_history
 from collect_throttle_brake_data import (
-    FrontRadar,
     compute_future_speed_label,
     stacked_feature_names,
     set_tm_target_speed,
     spawn_npc_adjacent_lane,
 )
+from radar import add_radar_arguments, create_front_radar
 from staging import GapKeepController, SpeedController
 from spawn_utils import (
     get_highway_spawns,
@@ -161,7 +162,13 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
     for _ in range(5):
         world.tick()
 
-    radar = FrontRadar(ego, world, RADAR_RANGE)
+    radar = create_front_radar(
+        ego,
+        world,
+        RADAR_RANGE,
+        backend=args.radar_backend,
+        fps=FPS,
+    )
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
     steering = BasicAgentSteering(ego, carla_map)
@@ -173,7 +180,7 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
     coll_sensor = world.spawn_actor(coll_bp, carla.Transform(), attach_to=ego)
     coll_sensor.listen(lambda e: collision.__setitem__(0, True))
 
-    history = deque(maxlen=HISTORY_FRAMES)
+    history = deque(maxlen=args.history)
     rows = []
     prev_speed = 0.0
 
@@ -239,7 +246,7 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
             visual = yolo.extract_scene_features(cam_frame)["visual"]
 
         history.append(build_base_features(ego_speed, accel, radar_state, visual))
-        if len(history) == HISTORY_FRAMES:
+        if len(history) == args.history:
             row = flatten_history(history, BASE_FEATURE_COLS)
             row.update({
                 "frame": frame_counter,
@@ -278,16 +285,29 @@ def main():
     parser.add_argument("--label-horizon", type=int, default=LABEL_HORIZON)
     parser.add_argument("--output", default=SAVE_DIR, help="dataset folder (same as base data)")
     parser.add_argument("--out-name", default="data_staged.csv")
+    add_radar_arguments(parser)
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, args.out_name)
+    config_path = os.path.join(args.output, "dataset_config.json")
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as fh:
+            existing_config = json.load(fh)
+        existing_backend = existing_config.get("radar_backend", "native")
+        if existing_backend != args.radar_backend:
+            raise RuntimeError(
+                f"Dataset uses radar backend '{existing_backend}', but this run "
+                f"requested '{args.radar_backend}'. Use a separate --output "
+                "directory; do not mix sensor distributions."
+            )
 
     print("=" * 72)
     print("STAGED-SCENARIO DATA COLLECTOR")
     print("=" * 72)
     print(f"  Town:        {args.town}")
     print(f"  Radar range: {RADAR_RANGE:.0f}m")
+    print(f"  Radar:       {args.radar_backend}")
     print(f"  Scenarios:   {args.scenarios}")
     print(f"  Episodes:    {args.episodes} each")
     print(f"  Output:      {csv_path}")
@@ -337,12 +357,28 @@ def main():
         if episode_frames:
             df = pd.concat(episode_frames, ignore_index=True)
             df.to_csv(csv_path, index=False)
+            if not os.path.exists(config_path):
+                dataset_config = {
+                    "town": args.town,
+                    "fps": FPS,
+                    "radar_backend": args.radar_backend,
+                    "history_frames": args.history,
+                    "label_horizon": args.label_horizon,
+                    "base_feature_cols": BASE_FEATURE_COLS,
+                    "stacked_feature_cols": stacked_feature_names(
+                        BASE_FEATURE_COLS, args.history
+                    ),
+                    "label_col": "teacher_target_speed",
+                }
+                with open(config_path, "w", encoding="utf-8") as fh:
+                    json.dump(dataset_config, fh, indent=2)
             print("\n" + "=" * 72)
             print("STAGED COLLECTION COMPLETE")
             print("=" * 72)
             print(f"  Samples saved:     {len(df):,}")
             print(f"  Per-scenario rows: {counts}")
             print(f"  Dataset:           {csv_path}")
+            print(f"  Config:            {config_path}")
             print(f"  (train picks this up alongside data.csv via folder glob)")
             print("=" * 72)
         else:

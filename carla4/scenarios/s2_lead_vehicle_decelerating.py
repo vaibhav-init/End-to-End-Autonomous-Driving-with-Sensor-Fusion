@@ -94,7 +94,8 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 stage_approach=True, stage_gap=15.0, scenario_id=2):
+                 radar_backend=None, stage_approach=True, stage_gap=15.0,
+                 scenario_id=2):
     """Run S2: Lead Vehicle Decelerating at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -126,7 +127,12 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         world.tick()
 
     # Pluggable longitudinal driver; steering is delegated to BasicAgent inside it
-    driver = make_driver(driver_name, model_dir=model_dir, pcla_agent=pcla_agent)
+    driver = make_driver(
+        driver_name,
+        model_dir=model_dir,
+        pcla_agent=pcla_agent,
+        radar_backend=radar_backend,
+    )
     driver.setup(world, ego, carla_map, client)
 
     for _ in range(20):
@@ -301,6 +307,9 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
+    parser.add_argument("--radar-backend", choices=["native", "cshenron"],
+                        default=os.environ.get("CARLA_RADAR_BACKEND", "native"),
+                        help="MLP forward-radar backend")
     parser.add_argument("--stage-approach", action="store_true", default=True,
                         help="Tailgate the NPC with a gap-keeper, hand to the model when it brakes (default: on)")
     parser.add_argument("--no-stage-approach", dest="stage_approach",
@@ -349,6 +358,7 @@ def main():
                                       args.output, driver_name=args.driver,
                                       model_dir=args.model_dir,
                                       pcla_agent=args.pcla_agent,
+                                      radar_backend=args.radar_backend,
                                       stage_approach=args.stage_approach,
                                       stage_gap=args.stage_gap, scenario_id=2)
                 results.append({
