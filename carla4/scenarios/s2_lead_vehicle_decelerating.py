@@ -7,8 +7,8 @@ NHTSA Reference: Scenario #4 — Lead Vehicle Decelerating (7.2%, 4th most frequ
 
 Setup:
   - NPC starts at 30 km/h, 25m ahead of ego
-  - Ego on Traffic Manager autopilot, follows naturally
-  - At step 300 (after ego reaches following speed), NPC brakes to full stop
+  - Ego is staged to a stable matched-speed/matched-gap state
+  - The evaluated driver controls for a settling interval before the NPC brakes
   - Fog density: configurable (0, 40, 70, 100)
 
 Measures:
@@ -55,6 +55,7 @@ from config import (
     S2_NPC_INITIAL_GAP, S2_NPC_SPEED_KMH, S2_BRAKE_TRIGGER_STEP,
     FOG_LADDER, RANDOM_SEEDS, SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
 )
+from driving_contract import MAX_TARGET_SPEED_KMH, S2_HANDOVER_SETTLE_S
 
 # Weather is now handled by the shared set_weather_condition() from scenario_weather.py
 
@@ -94,7 +95,12 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 radar_backend=None, stage_approach=True, stage_gap=15.0,
+                 radar_backend=None, stage_approach=True,
+                 stage_gap=S2_NPC_INITIAL_GAP,
+                 initial_gap=S2_NPC_INITIAL_GAP,
+                 target_speed_kmh=S2_NPC_SPEED_KMH,
+                 handover_settle_s=S2_HANDOVER_SETTLE_S,
+                 stage_timeout_s=12.0,
                  scenario_id=2):
     """Run S2: Lead Vehicle Decelerating at a given fog density."""
     carla_map = world.get_map()
@@ -141,7 +147,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         world.tick()
 
     # Spawn NPC ahead (direction-aware)
-    npc = spawn_npc_in_ego_direction(world, carla_map, ego, S2_NPC_INITIAL_GAP)
+    npc = spawn_npc_in_ego_direction(world, carla_map, ego, initial_gap)
     if npc is None:
         cleanup_actor(ego)
         raise RuntimeError("Failed to spawn NPC vehicle")
@@ -150,7 +156,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     tm_port = client.get_trafficmanager(8000).get_port()
     npc.set_autopilot(True, tm_port)
     tm = client.get_trafficmanager(8000)
-    tm.set_desired_speed(npc, S2_NPC_SPEED_KMH)
+    tm.set_desired_speed(npc, target_speed_kmh)
     tm.ignore_lights_percentage(npc, 100)
     tm.ignore_signs_percentage(npc, 100)
     tm.auto_lane_change(npc, False)
@@ -184,30 +190,96 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     npc_braked = False
     # Optional staging: a gap-keep controller tailgates the NPC until it brakes,
     # then control is handed to the driver/model for the deceleration response.
-    gapkeep = GapKeepController(stage_gap, dt=1.0 / FPS) if stage_approach else None
-    handover_announced = False
+    gapkeep = (
+        GapKeepController(
+            stage_gap,
+            dt=1.0 / FPS,
+            max_speed_mps=(target_speed_kmh + 5.0) / 3.6,
+        )
+        if stage_approach
+        else None
+    )
+    stable_frames = 0
+    required_stable_frames = FPS
+    handover_step = None
+    brake_trigger_step = (
+        None if stage_approach else S2_BRAKE_TRIGGER_STEP
+    )
+    settle_frames = max(1, int(handover_settle_s * FPS))
+    stage_timeout_steps = max(1, int(stage_timeout_s * FPS))
     if gapkeep is not None:
-        print(f"  Staging ON: hold {stage_gap:.0f}m gap, hand over at step "
-              f"{S2_BRAKE_TRIGGER_STEP} (NPC brake)")
+        print(
+            f"  Staging ON: stabilize at {target_speed_kmh:.0f}km/h and "
+            f"{stage_gap:.0f}m, then give the driver {handover_settle_s:.1f}s "
+            "before NPC braking"
+        )
 
     print(f"  S2 | fog={fog_density} | seed={seed} | "
-          f"NPC at {S2_NPC_SPEED_KMH} km/h, {S2_NPC_INITIAL_GAP}m ahead")
+          f"NPC at {target_speed_kmh} km/h, {initial_gap}m ahead")
 
     try:
         for step in range(max_steps):
             # Driver runs every tick (keeps an end-to-end model warm + supplies steer)
             control = driver.get_control(ego, world)
-            # Staging: hold a fixed gap behind the NPC until it begins decelerating,
-            # then hand longitudinal control to the model under test.
-            if gapkeep is not None and step < S2_BRAKE_TRIGGER_STEP and npc and npc.is_alive:
+            # Establish the same pre-event state for both drivers. Handover is
+            # deliberately separated from the NPC brake, so reaction latency
+            # measures the braking event rather than a controller transition.
+            if (
+                gapkeep is not None
+                and handover_step is None
+                and npc
+                and npc.is_alive
+            ):
                 gap = distance_between(ego, npc)
-                thr, brk = gapkeep.run_step(gap, compute_vehicle_speed(ego) / 3.6,
-                                            compute_vehicle_speed(npc) / 3.6)
-                control = carla.VehicleControl(throttle=thr, brake=brk, steer=control.steer)
-            elif gapkeep is not None and not handover_announced:
-                handover_announced = True
-                print(f"    🤝 Handover: model takes longitudinal control at step {step}")
+                ego_kmh = compute_vehicle_speed(ego)
+                npc_kmh = compute_vehicle_speed(npc)
+                thr, brk = gapkeep.run_step(
+                    gap,
+                    ego_kmh / 3.6,
+                    npc_kmh / 3.6,
+                )
+                control = carla.VehicleControl(
+                    throttle=thr,
+                    brake=brk,
+                    steer=control.steer,
+                )
+                stable = (
+                    abs(gap - stage_gap) <= 2.5
+                    and abs(ego_kmh - target_speed_kmh) <= 1.5
+                    and abs(npc_kmh - target_speed_kmh) <= 1.5
+                )
+                stable_frames = stable_frames + 1 if stable else 0
+                if (
+                    stable_frames >= required_stable_frames
+                    or step >= stage_timeout_steps
+                ):
+                    handover_step = step
+                    brake_trigger_step = step + settle_frames
+                    reason = (
+                        "stable state reached"
+                        if stable_frames >= required_stable_frames
+                        else "staging timeout"
+                    )
+                    print(
+                        f"    Handover at step {step}: {reason}; "
+                        f"ego={ego_kmh:.1f}km/h gap={gap:.1f}m. "
+                        f"NPC brakes at step {brake_trigger_step}."
+                    )
             ego.apply_control(control)
+
+            if (
+                brake_trigger_step is not None
+                and step >= brake_trigger_step
+                and not npc_braked
+                and npc
+                and npc.is_alive
+            ):
+                npc.set_autopilot(False)
+                npc.apply_control(
+                    carla.VehicleControl(throttle=0.0, brake=1.0)
+                )
+                npc_braked = True
+                print(f"    NPC slammed brakes at step {step}")
 
             _tick_start = time.perf_counter()
             world.tick()
@@ -215,13 +287,6 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
             _elapsed = time.perf_counter() - _tick_start
             if _elapsed < 1.0 / FPS:
                 time.sleep(1.0 / FPS - _elapsed)
-
-            # Trigger NPC brake at S2_BRAKE_TRIGGER_STEP
-            if step >= S2_BRAKE_TRIGGER_STEP and not npc_braked and npc and npc.is_alive:
-                npc.set_autopilot(False)
-                npc.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
-                npc_braked = True
-                print(f"    🛑 NPC slammed brakes at step {step}")
 
             control = ego.get_control() if ego.is_alive else None
             ego_speed = compute_vehicle_speed(ego)
@@ -246,6 +311,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 throttle=throttle,
                 brake=brake,
                 steer=steer,
+                critical_event=npc_braked,
                 collision=collision_occurred[0],
                 ego_accel=accel,
             )
@@ -315,9 +381,45 @@ def main():
     parser.add_argument("--no-stage-approach", dest="stage_approach",
                         action="store_false",
                         help="Disable staging; model controls from the start")
-    parser.add_argument("--stage-gap", type=float, default=15.0,
+    parser.add_argument("--stage-gap", type=float, default=S2_NPC_INITIAL_GAP,
                         help="Target following gap in metres during staging")
+    parser.add_argument(
+        "--initial-gap",
+        type=float,
+        default=S2_NPC_INITIAL_GAP,
+        help="NPC spawn gap in metres",
+    )
+    parser.add_argument(
+        "--target-speed-kmh",
+        type=float,
+        default=S2_NPC_SPEED_KMH,
+        help="Shared ego/NPC pre-event target speed",
+    )
+    parser.add_argument(
+        "--handover-settle-s",
+        type=float,
+        default=S2_HANDOVER_SETTLE_S,
+        help="Driver-only control time between staging and NPC braking",
+    )
+    parser.add_argument(
+        "--stage-timeout-s",
+        type=float,
+        default=12.0,
+        help="Maximum time to wait for a stable staged state",
+    )
     args = parser.parse_args()
+    if min(
+        args.stage_gap,
+        args.initial_gap,
+        args.target_speed_kmh,
+        args.handover_settle_s,
+        args.stage_timeout_s,
+    ) <= 0.0:
+        parser.error("S2 speed, gaps, and timing values must be positive")
+    if args.target_speed_kmh > MAX_TARGET_SPEED_KMH:
+        parser.error(
+            f"--target-speed-kmh cannot exceed {MAX_TARGET_SPEED_KMH:g}"
+        )
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(30.0)
@@ -343,9 +445,10 @@ def main():
     print(f"  Fog levels:      {args.fog}")
     print(f"  Seeds:           {args.seeds}")
     print(f"  Output dir:      {args.output}")
-    print(f"  NPC speed:       {S2_NPC_SPEED_KMH} km/h")
-    print(f"  NPC initial gap: {S2_NPC_INITIAL_GAP:.0f}m")
-    print(f"  Brake trigger:   step {S2_BRAKE_TRIGGER_STEP}")
+    print(f"  NPC speed:       {args.target_speed_kmh} km/h")
+    print(f"  NPC initial gap: {args.initial_gap:.0f}m")
+    print(f"  Staging gap:     {args.stage_gap:.0f}m")
+    print(f"  Settle interval: {args.handover_settle_s:.1f}s")
     print(f"  Runs:            {len(args.fog)} × {len(args.seeds)} = {len(args.fog) * len(args.seeds)}")
     print("=" * 64)
 
@@ -360,7 +463,12 @@ def main():
                                       pcla_agent=args.pcla_agent,
                                       radar_backend=args.radar_backend,
                                       stage_approach=args.stage_approach,
-                                      stage_gap=args.stage_gap, scenario_id=2)
+                                      stage_gap=args.stage_gap,
+                                      initial_gap=args.initial_gap,
+                                      target_speed_kmh=args.target_speed_kmh,
+                                      handover_settle_s=args.handover_settle_s,
+                                      stage_timeout_s=args.stage_timeout_s,
+                                      scenario_id=2)
                 results.append({
                     "fog": fog,
                     "seed": seed,

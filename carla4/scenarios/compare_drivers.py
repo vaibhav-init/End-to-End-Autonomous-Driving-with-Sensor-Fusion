@@ -5,10 +5,10 @@ Human-readable comparison of MLP vs PCLA driver performance.
 Reads per-tick GT CSVs and prints a clear table with actual numbers:
   - Collision? (yes/no)
   - Stopping distance (how far from NPC the ego stopped)
-  - Reaction time (seconds from obstacle appearing to first hard brake)
+  - Reaction time (seconds from the scenario event to first hard brake)
   - Peak deceleration (strongest braking in m/s²)
   - Ego speed at closest approach
-  - Time to stop (seconds from obstacle to ego speed < 1 km/h)
+  - Time to stop (seconds from the scenario event to ego speed < 1 km/h)
 
 Usage:
   # Compare both drivers
@@ -41,6 +41,22 @@ def parse_runs(run_args):
     return runs
 
 
+def critical_event_index(df, present):
+    """Use explicit event markers, falling back to legacy GT heuristics."""
+    if "critical_event" in df.columns:
+        marked = pd.to_numeric(
+            df["critical_event"], errors="coerce"
+        ).fillna(0) > 0
+        if marked.any():
+            return marked.index[marked][0]
+    critical = df[
+        present
+        & (df["gt_relative_velocity"] > 2.0)
+        & (df["gt_distance_to_npc_m"] < 80.0)
+    ]
+    return critical.index[0] if not critical.empty else None
+
+
 def analyze_single_run(csv_path):
     """Extract clear metrics from one scenario run CSV."""
     try:
@@ -60,7 +76,11 @@ def analyze_single_run(csv_path):
 
     # Only look at steps where obstacle is actually present
     present = df["gt_distance_to_npc_m"] < OBSTACLE_PRESENT_MAX_M
-    dist_present = df.loc[present, "gt_distance_to_npc_m"]
+    event_idx = critical_event_index(df, present)
+    evaluation_present = present.copy()
+    if event_idx is not None:
+        evaluation_present &= df.index >= event_idx
+    dist_present = df.loc[evaluation_present, "gt_distance_to_npc_m"]
 
     # Stopping distance = minimum distance to NPC
     if not dist_present.empty:
@@ -82,45 +102,41 @@ def analyze_single_run(csv_path):
     else:
         collision_speed = float("nan")
 
-    # Reaction time: critical event → first hard brake
-    # "Critical event" = moment the situation becomes dangerous:
-    #   relative_velocity > 2.0 m/s (ego closing on NPC fast) AND obstacle present.
-    # This avoids measuring from stable-following during staging.
+    # Reaction time: explicit scenario event → first hard brake.
     reaction_s = float("nan")
-    if present.any():
-        critical = df.loc[present.index] if present.any() else df
-        critical = critical[
-            (critical["gt_relative_velocity"] > 2.0) &
-            (critical["gt_distance_to_npc_m"] < 80.0)
-        ]
-        if not critical.empty:
-            event_idx = critical.index[0]
-            after_event = df.loc[event_idx:]
-            braked = after_event[after_event["brake"] > BRAKE_THRESHOLD]
-            if not braked.empty:
-                reaction_steps = braked.index[0] - event_idx
-                reaction_s = float(reaction_steps / FPS)
+    if event_idx is not None:
+        after_event = df.loc[event_idx:]
+        braked = after_event[after_event["brake"] > BRAKE_THRESHOLD]
+        if not braked.empty:
+            reaction_steps = braked.index[0] - event_idx
+            reaction_s = float(reaction_steps / FPS)
+
+    pre_event_brake_fraction = float("nan")
+    if event_idx is not None:
+        pre_event = df.loc[df.index < event_idx]
+        if not pre_event.empty:
+            pre_event_brake_fraction = float(
+                (pre_event["brake"] > BRAKE_THRESHOLD).mean()
+            )
 
     # Peak deceleration (most negative acceleration → reported positive)
     peak_decel = float(max(0.0, -df["ego_accel_mps2"].min()))
 
     # Time to stop: critical event → ego speed < 1 km/h
     time_to_stop_s = float("nan")
-    if present.any():
-        critical2 = df[
-            (df["gt_distance_to_npc_m"] < 80.0) &
-            (df["gt_relative_velocity"] > 2.0)
-        ]
-        if not critical2.empty:
-            event_idx2 = critical2.index[0]
-            after2 = df.loc[event_idx2:]
-            stopped = after2[after2["gt_ego_speed_kmh"] < 1.0]
-            if not stopped.empty:
-                stop_steps = stopped.index[0] - event_idx2
-                time_to_stop_s = float(stop_steps / FPS)
+    if event_idx is not None:
+        after_event = df.loc[event_idx:]
+        stopped = after_event[after_event["gt_ego_speed_kmh"] < 1.0]
+        if not stopped.empty:
+            stop_steps = stopped.index[0] - event_idx
+            time_to_stop_s = float(stop_steps / FPS)
 
     # Min TTC
-    ttc = df.loc[present, "time_to_collision_s"] if present.any() else pd.Series()
+    ttc = (
+        df.loc[evaluation_present, "time_to_collision_s"]
+        if evaluation_present.any()
+        else pd.Series(dtype=float)
+    )
     ttc = ttc[(ttc > 0) & (ttc < 900)]
     min_ttc = float(ttc.min()) if not ttc.empty else float("nan")
 
@@ -133,6 +149,11 @@ def analyze_single_run(csv_path):
         "speed_at_closest_kmh": round(speed_at_closest, 1),
         "collision_speed_kmh": round(collision_speed, 1) if not np.isnan(collision_speed) else "—",
         "reaction_time_s": round(reaction_s, 2) if not np.isnan(reaction_s) else "—",
+        "pre_event_brake_pct": (
+            round(100.0 * pre_event_brake_fraction, 1)
+            if not np.isnan(pre_event_brake_fraction)
+            else "—"
+        ),
         "peak_decel_mps2": round(peak_decel, 1),
         "time_to_stop_s": round(time_to_stop_s, 2) if not np.isnan(time_to_stop_s) else "—",
         "min_ttc_s": round(min_ttc, 2) if not np.isnan(min_ttc) else "—",
@@ -189,9 +210,9 @@ def print_results(results):
 
     for sid in scenarios:
         scenario_name = SCENARIO_NAMES.get(sid, f"S{sid}")
-        print(f"\n{'=' * 80}")
+        print(f"\n{'=' * 94}")
         print(f"  {scenario_name}")
-        print(f"{'=' * 80}")
+        print(f"{'=' * 94}")
 
         for driver in drivers:
             runs = [r for r in results if r["scenario"] == sid and r["driver"] == driver]
@@ -199,18 +220,24 @@ def print_results(results):
                 continue
 
             print(f"\n  Driver: {driver.upper()}")
-            print(f"  {'─' * 74}")
+            print(f"  {'─' * 88}")
             print(f"  {'Weather':<16} {'Collision':<11} {'Stop Dist':<11} "
-                  f"{'React Time':<12} {'Peak Decel':<12} {'Time→Stop':<11} "
+                  f"{'React Time':<12} {'Pre-Brake':<11} {'Peak Decel':<12} {'Time→Stop':<11} "
                   f"{'Min TTC'}")
-            print(f"  {'─' * 74}")
+            print(f"  {'─' * 88}")
 
             for r in sorted(runs, key=lambda x: -x["fog"]):
                 weather = WEATHER_NAMES.get(r["fog"], f"fog={r['fog']}")
                 collision_str = "💥 YES" if r["collided"] else "✅ No"
+                pre_brake = (
+                    f"{r['pre_event_brake_pct']:.1f}%"
+                    if r["pre_event_brake_pct"] != "—"
+                    else "—"
+                )
                 print(f"  {weather:<16} {collision_str:<11} "
                       f"{r['stopping_dist_m']:>6.1f}m    "
                       f"{str(r['reaction_time_s']):>7}s    "
+                      f"{pre_brake:>7}    "
                       f"{r['peak_decel_mps2']:>6.1f}m/s²   "
                       f"{str(r['time_to_stop_s']):>7}s    "
                       f"{str(r['min_ttc_s']):>6}s")
@@ -222,18 +249,31 @@ def print_results(results):
                          if r["reaction_time_s"] != "—"]
             avg_react = np.mean(react_vals) if react_vals else float("nan")
             avg_decel = np.mean([r["peak_decel_mps2"] for r in runs])
+            pre_brake_vals = [
+                r["pre_event_brake_pct"]
+                for r in runs
+                if r["pre_event_brake_pct"] != "—"
+            ]
+            avg_pre_brake = (
+                np.mean(pre_brake_vals)
+                if pre_brake_vals
+                else float("nan")
+            )
 
-            print(f"  {'─' * 74}")
-            print(f"  {'AVERAGE':<16} "
-                  f"{n_collisions}/{len(runs)} hits  "
-                  f"{avg_stop:>6.1f}m    "
-                  f"{avg_react:>7.2f}s    " if not np.isnan(avg_react) else
-                  f"  {'AVERAGE':<16} "
-                  f"{n_collisions}/{len(runs)} hits  "
-                  f"{avg_stop:>6.1f}m    "
-                  f"{'—':>7}s    ",
-                  end="")
-            print(f"{avg_decel:>6.1f}m/s²")
+            avg_react_str = (
+                f"{avg_react:.2f}s" if not np.isnan(avg_react) else "—"
+            )
+            avg_pre_str = (
+                f"{avg_pre_brake:.1f}%"
+                if not np.isnan(avg_pre_brake)
+                else "—"
+            )
+            print(f"  {'─' * 88}")
+            print(
+                f"  {'AVERAGE':<16} {n_collisions}/{len(runs)} hits  "
+                f"{avg_stop:>6.1f}m    {avg_react_str:>8}    "
+                f"{avg_pre_str:>7}    {avg_decel:>6.1f}m/s²"
+            )
 
     # Cross-driver comparison
     if len(drivers) > 1:

@@ -20,6 +20,32 @@ radar sensor provides reliable distance/velocity measurements to obstacles.
    throttle/brake. Includes automatic scenario spawning (stopped vehicles,
    sudden brakers, pedestrian crossings) and fog variation.
 
+## Reproducible Native-Radar Workflow
+
+Use one sensor distribution from collection through evaluation. The supported
+operating contract is CARLA native radar at 100 m, a 60 km/h maximum teacher
+and prediction speed, and Town04:
+
+```bash
+python3 collect_throttle_brake_data.py --radar-backend native \
+  --town Town04 --duration 900 --vehicles 60 --pedestrians 20 \
+  --max-speed-kmh 60 --output dataset_throttle_brake_native
+python3 collect_scenario_data.py --radar-backend native --town Town04 \
+  --episodes 10 --max-speed-kmh 60 --output dataset_throttle_brake_native
+python3 train_throttle_brake.py --data dataset_throttle_brake_native \
+  --config dataset_throttle_brake_native/dataset_config.json \
+  --output model_throttle_brake_native
+python3 test_throttle_brake_live.py --radar-backend native --town Town04 \
+  --model model_throttle_brake_native/target_speed_mlp.pt \
+  --scaler model_throttle_brake_native/scaler.pkl \
+  --config model_throttle_brake_native/model_config.json
+```
+
+Collectors attach episode IDs and reset feature history at scenario, weather,
+and respawn boundaries. Training holds out complete episodes, caps stopped
+frames at 15%, and rejects observed speeds above the configured envelope. Do
+not mix native and C-Shenron CSVs or reuse an old scaler after recollection.
+
 ## PCLA Integration
 
 For comparison against state-of-the-art agents, we use **PCLA** (Pretrained

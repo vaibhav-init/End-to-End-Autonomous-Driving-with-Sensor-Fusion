@@ -41,29 +41,56 @@ def parse_runs(run_args):
     return runs
 
 
+def critical_event_index(df, present):
+    """Use explicit event markers, falling back to legacy GT heuristics."""
+    if "critical_event" in df.columns:
+        marked = pd.to_numeric(
+            df["critical_event"], errors="coerce"
+        ).fillna(0) > 0
+        if marked.any():
+            return marked.index[marked][0]
+    critical = df[
+        present
+        & (df["gt_relative_velocity"] > 2.0)
+        & (df["gt_distance_to_npc_m"] < 80.0)
+    ]
+    return critical.index[0] if not critical.empty else None
+
+
 def per_run_metrics(df):
     """Longitudinal metrics for a single run (one CSV)."""
     collided = bool((df["collision_occurred"] == 1).any())
 
     present = df["gt_distance_to_npc_m"] < OBSTACLE_PRESENT_MAX_M
-    dist_present = df.loc[present, "gt_distance_to_npc_m"]
+    event_idx = critical_event_index(df, present)
+    evaluation_present = present.copy()
+    if event_idx is not None:
+        evaluation_present &= df.index >= event_idx
+    dist_present = df.loc[evaluation_present, "gt_distance_to_npc_m"]
     min_dist = float(dist_present.min()) if not dist_present.empty else np.nan
 
-    ttc = df.loc[present, "time_to_collision_s"]
+    ttc = df.loc[evaluation_present, "time_to_collision_s"]
     ttc = ttc[(ttc > 0) & (ttc < 900)]
     min_ttc = float(ttc.min()) if not ttc.empty else np.nan
 
     # Strongest deceleration (most negative acceleration), reported as positive m/s^2
     peak_decel = float(max(0.0, -df["ego_accel_mps2"].min()))
 
-    # Reaction latency: first obstacle-present step -> first hard brake after it
+    # Reaction latency: explicit critical event -> first hard brake after it.
     reaction_s = np.nan
-    if present.any():
-        first_present = df.index[present][0]
-        after = df.loc[first_present:]
+    if event_idx is not None:
+        after = df.loc[event_idx:]
         braked = after[after["brake"] > BRAKE_REACTION_THRESHOLD]
         if not braked.empty:
-            reaction_s = float((braked.index[0] - first_present) / FPS)
+            reaction_s = float((braked.index[0] - event_idx) / FPS)
+
+    pre_event_brake_fraction = np.nan
+    if event_idx is not None:
+        pre_event = df.loc[df.index < event_idx]
+        if not pre_event.empty:
+            pre_event_brake_fraction = float(
+                (pre_event["brake"] > BRAKE_REACTION_THRESHOLD).mean()
+            )
 
     return {
         "collided": collided,
@@ -71,6 +98,7 @@ def per_run_metrics(df):
         "min_ttc_s": min_ttc,
         "peak_decel_mps2": peak_decel,
         "reaction_s": reaction_s,
+        "pre_event_brake_fraction": pre_event_brake_fraction,
     }
 
 
@@ -114,11 +142,13 @@ def build_summary(df):
         mean_min_ttc_s=("min_ttc_s", "mean"),
         mean_peak_decel=("peak_decel_mps2", "mean"),
         mean_reaction_s=("reaction_s", "mean"),
+        mean_pre_event_brake_fraction=("pre_event_brake_fraction", "mean"),
     ).reset_index()
     summary["collision_rate"] = summary["n_collisions"] / summary["n_runs"]
     cols = ["driver", "scenario", "fog", "n_runs", "n_collisions",
             "collision_rate", "mean_min_dist_m", "mean_min_ttc_s",
-            "mean_peak_decel", "mean_reaction_s"]
+            "mean_peak_decel", "mean_reaction_s",
+            "mean_pre_event_brake_fraction"]
     return summary[cols].sort_values(["scenario", "fog", "driver"])
 
 

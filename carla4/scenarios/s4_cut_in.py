@@ -449,6 +449,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 throttle=throttle,
                 brake=brake,
                 steer=steer,
+                critical_event=cut_in_triggered,
                 collision=collision_occurred[0],
                 ego_accel=accel,
             )

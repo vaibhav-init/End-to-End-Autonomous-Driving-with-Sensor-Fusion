@@ -44,12 +44,17 @@ from yolo_perception import (  # noqa: E402
 from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS  # noqa: E402
 from speed_model import TargetSpeedMLP, flatten_history  # noqa: E402
 from radar import create_front_radar, normalize_radar_backend  # noqa: E402
+from driving_contract import (  # noqa: E402
+    MAX_TARGET_SPEED_KMH,
+    NATIVE_RADAR_POINTS_PER_SECOND,
+    RADAR_RANGE_M,
+)
 
 
 # Same constants as the live deployment (test_throttle_brake_live.py)
 FPS = 20
 MAX_RANGE = 50.0          # vision (YOLO monocular) max range
-RADAR_RANGE = 100.0       # radar max range (matches collect_throttle_brake_data.py)
+RADAR_RANGE = RADAR_RANGE_M
 BOOTSTRAP_TARGET_SPEED_MPS = 12.0 / 3.6
 CRUISE_SPEED_MPS = 30.0 / 3.6
 LAUNCH_HOLD_SPEED_MPS = 0.5
@@ -129,6 +134,8 @@ class MLPDriver(Driver):
         self.radar = None
         self.use_radar = False
         self.max_range = MAX_RANGE
+        self.max_target_speed_mps = MAX_TARGET_SPEED_KMH / 3.6
+        self.radar_points_per_second = NATIVE_RADAR_POINTS_PER_SECOND
         self.steering = None
         self.controller = None
         self.feature_history = None
@@ -151,6 +158,28 @@ class MLPDriver(Driver):
             model_config.get("base_feature_cols") or DEFAULT_BASE_FEATURE_COLS
         )
         trained_radar_backend = model_config.get("radar_backend", "native")
+        self.radar_points_per_second = int(
+            model_config.get(
+                "radar_points_per_second",
+                (
+                    NATIVE_RADAR_POINTS_PER_SECOND
+                    if trained_radar_backend == "native"
+                    else 240000
+                ),
+            )
+        )
+        self.max_target_speed_mps = (
+            min(
+                float(
+                    model_config.get(
+                        "max_target_speed_kmh",
+                        MAX_TARGET_SPEED_KMH,
+                    )
+                ),
+                MAX_TARGET_SPEED_KMH,
+            )
+            / 3.6
+        )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = TargetSpeedMLP(input_dim=len(self.feature_cols)).to(self.device)
         self.model.load_state_dict(
@@ -162,15 +191,19 @@ class MLPDriver(Driver):
         # model (model_throttle_brake) has 10 base cols; the vision model adds
         # 'obstacle_detected'. Radar models need radar at inference, not YOLO depth.
         self.use_radar = "obstacle_detected" not in self.base_feature_cols
-        self.max_range = RADAR_RANGE if self.use_radar else MAX_RANGE
+        self.max_range = (
+            float(model_config.get("radar_range_m", RADAR_RANGE))
+            if self.use_radar
+            else MAX_RANGE
+        )
         if (
             self.use_radar
             and self.radar_backend != trained_radar_backend
         ):
-            print(
-                "  [mlp] WARNING: model data used radar backend "
-                f"'{trained_radar_backend}', runtime uses '{self.radar_backend}'. "
-                "Recollect and retrain for final results."
+            raise RuntimeError(
+                "Sensor distribution mismatch: model data used radar backend "
+                f"'{trained_radar_backend}', runtime requested "
+                f"'{self.radar_backend}'."
             )
 
         # Camera + YOLO give traffic-light features in both modes (and obstacle
@@ -184,6 +217,7 @@ class MLPDriver(Driver):
                 self.max_range,
                 backend=self.radar_backend,
                 fps=self.fps,
+                points_per_second=self.radar_points_per_second,
             )
             self.vision_tracker = None
             if self.yolo is None:
@@ -212,8 +246,17 @@ class MLPDriver(Driver):
         )
         print(f"  [mlp]   sensor:         {sensor_name} "
               f"(max {self.max_range:.0f}m)")
+        if self.use_radar:
+            print(
+                f"  [mlp]   radar sampling: "
+                f"{self.radar_points_per_second} points/s"
+            )
         print(f"  [mlp]   device:         {self.device}")
         print(f"  [mlp]   history_frames: {self.history_frames}")
+        print(
+            f"  [mlp]   speed ceiling:  "
+            f"{self.max_target_speed_mps * 3.6:.1f}km/h"
+        )
         print(f"  [mlp]   feature_count:  {len(self.feature_cols)} "
               f"(base={len(self.base_feature_cols)})")
 
@@ -280,6 +323,10 @@ class MLPDriver(Driver):
                 and speed < LAUNCH_HOLD_SPEED_MPS
                 and dist_state["distance"] > LAUNCH_CLEAR_DISTANCE_M):
             target_speed_pred = max(target_speed_pred, BOOTSTRAP_TARGET_SPEED_MPS)
+        target_speed_pred = min(
+            max(0.0, target_speed_pred),
+            self.max_target_speed_mps,
+        )
 
         # ── Hardcoded safety overrides ──────────────────────────────────
         # Rule 1: Model predicts < 1 km/h → full emergency brake.

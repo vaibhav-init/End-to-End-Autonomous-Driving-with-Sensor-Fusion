@@ -34,7 +34,12 @@ import subprocess
 import sys
 import time
 
-from config import FOG_LADDER, RANDOM_SEEDS
+from config import (
+    FOG_LADDER,
+    RANDOM_SEEDS,
+    S2_NPC_INITIAL_GAP,
+    S2_NPC_SPEED_KMH,
+)
 
 
 SCENARIO_MODULES = {
@@ -70,6 +75,22 @@ def main():
                         help="Root dir for results (default: results_<driver>)")
     parser.add_argument("--timeout", type=int, default=300,
                         help="Per-run subprocess timeout in seconds")
+    parser.add_argument(
+        "--s2-target-speed-kmh",
+        type=float,
+        default=S2_NPC_SPEED_KMH,
+    )
+    parser.add_argument(
+        "--s2-gap-m",
+        type=float,
+        default=S2_NPC_INITIAL_GAP,
+    )
+    parser.add_argument("--s2-handover-settle-s", type=float, default=1.0)
+    parser.add_argument(
+        "--s2-no-stage",
+        action="store_true",
+        help="Disable controlled S2 staging (not recommended for comparisons)",
+    )
     args = parser.parse_args()
     if args.output_root is None:
         if args.driver == "mlp" and args.radar_backend == "cshenron":
@@ -127,6 +148,19 @@ def main():
                         "--pcla-agent", args.pcla_agent,
                         "--radar-backend", args.radar_backend,
                     ]
+                    if sid == 2:
+                        cmd.extend([
+                            "--target-speed-kmh",
+                            str(args.s2_target_speed_kmh),
+                            "--initial-gap",
+                            str(args.s2_gap_m),
+                            "--stage-gap",
+                            str(args.s2_gap_m),
+                            "--handover-settle-s",
+                            str(args.s2_handover_settle_s),
+                        ])
+                        if args.s2_no_stage:
+                            cmd.append("--no-stage-approach")
                     result = subprocess.run(
                         cmd,
                         capture_output=True,

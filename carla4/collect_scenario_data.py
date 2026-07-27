@@ -54,24 +54,29 @@ from collect_throttle_brake_data import (
 )
 from radar import add_radar_arguments, create_front_radar
 from staging import GapKeepController, SpeedController
+from driving_contract import (
+    MAX_TARGET_SPEED_KMH,
+    NATIVE_RADAR_POINTS_PER_SECOND,
+    RADAR_RANGE_M,
+)
 from spawn_utils import (
     get_highway_spawns,
     spawn_obstacle_in_ego_direction,
     spawn_npc_in_ego_direction,
 )
 from drivers.steering import BasicAgentSteering
+from weather_utils import apply_random_fog
 
 
 CARLA_HOST = "127.0.0.1"
 CARLA_PORT = 2000
 DEFAULT_TOWN = "Town04"
 FPS = 20
-RADAR_RANGE = 100.0
+RADAR_RANGE = RADAR_RANGE_M
 HISTORY_FRAMES = 10
 LABEL_HORIZON = 10
 SAVE_DIR = "dataset_throttle_brake"
 
-CRUISE_KMH = 60.0
 DETECT_RANGE_M = 70.0           # start following once a lead is within this range
 FOLLOW_GAP_M = 12.0            # ACC target gap
 WARMUP_S = 4                   # seconds to reach cruise before the event
@@ -118,27 +123,48 @@ def build_base_features(ego_speed, accel, radar_state, visual):
     }
 
 
-def spawn_scenario_npc(world, carla_map, tm, ego, scenario):
+def spawn_scenario_npc(
+    world,
+    carla_map,
+    tm,
+    ego,
+    scenario,
+    rng,
+    cruise_kmh,
+    event_gap_m,
+):
     """Spawn the lead/obstacle for a scenario. Returns (npc, cut_in_to_right)."""
     if scenario == "stopped":
-        npc = spawn_obstacle_in_ego_direction(world, carla_map, ego, 50.0)
+        npc = spawn_obstacle_in_ego_direction(
+            world, carla_map, ego, event_gap_m
+        )
         return npc, None
     if scenario == "decelerating":
-        npc = spawn_npc_in_ego_direction(world, carla_map, ego, 25.0)
+        npc = spawn_npc_in_ego_direction(
+            world, carla_map, ego, event_gap_m
+        )
         if npc:
             npc.set_autopilot(True, tm.get_port())
             tm.auto_lane_change(npc, False)
-            set_tm_target_speed(npc, tm, CRUISE_KMH)
+            set_tm_target_speed(npc, tm, cruise_kmh)
         return npc, None
     if scenario == "constant":
-        npc = spawn_npc_in_ego_direction(world, carla_map, ego, 35.0)
+        npc = spawn_npc_in_ego_direction(
+            world, carla_map, ego, event_gap_m
+        )
         if npc:
             npc.set_autopilot(True, tm.get_port())
             tm.auto_lane_change(npc, False)
-            set_tm_target_speed(npc, tm, 20.0)
+            set_tm_target_speed(
+                npc,
+                tm,
+                min(cruise_kmh, rng.choice((15.0, 20.0, 25.0))),
+            )
         return npc, None
     if scenario == "cut_in":
-        return spawn_npc_adjacent_lane(world, ego, carla_map, tm, ahead_m=20.0)
+        return spawn_npc_adjacent_lane(
+            world, ego, carla_map, tm, ahead_m=event_gap_m
+        )
     return None, None
 
 
@@ -146,7 +172,32 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
     """Drive one staged episode with the ACC teacher; return (rows, frame_counter)."""
     rng = random.Random(seed)
     dt = 1.0 / FPS
-    cruise_mps = CRUISE_KMH / 3.6
+    speed_choices = [
+        speed
+        for speed in (30.0, 40.0, 50.0, 60.0)
+        if speed <= args.max_speed_kmh
+    ]
+    cruise_kmh = rng.choice(speed_choices) if speed_choices else args.max_speed_kmh
+    cruise_mps = cruise_kmh / 3.6
+    gap_choices = {
+        "stopped": (25.0, 35.0, 50.0),
+        "decelerating": (15.0, 20.0, 25.0, 30.0, 40.0),
+        "constant": (20.0, 30.0, 40.0),
+        "cut_in": (15.0, 20.0, 25.0),
+    }
+    event_gap_m = rng.choice(gap_choices[scenario])
+    decel_brake = rng.choice((0.5, 0.75, 1.0))
+    decel_duration_s = rng.choice((1.5, 2.5, 3.5))
+    weather_name = apply_random_fog(world, rng=rng)
+    event_details = (
+        f", brake={decel_brake:.2f} for {decel_duration_s:.1f}s"
+        if scenario == "decelerating"
+        else ""
+    )
+    print(
+        f"    weather={weather_name}, cruise={cruise_kmh:.0f}km/h, "
+        f"gap={event_gap_m:.0f}m{event_details}"
+    )
 
     highway_spawns = get_highway_spawns(carla_map)
     rng.shuffle(highway_spawns)
@@ -168,12 +219,21 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         RADAR_RANGE,
         backend=args.radar_backend,
         fps=FPS,
+        points_per_second=(
+            NATIVE_RADAR_POINTS_PER_SECOND
+            if args.radar_backend == "native"
+            else 240000
+        ),
     )
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
     steering = BasicAgentSteering(ego, carla_map)
     cruise = SpeedController(cruise_mps, dt)
-    gapkeep = GapKeepController(FOLLOW_GAP_M, dt)
+    gapkeep = GapKeepController(
+        FOLLOW_GAP_M,
+        dt,
+        max_speed_mps=args.max_speed_kmh / 3.6,
+    )
 
     collision = [False]
     coll_bp = world.get_blueprint_library().find("sensor.other.collision")
@@ -190,7 +250,16 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         ego.apply_control(carla.VehicleControl(throttle=thr, steer=steering.get_steer(), brake=brk))
         world.tick()
 
-    npc, cut_in_to_right = spawn_scenario_npc(world, carla_map, tm, ego, scenario)
+    npc, cut_in_to_right = spawn_scenario_npc(
+        world,
+        carla_map,
+        tm,
+        ego,
+        scenario,
+        rng,
+        cruise_kmh,
+        event_gap_m,
+    )
     if npc is None:
         cleanup_actor(coll_sensor)
         radar.cleanup()
@@ -201,6 +270,7 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
     brake_step = DECEL_BRAKE_S * FPS
     cut_step = CUT_IN_S * FPS
     lead_braked = False
+    lead_recovered = False
     cut_in_triggered = False
 
     for step in range(EPISODE_S * FPS):
@@ -223,8 +293,21 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         # Inject the scenario event
         if scenario == "decelerating" and step >= brake_step and not lead_braked and npc and npc.is_alive:
             npc.set_autopilot(False)
-            npc.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
+            npc.apply_control(
+                carla.VehicleControl(throttle=0.0, brake=decel_brake)
+            )
             lead_braked = True
+        if (
+            scenario == "decelerating"
+            and lead_braked
+            and not lead_recovered
+            and step >= brake_step + int(decel_duration_s * FPS)
+            and npc
+            and npc.is_alive
+        ):
+            npc.set_autopilot(True, tm.get_port())
+            set_tm_target_speed(npc, tm, cruise_kmh)
+            lead_recovered = True
         if scenario == "cut_in" and step >= cut_step and not cut_in_triggered and npc and npc.is_alive:
             try:
                 tm.force_lane_change(npc, bool(cut_in_to_right))
@@ -252,6 +335,11 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
                 "frame": frame_counter,
                 "timestamp": round(frame_counter / FPS, 3),
                 "scenario": scenario,
+                "weather": weather_name,
+                "episode_id": f"staged_{scenario}_{seed:06d}",
+                "event_gap_m": event_gap_m,
+                "event_brake": decel_brake if scenario == "decelerating" else 0.0,
+                "cruise_speed_kmh": cruise_kmh,
                 "ego_speed_now": round(ego_speed, 4),
                 "autopilot_throttle": round(thr, 4),
                 "autopilot_brake": round(brk, 4),
@@ -283,14 +371,28 @@ def main():
                         choices=SCENARIO_CHOICES)
     parser.add_argument("--history", type=int, default=HISTORY_FRAMES)
     parser.add_argument("--label-horizon", type=int, default=LABEL_HORIZON)
+    parser.add_argument(
+        "--max-speed-kmh",
+        type=float,
+        default=MAX_TARGET_SPEED_KMH,
+        help="Hard ceiling for teacher cruise speed and target labels",
+    )
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR, help="dataset folder (same as base data)")
     parser.add_argument("--out-name", default="data_staged.csv")
     add_radar_arguments(parser)
     args = parser.parse_args()
+    if not 0.0 < args.max_speed_kmh <= MAX_TARGET_SPEED_KMH:
+        parser.error(
+            f"--max-speed-kmh must be in (0, {MAX_TARGET_SPEED_KMH:g}]"
+        )
+    random.seed(args.seed)
+    np.random.seed(args.seed)
 
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, args.out_name)
     config_path = os.path.join(args.output, "dataset_config.json")
+    existing_config = {}
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as fh:
             existing_config = json.load(fh)
@@ -301,6 +403,51 @@ def main():
                 f"requested '{args.radar_backend}'. Use a separate --output "
                 "directory; do not mix sensor distributions."
             )
+        existing_range = float(existing_config.get("radar_range_m", RADAR_RANGE))
+        if abs(existing_range - RADAR_RANGE) > 1e-6:
+            raise RuntimeError(
+                f"Dataset uses radar range {existing_range}m, but this collector "
+                f"uses {RADAR_RANGE}m. Use a separate --output directory."
+            )
+        requested_points = (
+            NATIVE_RADAR_POINTS_PER_SECOND
+            if args.radar_backend == "native"
+            else 240000
+        )
+        existing_points = int(
+            existing_config.get("radar_points_per_second", requested_points)
+        )
+        if existing_points != requested_points:
+            raise RuntimeError(
+                f"Dataset uses {existing_points} radar points/s, but this run "
+                f"uses {requested_points}."
+            )
+        existing_max_speed = float(
+            existing_config.get("max_target_speed_kmh", args.max_speed_kmh)
+        )
+        if abs(existing_max_speed - args.max_speed_kmh) > 1e-6:
+            raise RuntimeError(
+                f"Dataset uses max speed {existing_max_speed} km/h, but this run "
+                f"requested {args.max_speed_kmh} km/h."
+            )
+        if existing_config.get("town", args.town) != args.town:
+            raise RuntimeError(
+                f"Dataset uses town {existing_config.get('town')}, but this run "
+                f"requested {args.town}."
+            )
+        if int(existing_config.get("history_frames", args.history)) != args.history:
+            raise RuntimeError(
+                "Dataset history length differs from --history; use a separate "
+                "--output directory."
+            )
+        if (
+            int(existing_config.get("label_horizon", args.label_horizon))
+            != args.label_horizon
+        ):
+            raise RuntimeError(
+                "Dataset label horizon differs from --label-horizon; use a "
+                "separate --output directory."
+            )
 
     print("=" * 72)
     print("STAGED-SCENARIO DATA COLLECTOR")
@@ -308,6 +455,8 @@ def main():
     print(f"  Town:        {args.town}")
     print(f"  Radar range: {RADAR_RANGE:.0f}m")
     print(f"  Radar:       {args.radar_backend}")
+    print(f"  Speed cap:   {args.max_speed_kmh:.1f} km/h")
+    print(f"  Seed:        {args.seed}")
     print(f"  Scenarios:   {args.scenarios}")
     print(f"  Episodes:    {args.episodes} each")
     print(f"  Output:      {csv_path}")
@@ -338,7 +487,11 @@ def main():
     try:
         for scenario in args.scenarios:
             for ep in range(args.episodes):
-                seed = 1000 * args.scenarios.index(scenario) + ep
+                seed = (
+                    args.seed
+                    + 1000 * SCENARIO_CHOICES.index(scenario)
+                    + ep
+                )
                 print(f"\n  [{scenario}] episode {ep + 1}/{args.episodes}")
                 rows, frame_counter = run_episode(
                     world, carla_map, tm, scenario, seed, frame_counter, args)
@@ -346,7 +499,8 @@ def main():
                     ep_df = pd.DataFrame(rows)
                     # Label per episode so future-speed never leaks across episodes
                     ep_df["teacher_target_speed"] = compute_future_speed_label(
-                        ep_df, args.label_horizon).clip(lower=0.0)
+                        ep_df, args.label_horizon
+                    ).clip(lower=0.0, upper=args.max_speed_kmh / 3.6)
                     ep_df = ep_df.dropna(subset=["teacher_target_speed"]).reset_index(drop=True)
                     episode_frames.append(ep_df)
                     counts[scenario] += len(ep_df)
@@ -357,21 +511,29 @@ def main():
         if episode_frames:
             df = pd.concat(episode_frames, ignore_index=True)
             df.to_csv(csv_path, index=False)
-            if not os.path.exists(config_path):
-                dataset_config = {
-                    "town": args.town,
-                    "fps": FPS,
-                    "radar_backend": args.radar_backend,
-                    "history_frames": args.history,
-                    "label_horizon": args.label_horizon,
-                    "base_feature_cols": BASE_FEATURE_COLS,
-                    "stacked_feature_cols": stacked_feature_names(
-                        BASE_FEATURE_COLS, args.history
-                    ),
-                    "label_col": "teacher_target_speed",
-                }
-                with open(config_path, "w", encoding="utf-8") as fh:
-                    json.dump(dataset_config, fh, indent=2)
+            dataset_config = existing_config
+            dataset_config.update({
+                "town": dataset_config.get("town", args.town),
+                "fps": FPS,
+                "radar_backend": args.radar_backend,
+                "radar_range_m": RADAR_RANGE,
+                "radar_points_per_second": (
+                    NATIVE_RADAR_POINTS_PER_SECOND
+                    if args.radar_backend == "native"
+                    else 240000
+                ),
+                "max_target_speed_kmh": args.max_speed_kmh,
+                "history_frames": args.history,
+                "label_horizon": args.label_horizon,
+                "base_feature_cols": BASE_FEATURE_COLS,
+                "stacked_feature_cols": stacked_feature_names(
+                    BASE_FEATURE_COLS, args.history
+                ),
+                "label_col": "teacher_target_speed",
+                "episode_col": "episode_id",
+            })
+            with open(config_path, "w", encoding="utf-8") as fh:
+                json.dump(dataset_config, fh, indent=2)
             print("\n" + "=" * 72)
             print("STAGED COLLECTION COMPLETE")
             print("=" * 72)

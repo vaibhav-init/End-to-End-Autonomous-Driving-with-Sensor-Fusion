@@ -21,6 +21,12 @@ import numpy as np
 import pandas as pd
 
 from radar import FrontRadar, add_radar_arguments, create_front_radar
+from driving_contract import (
+    MAX_TARGET_SPEED_KMH,
+    NATIVE_RADAR_POINTS_PER_SECOND,
+    RADAR_RANGE_M,
+    WEATHER_SEGMENT_S,
+)
 from yolo_perception import (
     CameraManager,
     TL_STATE_NAMES,
@@ -45,7 +51,7 @@ CARLA_HOST = "127.0.0.1"
 CARLA_PORT = 2000
 DEFAULT_TOWN = "Town04"
 FPS = 20
-MAX_RADAR_RANGE = 100.0
+MAX_RADAR_RANGE = RADAR_RANGE_M
 
 NPC_VEHICLES = 45
 NPC_PEDESTRIANS = 25
@@ -61,7 +67,6 @@ SAVE_DIR = "dataset_throttle_brake"
 #   cut_in            - adjacent-lane vehicle forced into the ego's lane (NHTSA S4)
 SCENARIOS = ("traffic_light", "car_following", "lead_decelerating", "emergency", "cut_in")
 LEAD_BRAKE_PERIOD_S = 10.0    # how often the decelerating lead slams its brakes
-LEAD_BRAKE_DURATION_S = 2.5   # how long it holds the brake
 CUT_IN_PERIOD_S = 12.0        # how often a fresh cut-in is forced
 STALL_SPEED_MPS = 0.3
 STALL_FRAMES = FPS * 8
@@ -149,9 +154,9 @@ def spawn_pedestrians(world, count):
     return [w.id for w in walkers], [c.id for c in controllers]
 
 
-def configure_ego_autopilot(ego, tm, port):
+def configure_ego_autopilot(ego, tm, port, max_speed_kmh=MAX_TARGET_SPEED_KMH):
     ego.set_autopilot(True, port)
-    tm.vehicle_percentage_speed_difference(ego, -5)
+    set_tm_target_speed(ego, tm, max_speed_kmh)
     tm.distance_to_leading_vehicle(ego, 10.0)
     tm.ignore_lights_percentage(ego, 0)
     tm.ignore_signs_percentage(ego, 0)
@@ -160,6 +165,12 @@ def configure_ego_autopilot(ego, tm, port):
 
 
 def set_tm_target_speed(actor, tm, target_kmh):
+    target_kmh = max(0.0, min(float(target_kmh), MAX_TARGET_SPEED_KMH))
+    try:
+        tm.set_desired_speed(actor, target_kmh)
+        return
+    except (AttributeError, RuntimeError):
+        pass
     speed_limit = max(20.0, actor.get_speed_limit())
     pct_diff = 100.0 * (1.0 - target_kmh / speed_limit)
     pct_diff = max(-50.0, min(90.0, pct_diff))
@@ -181,7 +192,13 @@ def waypoint_ahead(carla_map, location, distance_m):
     return waypoint
 
 
-def spawn_lead_vehicle(world, ego, carla_map, tm, ahead_options=(22.0, 28.0, 34.0)):
+def spawn_lead_vehicle(
+    world,
+    ego,
+    carla_map,
+    tm,
+    ahead_options=(15.0, 20.0, 25.0, 30.0, 40.0),
+):
     bp_lib = world.get_blueprint_library()
     vehicle_bps = [
         bp
@@ -189,6 +206,8 @@ def spawn_lead_vehicle(world, ego, carla_map, tm, ahead_options=(22.0, 28.0, 34.
         if int(bp.get_attribute("number_of_wheels")) >= 4
     ]
     port = tm.get_port()
+    ahead_options = list(ahead_options)
+    random.shuffle(ahead_options)
     for distance in ahead_options:
         waypoint = waypoint_ahead(carla_map, ego.get_location(), distance)
         if waypoint is None:
@@ -259,7 +278,26 @@ def compute_future_speed_label(df, horizon):
     return pd.concat(future_speeds, axis=1).mean(axis=1)
 
 
-def safe_respawn_ego(world, ego, spawn_transform, tm, port):
+def compute_segmented_speed_label(df, horizon, group_col="episode_id"):
+    """Compute future-speed labels without crossing episode boundaries."""
+    if group_col not in df.columns:
+        return compute_future_speed_label(df, horizon)
+
+    labels = pd.Series(np.nan, index=df.index, dtype=np.float64)
+    for _, indices in df.groupby(group_col, sort=False).groups.items():
+        segment = df.loc[indices]
+        labels.loc[indices] = compute_future_speed_label(segment, horizon)
+    return labels
+
+
+def safe_respawn_ego(
+    world,
+    ego,
+    spawn_transform,
+    tm,
+    port,
+    max_speed_kmh=MAX_TARGET_SPEED_KMH,
+):
     respawn_transform = carla.Transform(
         carla.Location(
             x=spawn_transform.location.x,
@@ -279,7 +317,7 @@ def safe_respawn_ego(world, ego, spawn_transform, tm, port):
     ego.set_simulate_physics(True)
     ego.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
     world.tick()
-    configure_ego_autopilot(ego, tm, port)
+    configure_ego_autopilot(ego, tm, port, max_speed_kmh=max_speed_kmh)
     world.tick()
 
 
@@ -368,14 +406,68 @@ def main():
     parser.add_argument("--pedestrians", type=int, default=NPC_PEDESTRIANS)
     parser.add_argument("--history", type=int, default=HISTORY_FRAMES)
     parser.add_argument("--label-horizon", type=int, default=LABEL_HORIZON)
+    parser.add_argument(
+        "--max-speed-kmh",
+        type=float,
+        default=MAX_TARGET_SPEED_KMH,
+        help="Hard ceiling for teacher speed and target-speed labels",
+    )
+    parser.add_argument(
+        "--weather-interval-s",
+        type=int,
+        default=WEATHER_SEGMENT_S,
+        help="Change weather within each scenario at this interval",
+    )
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR)
     add_radar_arguments(parser)
     args = parser.parse_args()
+    if not 0.0 < args.max_speed_kmh <= MAX_TARGET_SPEED_KMH:
+        parser.error(
+            f"--max-speed-kmh must be in (0, {MAX_TARGET_SPEED_KMH:g}]"
+        )
+    if args.weather_interval_s <= 0:
+        parser.error("--weather-interval-s must be positive")
+    random.seed(args.seed)
+    np.random.seed(args.seed)
 
     total_frames = args.duration * FPS
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, "data.csv")
     config_path = os.path.join(args.output, "dataset_config.json")
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as fh:
+            existing_config = json.load(fh)
+        expected = {
+            "town": args.town,
+            "radar_backend": args.radar_backend,
+            "radar_range_m": MAX_RADAR_RANGE,
+            "radar_points_per_second": (
+                NATIVE_RADAR_POINTS_PER_SECOND
+                if args.radar_backend == "native"
+                else 240000
+            ),
+            "max_target_speed_kmh": args.max_speed_kmh,
+            "history_frames": args.history,
+            "label_horizon": args.label_horizon,
+        }
+        mismatches = []
+        for key, requested in expected.items():
+            existing = existing_config.get(key, requested)
+            if isinstance(requested, float):
+                matches = abs(float(existing) - requested) <= 1e-6
+            else:
+                matches = existing == requested
+            if not matches:
+                mismatches.append(
+                    f"{key}: existing={existing!r}, requested={requested!r}"
+                )
+        if mismatches:
+            raise RuntimeError(
+                "Refusing to mix incompatible data in the same output folder: "
+                + "; ".join(mismatches)
+                + ". Use a new --output directory or remove the old dataset."
+            )
 
     print("=" * 72)
     print("TARGET-SPEED DATA COLLECTOR")
@@ -386,6 +478,9 @@ def main():
     print(f"  Duration:        {args.duration}s")
     print(f"  History frames:  {args.history}")
     print(f"  Label horizon:   {args.label_horizon}")
+    print(f"  Speed ceiling:   {args.max_speed_kmh:.1f} km/h")
+    print(f"  Weather segment: {args.weather_interval_s}s")
+    print(f"  Seed:            {args.seed}")
     print(f"  Vehicles:        {args.vehicles}")
     print(f"  Pedestrians:     {args.pedestrians}")
     print(f"  Output:          {csv_path}")
@@ -432,7 +527,7 @@ def main():
         raise RuntimeError("Failed to spawn ego vehicle")
 
     port = tm.get_port()
-    configure_ego_autopilot(ego, tm, port)
+    configure_ego_autopilot(ego, tm, port, max_speed_kmh=args.max_speed_kmh)
 
     npc_ids = spawn_vehicles(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_pedestrians(world, args.pedestrians)
@@ -443,6 +538,11 @@ def main():
         MAX_RADAR_RANGE,
         backend=args.radar_backend,
         fps=FPS,
+        points_per_second=(
+            NATIVE_RADAR_POINTS_PER_SECOND
+            if args.radar_backend == "native"
+            else 240000
+        ),
     )
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
@@ -460,20 +560,24 @@ def main():
 
     prev_speed = 0.0
     active_scenario = None
+    segment_counter = -1
+    active_episode_id = None
+    last_weather_change_frame = -args.weather_interval_s * FPS
     lead_actor = None
-    lead_last_change = 0.0
+    lead_last_change_frame = 0
     emergency_actor = None
     emergency_stopped_frames = 0
-    last_emergency_time = time.time()
+    last_emergency_frame = 0
     emergency_count = 0
     respawn_count = 0
     stuck_frames = 0
     absolute_stuck_frames = 0
     lead_brake_until = 0
-    last_lead_brake_time = time.time()
+    lead_brake_force = 1.0
+    last_lead_brake_frame = 0
     cut_in_npc = None
     cut_in_to_right = True
-    last_cut_in_time = time.time()
+    last_cut_in_frame = 0
 
     spawn_requested = threading.Event()
 
@@ -505,6 +609,14 @@ def main():
             if scenario != active_scenario:
                 active_scenario = scenario
                 current_weather_name = apply_random_fog(world)
+                last_weather_change_frame = frame
+                segment_counter += 1
+                active_episode_id = f"base_{segment_counter:04d}_{scenario}"
+                feature_history.clear()
+                prev_speed = speed
+                last_emergency_frame = frame
+                last_lead_brake_frame = frame
+                last_cut_in_frame = frame
                 print(f"\n  Switching scenario -> {scenario}")
                 print(f"  Fog preset -> {current_weather_name}")
                 if scenario in ("car_following", "lead_decelerating"):
@@ -520,46 +632,64 @@ def main():
                 if scenario != "cut_in":
                     cleanup_actor(cut_in_npc)
                     cut_in_npc = None
+            elif frame - last_weather_change_frame >= args.weather_interval_s * FPS:
+                current_weather_name = apply_random_fog(world)
+                last_weather_change_frame = frame
+                segment_counter += 1
+                active_episode_id = f"base_{segment_counter:04d}_{scenario}"
+                feature_history.clear()
+                prev_speed = speed
+                print(f"\n  Weather segment -> {current_weather_name} ({scenario})")
 
             scenario_counts[scenario] += 1
 
             if scenario in ("car_following", "lead_decelerating"):
                 if lead_actor is None or not lead_actor.is_alive:
                     lead_actor = spawn_lead_vehicle(world, ego, carla_map, tm)
-                    lead_last_change = time.time()
+                    lead_last_change_frame = frame
                     lead_brake_until = 0
                 elif ego.get_location().distance(lead_actor.get_location()) > 55.0:
                     cleanup_actor(lead_actor)
                     lead_actor = spawn_lead_vehicle(world, ego, carla_map, tm)
-                    lead_last_change = time.time()
+                    lead_last_change_frame = frame
                     lead_brake_until = 0
 
-                if lead_actor and time.time() - lead_last_change > 4.0:
+                if lead_actor and frame - lead_last_change_frame > 4 * FPS:
                     set_tm_target_speed(lead_actor, tm, random.uniform(10.0, 40.0))
-                    lead_last_change = time.time()
+                    lead_last_change_frame = frame
 
                 # S2: the decelerating lead periodically slams its brakes
                 if scenario == "lead_decelerating" and lead_actor and lead_actor.is_alive:
                     if frame < lead_brake_until:
-                        lead_actor.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
+                        lead_actor.apply_control(
+                            carla.VehicleControl(
+                                throttle=0.0,
+                                brake=lead_brake_force,
+                            )
+                        )
                         if frame == lead_brake_until - 1:
                             lead_actor.set_autopilot(True, port)
                             set_tm_target_speed(lead_actor, tm, random.uniform(20.0, 40.0))
-                    elif time.time() - last_lead_brake_time > LEAD_BRAKE_PERIOD_S:
+                    elif frame - last_lead_brake_frame > LEAD_BRAKE_PERIOD_S * FPS:
                         lead_actor.set_autopilot(False)
-                        lead_brake_until = frame + int(LEAD_BRAKE_DURATION_S * FPS)
-                        last_lead_brake_time = time.time()
-                        print("  Lead vehicle braking hard (S2)")
+                        lead_brake_force = random.choice((0.5, 0.75, 1.0))
+                        brake_duration_s = random.uniform(1.5, 3.5)
+                        lead_brake_until = frame + int(brake_duration_s * FPS)
+                        last_lead_brake_frame = frame
+                        print(
+                            "  Lead vehicle decelerating (S2): "
+                            f"brake={lead_brake_force:.2f}, "
+                            f"duration={brake_duration_s:.1f}s"
+                        )
 
             if scenario == "emergency":
-                now = time.time()
                 if (
                     emergency_actor is None
                     and speed > 5.0
-                    and now - last_emergency_time > 18.0
+                    and frame - last_emergency_frame > 18 * FPS
                 ):
                     spawn_requested.set()
-                    last_emergency_time = now
+                    last_emergency_frame = frame
 
                 if spawn_requested.is_set() and emergency_actor is None and speed > 5.0:
                     spawn_requested.clear()
@@ -611,17 +741,17 @@ def main():
                     if speed > 5.0:
                         cut_in_npc, cut_in_to_right = spawn_npc_adjacent_lane(
                             world, ego, carla_map, tm)
-                        last_cut_in_time = time.time()
+                        last_cut_in_frame = frame
                 elif ego.get_location().distance(cut_in_npc.get_location()) > 60.0:
                     cleanup_actor(cut_in_npc)
                     cut_in_npc = None
-                elif time.time() - last_cut_in_time > CUT_IN_PERIOD_S:
+                elif frame - last_cut_in_frame > CUT_IN_PERIOD_S * FPS:
                     try:
                         tm.force_lane_change(cut_in_npc, cut_in_to_right)
                         print("  NPC forced cut-in (S4)")
                     except RuntimeError:
                         pass
-                    last_cut_in_time = time.time()
+                    last_cut_in_frame = frame
 
             radar.update_ego_speed(speed)
             radar_state = radar.get()
@@ -657,10 +787,19 @@ def main():
                 absolute_stuck_frames = 0
                 respawn_count += 1
                 new_spawn = random.choice(safe_spawns)
-                safe_respawn_ego(world, ego, new_spawn, tm, port)
+                safe_respawn_ego(
+                    world,
+                    ego,
+                    new_spawn,
+                    tm,
+                    port,
+                    max_speed_kmh=args.max_speed_kmh,
+                )
                 feature_history.clear()
                 prev_speed = 0.0
-                lead_last_change = time.time()
+                lead_last_change_frame = frame
+                segment_counter += 1
+                active_episode_id = f"base_{segment_counter:04d}_{scenario}"
                 print(f"  Ego safely respawned after confirmed stall ({respawn_count})")
                 continue
 
@@ -696,6 +835,8 @@ def main():
                         "frame": frame,
                         "timestamp": round(frame / FPS, 3),
                         "scenario": scenario,
+                        "weather": current_weather_name,
+                        "episode_id": active_episode_id,
                         "ego_speed_now": round(speed, 4),
                         "autopilot_throttle": round(control.throttle, 4),
                         "autopilot_brake": round(control.brake, 4),
@@ -737,8 +878,14 @@ def main():
         try:
             if samples:
                 df = pd.DataFrame(samples)
-                df["teacher_target_speed"] = compute_future_speed_label(df, args.label_horizon)
-                df["teacher_target_speed"] = df["teacher_target_speed"].clip(lower=0.0)
+                df["teacher_target_speed"] = compute_segmented_speed_label(
+                    df,
+                    args.label_horizon,
+                )
+                df["teacher_target_speed"] = df["teacher_target_speed"].clip(
+                    lower=0.0,
+                    upper=args.max_speed_kmh / 3.6,
+                )
                 df = df.dropna(subset=["teacher_target_speed"]).reset_index(drop=True)
                 df.to_csv(csv_path, index=False)
 
@@ -746,6 +893,15 @@ def main():
                     "town": args.town,
                     "fps": FPS,
                     "radar_backend": args.radar_backend,
+                    "radar_range_m": MAX_RADAR_RANGE,
+                    "radar_points_per_second": (
+                        NATIVE_RADAR_POINTS_PER_SECOND
+                        if args.radar_backend == "native"
+                        else 240000
+                    ),
+                    "max_target_speed_kmh": args.max_speed_kmh,
+                    "weather_interval_s": args.weather_interval_s,
+                    "collection_seed": args.seed,
                     "history_frames": args.history,
                     "label_horizon": args.label_horizon,
                     "base_feature_cols": BASE_FEATURE_COLS,

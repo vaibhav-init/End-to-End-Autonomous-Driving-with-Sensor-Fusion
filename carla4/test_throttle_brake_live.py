@@ -31,6 +31,11 @@ from yolo_perception import (
 from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS
 from speed_model import TargetSpeedMLP, flatten_history
 from weather_utils import apply_random_fog
+from driving_contract import (
+    MAX_TARGET_SPEED_KMH,
+    NATIVE_RADAR_POINTS_PER_SECOND,
+    RADAR_RANGE_M,
+)
 
 
 CARLA_ROOT = os.environ.get("CARLA_ROOT", "/opt/carla-simulator")
@@ -48,9 +53,9 @@ except ImportError:
 
 CARLA_HOST = "127.0.0.1"
 CARLA_PORT = 2000
-DEFAULT_TOWN = "Town01"
+DEFAULT_TOWN = "Town04"
 FPS = 20
-MAX_RADAR_RANGE = 50.0
+MAX_RADAR_RANGE = RADAR_RANGE_M
 BOOTSTRAP_TARGET_SPEED_MPS = 12.0 / 3.6
 # Default cruising speed when no obstacle is detected (~30 km/h)
 CRUISE_SPEED_MPS = 30.0 / 3.6
@@ -390,6 +395,12 @@ def main():
     parser.add_argument("--duration", type=int, default=180)
     parser.add_argument("--vehicles", type=int, default=20)
     parser.add_argument("--pedestrians", type=int, default=10)
+    parser.add_argument(
+        "--max-speed-kmh",
+        type=float,
+        default=None,
+        help="Optional runtime ceiling; cannot exceed the model's training ceiling",
+    )
     add_radar_arguments(parser)
     args = parser.parse_args()
 
@@ -412,6 +423,39 @@ def main():
     history_frames = int(model_config.get("history_frames") or 10)
     base_feature_cols = model_config.get("base_feature_cols") or DEFAULT_BASE_FEATURE_COLS
     trained_radar_backend = model_config.get("radar_backend", "native")
+    radar_range = float(model_config.get("radar_range_m", MAX_RADAR_RANGE))
+    radar_points_per_second = int(
+        model_config.get(
+            "radar_points_per_second",
+            (
+                NATIVE_RADAR_POINTS_PER_SECOND
+                if trained_radar_backend == "native"
+                else 240000
+            ),
+        )
+    )
+    trained_max_speed_kmh = min(
+        float(model_config.get("max_target_speed_kmh", MAX_TARGET_SPEED_KMH)),
+        MAX_TARGET_SPEED_KMH,
+    )
+    requested_max_speed_kmh = (
+        trained_max_speed_kmh
+        if args.max_speed_kmh is None
+        else float(args.max_speed_kmh)
+    )
+    if requested_max_speed_kmh <= 0.0:
+        parser.error("--max-speed-kmh must be positive")
+    runtime_max_speed_kmh = min(
+        requested_max_speed_kmh,
+        trained_max_speed_kmh,
+    )
+    if requested_max_speed_kmh > trained_max_speed_kmh:
+        print(
+            f"WARNING: requested {requested_max_speed_kmh:.1f} km/h, but the "
+            f"model was trained up to {trained_max_speed_kmh:.1f} km/h; "
+            "using the trained ceiling."
+        )
+    runtime_max_speed_mps = runtime_max_speed_kmh / 3.6
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TargetSpeedMLP(input_dim=len(feature_cols)).to(device)
     model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
@@ -428,12 +472,21 @@ def main():
     print(f"  Duration:       {args.duration}s")
     print(f"  History frames: {history_frames}")
     print(f"  Feature count:  {len(feature_cols)}")
-    if args.radar_backend != trained_radar_backend:
+    print(f"  Radar range:    {radar_range:.0f}m")
+    print(f"  Radar sampling: {radar_points_per_second} points/s")
+    print(f"  Speed ceiling:  {runtime_max_speed_kmh:.1f}km/h")
+    trained_town = model_config.get("town")
+    if trained_town and trained_town != args.town:
         print(
-            "  WARNING: model data used radar backend "
-            f"'{trained_radar_backend}', runtime uses '{args.radar_backend}'."
+            f"  WARNING: model data used {trained_town}, runtime uses {args.town}."
         )
-        print("           Recollect and retrain before reporting final results.")
+    if args.radar_backend != trained_radar_backend:
+        raise RuntimeError(
+            "Sensor distribution mismatch: model data used radar backend "
+            f"'{trained_radar_backend}', runtime requested "
+            f"'{args.radar_backend}'. Recollect/retrain or select the trained "
+            "backend."
+        )
     print("=" * 76)
 
     client = carla.Client(args.host, args.port)
@@ -479,7 +532,10 @@ def main():
         f"  Ego spawned at ({ego.get_location().x:.1f}, {ego.get_location().y:.1f})"
     )
 
-    route_agent = BasicAgent(ego, target_speed=30)
+    route_agent = BasicAgent(
+        ego,
+        target_speed=min(30.0, runtime_max_speed_kmh),
+    )
     initial_destination = choose_new_destination(ego, spawn_points)
     route_agent.set_destination(initial_destination)
     print(
@@ -498,10 +554,10 @@ def main():
     radar = create_front_radar(
         ego,
         world,
-        MAX_RADAR_RANGE,
+        radar_range,
         backend=args.radar_backend,
         fps=FPS,
-        points_per_second=1500 if args.radar_backend == "native" else 240000,
+        points_per_second=radar_points_per_second,
     )
     print(f"  Distance source: Front radar ({args.radar_backend})")
 
@@ -515,11 +571,12 @@ def main():
 
     feature_history = deque(maxlen=history_frames)
     prev_speed = 0.0
-    min_distance_seen = MAX_RADAR_RANGE
+    min_distance_seen = radar_range
     max_target_seen = 0.0
     total_brake_frames = 0
     total_throttle_frames = 0
     near_miss_count = 0
+    near_miss_active = False
 
     scenario_state = init_scenario_state()
     next_auto_scenario_time = time.time() + 25.0
@@ -564,7 +621,7 @@ def main():
                 ttc = 10.0
             min_distance_seen = min(min_distance_seen, dist_state["distance"])
 
-            obstacle_detected = float(dist_state["distance"] < MAX_RADAR_RANGE * 0.95)
+            obstacle_detected = float(dist_state["distance"] < radar_range * 0.95)
             current_features = {
                 "ego_speed": round(speed, 4),
                 "ego_acceleration": round(max(-20.0, min(20.0, accel)), 4),
@@ -598,6 +655,10 @@ def main():
             # road. Red light check prevents trying to drive through a red.
             if obstacle_detected < 0.5 and int(visual["traffic_light_state"]) != TL_RED:
                 target_speed_pred = max(target_speed_pred, CRUISE_SPEED_MPS)
+            target_speed_pred = min(
+                max(0.0, target_speed_pred),
+                runtime_max_speed_mps,
+            )
 
             max_target_seen = max(max_target_seen, target_speed_pred)
 
@@ -606,8 +667,10 @@ def main():
                 total_brake_frames += 1
             if throttle > 0.05:
                 total_throttle_frames += 1
-            if dist_state["distance"] < 5.0 and speed > 0.5:
+            is_near_miss = dist_state["distance"] < 5.0 and speed > 0.5
+            if is_near_miss and not near_miss_active:
                 near_miss_count += 1
+            near_miss_active = is_near_miss
 
             if route_agent.done():
                 destination = choose_new_destination(ego, spawn_points)

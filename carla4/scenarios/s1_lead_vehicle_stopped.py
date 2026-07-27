@@ -54,7 +54,7 @@ from staging import SpeedController
 from scenario_weather import set_weather_condition
 from config import (
     CARLA_HOST, CARLA_PORT, DEFAULT_TOWN, FPS,
-    S1_OBSTACLE_DISTANCE, FOG_LADDER, RANDOM_SEEDS,
+    S1_OBSTACLE_DISTANCE, S1_SPAWN_SPEED_KMH, FOG_LADDER, RANDOM_SEEDS,
     SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
     BACKGROUND_VEHICLES, BACKGROUND_PEDESTRIANS,
 )
@@ -62,7 +62,7 @@ from config import (
 # ---------------------------------------------------------------------------
 # Staging constants
 # ---------------------------------------------------------------------------
-STAGE_TARGET_SPEED_KMH = 60.0   # ego must reach this before obstacle spawns
+STAGE_TARGET_SPEED_KMH = S1_SPAWN_SPEED_KMH
 STAGE_MIN_STEPS = 60             # minimum staging steps (let model warm up)
 TL_CLEARANCE_M = 100.0           # min distance from traffic lights
 
@@ -253,6 +253,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 throttle=throttle,
                 brake=brake,
                 steer=steer,
+                critical_event=obstacle_spawned,
                 collision=collision_occurred[0],
                 ego_accel=accel,
             )

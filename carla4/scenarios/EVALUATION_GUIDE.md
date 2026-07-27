@@ -17,7 +17,7 @@ This evaluation runs **3 NHTSA-aligned driving scenarios** under **4 extreme wea
 
 ### MLP Safety Rules (hardcoded overrides)
 1. If model predicts target speed < 1 km/h → **full brake** (throttle=0, brake=1.0)
-2. If obstacle detected within **30m** on radar → **full brake** (throttle=0, brake=1.0)
+2. If an obstacle is within **30m and closing**, or TTC is below 3s → **full brake**
 
 ---
 
@@ -31,9 +31,11 @@ This evaluation runs **3 NHTSA-aligned driving scenarios** under **4 extreme wea
 - **Duration:** 30 seconds
 
 ### S2: Lead Vehicle Decelerating
-- **What happens:** Ego follows an NPC at 60 km/h with a **15m gap**. At step 200, the NPC **slams brakes**.
+- **What happens:** Ego follows an NPC at 30 km/h with a **25m gap**, then the NPC **slams brakes**.
 - **Test:** Can the driver react to a sudden deceleration ahead?
-- **Staging:** ON by default — GapKeepController maintains 15m gap until NPC brakes, then hands control to the driver
+- **Staging:** ON by default — GapKeepController waits for stable speed/gap,
+  hands control to the evaluated driver, waits 1 second, and only then brakes
+  the NPC. This prevents handover braking from being reported as reaction time.
 - **Script:** `s2_lead_vehicle_decelerating.py`
 - **Duration:** 35 seconds
 
@@ -97,7 +99,8 @@ conda activate carla4
 cd carla4/scenarios
 
 # All 3 scenarios, all 4 weathers
-python run_all.py --driver mlp --scenarios 1 2 4 --output-root results_mlp --model-dir ../model_throttle_brake
+python run_all.py --driver mlp --radar-backend native --scenarios 1 2 4 \
+  --output-root results_mlp --model-dir ../model_throttle_brake_native
 
 # Or individual scenarios:
 python s1_lead_vehicle_stopped.py --driver mlp --fog 1 2 3 4 --seeds 42 --output results_mlp/results_s1
@@ -144,6 +147,7 @@ python analyze_results.py --runs pcla=results_pcla mlp=results_mlp --out compari
 | `throttle` | Driver's throttle command (0–1) |
 | `brake` | Driver's brake command (0–1) |
 | `steer` | Driver's steer command (-1 to +1) |
+| `critical_event` | 1 from obstacle spawn, NPC braking, or cut-in trigger onward |
 | `ego_accel_mps2` | Longitudinal acceleration (m/s²) |
 | `collision_occurred` | 0 or 1 |
 | `min_distance_so_far_m` | Running minimum distance (= stopping distance in last row) |
@@ -153,7 +157,8 @@ python analyze_results.py --runs pcla=results_pcla mlp=results_mlp --out compari
 | Metric | How Computed | What It Tells You |
 |--------|-------------|-------------------|
 | **Stopping Distance** | min(`gt_distance_to_npc_m`) | How close the ego got before stopping |
-| **Reaction Time** | First obstacle tick → first `brake > 0.3` | How fast the driver started braking |
+| **Reaction Time** | First `critical_event=1` tick → first `brake > 0.3` | How fast the driver reacted to the actual event |
+| **Pre-Event Brake** | Fraction of pre-event ticks with `brake > 0.3` | Detects staging or policy braking that invalidates latency |
 | **Peak Deceleration** | max(−`ego_accel_mps2`) | Strongest braking force applied |
 | **Time to Stop** | First obstacle tick → `ego_speed < 1 km/h` | Total time to reach full stop |
 | **Min TTC** | min(`time_to_collision_s`) | Closest moment to impact |
@@ -168,8 +173,9 @@ Current settings in `config.py`:
 | Parameter | Value | Effect |
 |-----------|-------|--------|
 | `S1_OBSTACLE_DISTANCE` | 25m | Obstacle placed 25m ahead at 60 km/h |
-| `S2_NPC_INITIAL_GAP` | 15m | NPC starts 15m ahead |
-| `S2_BRAKE_TRIGGER_STEP` | 200 | NPC brakes at step 200 (10s at 20 FPS) |
+| `S2_NPC_INITIAL_GAP` | 25m | Controlled pre-event following gap |
+| `S2_NPC_SPEED_KMH` | 30 km/h | Shared comparison operating point |
+| `S2_BRAKE_TRIGGER_STEP` | 200 | Fallback only when staging is disabled |
 | `S4_NPC_AHEAD_M` | 25m | NPC starts 25m ahead in adjacent lane |
 | `S4_CUT_IN_TRIGGER_STEP` | 60 | Cut-in fires at step 60 (3s) |
 | `RANDOM_SEEDS` | [42] | 1 seed |

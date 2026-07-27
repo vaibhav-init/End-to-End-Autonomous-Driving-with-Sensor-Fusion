@@ -16,9 +16,9 @@ FPS = 20
 # ============================================================================
 S1_OBSTACLE_DISTANCE = 25.0       # metres ahead to place stopped vehicle (S1) — tight!
 S1_SPAWN_SPEED_KMH = 60.0         # spawn S1 obstacle only once ego exceeds this speed
-S2_NPC_INITIAL_GAP = 15.0         # initial gap between ego and NPC (S2) — tight!
-S2_NPC_SPEED_KMH = 60.0           # NPC cruising speed (S2)
-S2_BRAKE_TRIGGER_STEP = 200       # step at which NPC slams brakes (S2) — earlier
+S2_NPC_INITIAL_GAP = 25.0         # controlled comparison gap for S2
+S2_NPC_SPEED_KMH = 30.0           # fair shared operating point for both models
+S2_BRAKE_TRIGGER_STEP = 200       # fallback trigger when S2 staging is disabled
 S3_NPC_CONSTANT_SPEED_KMH = 20.0  # NPC constant speed (S3)
 S4_NPC_SPEED_KMH = 60.0           # NPC cruising speed in adjacent lane (S4)
 S4_NPC_AHEAD_M = 25.0             # NPC starts 25m ahead in adjacent lane (S4) — tighter
