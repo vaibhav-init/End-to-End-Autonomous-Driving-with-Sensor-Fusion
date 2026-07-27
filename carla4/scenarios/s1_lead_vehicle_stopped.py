@@ -58,12 +58,15 @@ from config import (
     SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
     BACKGROUND_VEHICLES, BACKGROUND_PEDESTRIANS,
 )
+from driving_contract import MAX_TARGET_SPEED_KMH
 
 # ---------------------------------------------------------------------------
 # Staging constants
 # ---------------------------------------------------------------------------
 STAGE_TARGET_SPEED_KMH = S1_SPAWN_SPEED_KMH
 STAGE_MIN_STEPS = 60             # minimum staging steps (let model warm up)
+STAGE_STABLE_S = 1.0             # require a stable speed before the event
+STAGE_SPEED_TOLERANCE_KMH = 1.0
 TL_CLEARANCE_M = 100.0           # min distance from traffic lights
 
 
@@ -80,14 +83,19 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 radar_backend=None, scenario_id=1):
+                 radar_backend=None,
+                 target_speed_kmh=STAGE_TARGET_SPEED_KMH,
+                 obstacle_distance_m=S1_OBSTACLE_DISTANCE,
+                 stage_stable_s=STAGE_STABLE_S,
+                 stage_speed_tolerance_kmh=STAGE_SPEED_TOLERANCE_KMH,
+                 scenario_id=1):
     """Run S1: Lead Vehicle Stopped at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
 
     # SpeedController for staging — drives ego to target speed
     speed_ctrl = SpeedController(
-        target_speed_mps=STAGE_TARGET_SPEED_KMH / 3.6, dt=1.0 / FPS)
+        target_speed_mps=target_speed_kmh / 3.6, dt=1.0 / FPS)
 
     # Get highway-only spawn points (multi-lane straight roads)
     highway_spawns = get_highway_spawns(carla_map)
@@ -171,12 +179,20 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     collision_sensor.listen(on_collision)
 
     # Logger
-    logger = GroundTruthLogger(output_dir, scenario_id, fog_density, seed)
+    logger = GroundTruthLogger(
+        output_dir,
+        scenario_id,
+        fog_density,
+        seed,
+        target_speed_kmh=target_speed_kmh,
+        event_distance_m=obstacle_distance_m,
+    )
 
     obstacle = None
     obstacle_spawned = False
-    handover_done = False
     max_steps = SCENARIO_DURATION_S[scenario_id] * FPS
+    stable_speed_frames = 0
+    required_stable_frames = max(1, int(stage_stable_s * FPS))
 
     print(f"  S1 | fog={fog_density} | seed={seed} | "
           f"spawned at ({ego.get_location().x:.0f}, {ego.get_location().y:.0f})")
@@ -201,11 +217,19 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 control = carla.VehicleControl(
                     throttle=thr, brake=brk, steer=control.steer)
 
-                # Spawn obstacle once at target speed AND past minimum steps
+                speed_is_stable = (
+                    abs(ego_spd_kmh - target_speed_kmh)
+                    <= stage_speed_tolerance_kmh
+                )
+                stable_speed_frames = (
+                    stable_speed_frames + 1 if speed_is_stable else 0
+                )
+
+                # Spawn only after the requested speed has actually stabilized.
                 if (step >= STAGE_MIN_STEPS
-                        and ego_spd_kmh >= STAGE_TARGET_SPEED_KMH * 0.9):
+                        and stable_speed_frames >= required_stable_frames):
                     obstacle = spawn_obstacle_in_ego_direction(
-                        world, carla_map, ego, S1_OBSTACLE_DISTANCE)
+                        world, carla_map, ego, obstacle_distance_m)
                     if obstacle:
                         obstacle_spawned = True
                         obs_dist = ego.get_location().distance(
@@ -303,6 +327,16 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         cleanup_actor(obstacle)
         cleanup_actor(ego)
 
+    if not obstacle_spawned:
+        try:
+            os.remove(logger.filepath)
+        except OSError:
+            pass
+        raise RuntimeError(
+            "S1 never reached a stable staged speed or could not spawn the "
+            "obstacle; invalid CSV removed"
+        )
+
     return logger
 
 
@@ -326,7 +360,41 @@ def main():
                         default=os.environ.get("CARLA_RADAR_BACKEND", "native"),
                         help="MLP forward-radar backend")
     parser.add_argument("--headless", action="store_true", help="No spectator camera")
+    parser.add_argument(
+        "--target-speed-kmh",
+        type=float,
+        default=STAGE_TARGET_SPEED_KMH,
+        help="Stable ego speed required before spawning the stopped obstacle",
+    )
+    parser.add_argument(
+        "--obstacle-distance-m",
+        type=float,
+        default=S1_OBSTACLE_DISTANCE,
+        help="Stopped-obstacle spawn distance",
+    )
+    parser.add_argument(
+        "--stage-stable-s",
+        type=float,
+        default=STAGE_STABLE_S,
+        help="Time the ego must remain near target speed before the event",
+    )
+    parser.add_argument(
+        "--stage-speed-tolerance-kmh",
+        type=float,
+        default=STAGE_SPEED_TOLERANCE_KMH,
+        help="Allowed speed error while declaring the staged state stable",
+    )
     args = parser.parse_args()
+    if not 0.0 < args.target_speed_kmh <= MAX_TARGET_SPEED_KMH:
+        parser.error(
+            f"--target-speed-kmh must be in (0, {MAX_TARGET_SPEED_KMH:g}]"
+        )
+    if min(
+        args.obstacle_distance_m,
+        args.stage_stable_s,
+        args.stage_speed_tolerance_kmh,
+    ) <= 0.0:
+        parser.error("S1 distance and staging values must be positive")
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(30.0)
@@ -352,8 +420,12 @@ def main():
     print(f"  Fog levels:      {args.fog}")
     print(f"  Seeds:           {args.seeds}")
     print(f"  Output dir:      {args.output}")
-    print(f"  Obstacle at:     {S1_OBSTACLE_DISTANCE:.0f}m")
-    print(f"  Staging:         ON (target speed={STAGE_TARGET_SPEED_KMH:.0f}km/h)")
+    print(f"  Obstacle at:     {args.obstacle_distance_m:.1f}m")
+    print(f"  Staging target:  {args.target_speed_kmh:.1f}km/h")
+    print(
+        f"  Stable state:    {args.stage_stable_s:.1f}s within "
+        f"±{args.stage_speed_tolerance_kmh:.1f}km/h"
+    )
     print(f"  Runs:            {len(args.fog)} × {len(args.seeds)} = "
           f"{len(args.fog) * len(args.seeds)}")
     print("=" * 64)
@@ -367,6 +439,12 @@ def main():
                                       model_dir=args.model_dir,
                                       pcla_agent=args.pcla_agent,
                                       radar_backend=args.radar_backend,
+                                      target_speed_kmh=args.target_speed_kmh,
+                                      obstacle_distance_m=args.obstacle_distance_m,
+                                      stage_stable_s=args.stage_stable_s,
+                                      stage_speed_tolerance_kmh=(
+                                          args.stage_speed_tolerance_kmh
+                                      ),
                                       scenario_id=1)
                 results.append({
                     "fog": fog,

@@ -37,6 +37,8 @@ import time
 from config import (
     FOG_LADDER,
     RANDOM_SEEDS,
+    S1_OBSTACLE_DISTANCE,
+    S1_SPAWN_SPEED_KMH,
     S2_NPC_INITIAL_GAP,
     S2_NPC_SPEED_KMH,
 )
@@ -76,6 +78,30 @@ def main():
     parser.add_argument("--timeout", type=int, default=300,
                         help="Per-run subprocess timeout in seconds")
     parser.add_argument(
+        "--s1-target-speed-kmh",
+        type=float,
+        default=S1_SPAWN_SPEED_KMH,
+        help="S1 stress-test speed before obstacle appearance",
+    )
+    parser.add_argument(
+        "--s1-obstacle-distance-m",
+        type=float,
+        default=S1_OBSTACLE_DISTANCE,
+        help="S1 stopped-obstacle distance",
+    )
+    parser.add_argument(
+        "--s1-stage-stable-s",
+        type=float,
+        default=1.0,
+        help="Required stable time at the S1 target speed",
+    )
+    parser.add_argument(
+        "--s1-stage-speed-tolerance-kmh",
+        type=float,
+        default=1.0,
+        help="Allowed S1 staging speed error",
+    )
+    parser.add_argument(
         "--s2-target-speed-kmh",
         type=float,
         default=S2_NPC_SPEED_KMH,
@@ -92,6 +118,13 @@ def main():
         help="Disable controlled S2 staging (not recommended for comparisons)",
     )
     args = parser.parse_args()
+    if min(
+        args.s1_target_speed_kmh,
+        args.s1_obstacle_distance_m,
+        args.s1_stage_stable_s,
+        args.s1_stage_speed_tolerance_kmh,
+    ) <= 0.0:
+        parser.error("S1 stress-test parameters must be positive")
     if args.output_root is None:
         if args.driver == "mlp" and args.radar_backend == "cshenron":
             args.output_root = "results_mlp_cshenron"
@@ -148,7 +181,18 @@ def main():
                         "--pcla-agent", args.pcla_agent,
                         "--radar-backend", args.radar_backend,
                     ]
-                    if sid == 2:
+                    if sid == 1:
+                        cmd.extend([
+                            "--target-speed-kmh",
+                            str(args.s1_target_speed_kmh),
+                            "--obstacle-distance-m",
+                            str(args.s1_obstacle_distance_m),
+                            "--stage-stable-s",
+                            str(args.s1_stage_stable_s),
+                            "--stage-speed-tolerance-kmh",
+                            str(args.s1_stage_speed_tolerance_kmh),
+                        ])
+                    elif sid == 2:
                         cmd.extend([
                             "--target-speed-kmh",
                             str(args.s2_target_speed_kmh),

@@ -121,15 +121,77 @@ def load_runs(runs):
                 print(f"  [warn] skip {path}: empty or missing columns")
                 continue
             metrics = per_run_metrics(df)
+            target_speed = (
+                pd.to_numeric(
+                    df["test_target_speed_kmh"], errors="coerce"
+                ).dropna()
+                if "test_target_speed_kmh" in df.columns
+                else pd.Series(dtype=float)
+            )
+            event_distance = (
+                pd.to_numeric(
+                    df["test_event_distance_m"], errors="coerce"
+                ).dropna()
+                if "test_event_distance_m" in df.columns
+                else pd.Series(dtype=float)
+            )
             records.append({
                 "driver": label,
                 "scenario": int(df["scenario_id"].iloc[0]),
                 "fog": int(df["fog_density"].iloc[0]),
                 "seed": int(df["seed"].iloc[0]),
                 "file": os.path.basename(path),
+                "test_target_speed_kmh": (
+                    float(target_speed.iloc[0])
+                    if not target_speed.empty
+                    else np.nan
+                ),
+                "test_event_distance_m": (
+                    float(event_distance.iloc[0])
+                    if not event_distance.empty
+                    else np.nan
+                ),
                 **metrics,
             })
     return pd.DataFrame.from_records(records)
+
+
+def validate_comparison_matrix(df):
+    """Reject duplicate, unpaired, or mixed-profile comparison inputs."""
+    key_cols = ["scenario", "fog", "seed"]
+    duplicates = df.duplicated(["driver", *key_cols], keep=False)
+    if duplicates.any():
+        rows = df.loc[duplicates, ["driver", *key_cols, "file"]]
+        raise RuntimeError(
+            "Duplicate result keys found; use clean output roots:\n"
+            + rows.to_string(index=False)
+        )
+
+    drivers = sorted(df["driver"].unique())
+    if len(drivers) > 1:
+        reference = set(
+            map(tuple, df[df["driver"] == drivers[0]][key_cols].to_numpy())
+        )
+        for driver in drivers[1:]:
+            candidate = set(
+                map(tuple, df[df["driver"] == driver][key_cols].to_numpy())
+            )
+            if candidate != reference:
+                raise RuntimeError(
+                    f"Run matrix for '{driver}' does not match "
+                    f"'{drivers[0]}'. Missing/extra keys: "
+                    f"{sorted(reference ^ candidate)}"
+                )
+
+    for scenario, scenario_df in df.groupby("scenario"):
+        profiles = scenario_df[
+            ["test_target_speed_kmh", "test_event_distance_m"]
+        ].dropna(how="all").drop_duplicates()
+        if len(profiles) > 1:
+            raise RuntimeError(
+                f"S{scenario} contains mixed stress profiles:\n"
+                + profiles.to_string(index=False)
+            )
 
 
 def build_summary(df):
@@ -218,6 +280,9 @@ def _cdf(ax, values, label, point_labels=None, unit="", driver_idx=0):
     base_y_sign = 1 if driver_idx % 2 == 0 else -1
     va = "bottom" if base_y_sign > 0 else "top"
 
+    # Dense 15+ run CDFs become unreadable if every empirical point is labelled.
+    if vals.size > 8:
+        return
     for i, (xv, yv) in enumerate(zip(vals, y_cdf)):
         plbl = plabels[i]
         if plbl:
@@ -354,6 +419,7 @@ def main():
     if df.empty:
         print("  No runs loaded — nothing to compare.")
         sys.exit(1)
+    validate_comparison_matrix(df)
 
     raw_path = os.path.join(args.out, "per_run_metrics.csv")
     df.to_csv(raw_path, index=False)

@@ -26,6 +26,8 @@ class GroundTruthLogger:
         "fog_density",
         "scenario_id",
         "seed",
+        "test_target_speed_kmh",
+        "test_event_distance_m",
         "gt_ego_speed_kmh",
         "gt_npc_speed_kmh",
         "gt_distance_to_npc_m",
@@ -41,7 +43,15 @@ class GroundTruthLogger:
         "min_distance_so_far_m",
     ]
 
-    def __init__(self, output_dir, scenario_id, fog_density, seed):
+    def __init__(
+        self,
+        output_dir,
+        scenario_id,
+        fog_density,
+        seed,
+        target_speed_kmh=None,
+        event_distance_m=None,
+    ):
         os.makedirs(output_dir, exist_ok=True)
         self.filepath = os.path.join(
             output_dir,
@@ -50,6 +60,8 @@ class GroundTruthLogger:
         self.scenario_id = scenario_id
         self.fog_density = fog_density
         self.seed = seed
+        self.target_speed_kmh = target_speed_kmh
+        self.event_distance_m = event_distance_m
         self._file = open(self.filepath, "w", newline="")
         self._writer = csv.DictWriter(self._file, fieldnames=self.FIELDS)
         self._writer.writeheader()
@@ -92,6 +104,16 @@ class GroundTruthLogger:
             "fog_density": self.fog_density,
             "scenario_id": self.scenario_id,
             "seed": self.seed,
+            "test_target_speed_kmh": (
+                round(self.target_speed_kmh, 4)
+                if self.target_speed_kmh is not None
+                else ""
+            ),
+            "test_event_distance_m": (
+                round(self.event_distance_m, 4)
+                if self.event_distance_m is not None
+                else ""
+            ),
             "gt_ego_speed_kmh": round(ego_speed_kmh, 4),
             "gt_npc_speed_kmh": round(npc_speed_kmh, 4) if npc_speed_kmh is not None else "",
             "gt_distance_to_npc_m": round(dist, 4),
