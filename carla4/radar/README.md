@@ -106,6 +106,15 @@ It writes a timestamped directory containing:
 The terminal ends with a block headed `RADAR VALIDATION SUMMARY — COPY THIS
 BLOCK BACK TO CODEX`. Send that block first. If semantic-tag or target
 association warnings appear, also send `metadata.json` and `summary.json`.
+To classify wrong realistic selections without rerunning CARLA, analyze the
+existing detailed log:
+
+```bash
+python3 analyze_radar_validation.py radar_validation_ideal_v2
+```
+
+The forensic report separates missing extraction/detection, latency, tracker
+association loss, path-gate rejection, and closer competing targets.
 
 Useful variants:
 
