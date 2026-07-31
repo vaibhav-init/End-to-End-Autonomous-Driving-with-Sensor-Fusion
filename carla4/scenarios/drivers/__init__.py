@@ -18,6 +18,9 @@ def make_driver(
     model_dir=None,
     pcla_agent="tfv6_visiononly",
     radar_backend=None,
+    radar_profile=None,
+    radar_config_path=None,
+    radar_seed=42,
     debug_every=20,
 ):
     """Build a Driver by name. Heavy deps are imported only for the chosen one."""
@@ -31,6 +34,9 @@ def make_driver(
         return MLPDriver(
             model_dir=model_dir,
             radar_backend=radar_backend,
+            radar_profile=radar_profile,
+            radar_config_path=radar_config_path,
+            radar_seed=radar_seed,
             debug_every=debug_every,
         )
     raise ValueError(f"Unknown driver '{name}'. Choose from {DRIVER_NAMES}")

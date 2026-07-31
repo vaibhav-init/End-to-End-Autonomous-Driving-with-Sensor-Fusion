@@ -25,6 +25,41 @@ SEMANTIC_LIDAR_DTYPE = np.dtype(
     ]
 )
 
+# CARLA 0.9.16 semantic IDs. CARLA changed this table in 0.9.14, so these
+# values must not be replaced with the offset table used by older C-Shenron
+# data-conversion code.
+CARLA_0916_SEMANTIC_TAGS = {
+    0: "Unlabeled",
+    1: "Roads",
+    2: "SideWalks",
+    3: "Building",
+    4: "Wall",
+    5: "Fence",
+    6: "Pole",
+    7: "TrafficLight",
+    8: "TrafficSign",
+    9: "Vegetation",
+    10: "Terrain",
+    11: "Sky",
+    12: "Pedestrian",
+    13: "Rider",
+    14: "Car",
+    15: "Truck",
+    16: "Bus",
+    17: "Train",
+    18: "Motorcycle",
+    19: "Bicycle",
+    20: "Static",
+    21: "Dynamic",
+    22: "Other",
+    23: "Water",
+    24: "RoadLine",
+    25: "Ground",
+    26: "Bridge",
+    27: "RailTrack",
+    28: "GuardRail",
+}
+
 
 class Material(IntEnum):
     UNLABELLED = 0
@@ -76,6 +111,7 @@ _TAG_TO_MATERIAL = np.array(
 _OBSTACLE_TAGS = frozenset(
     (3, 4, 5, 6, 7, 8, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 26, 27, 28)
 )
+_DYNAMIC_TAGS = frozenset((12, 13, 14, 15, 16, 17, 18, 19, 21))
 
 
 @dataclass(frozen=True)
@@ -120,6 +156,22 @@ def decode_semantic_lidar(raw_data):
             f"{len(view)} (record size {SEMANTIC_LIDAR_DTYPE.itemsize})"
         )
     return np.frombuffer(view, dtype=SEMANTIC_LIDAR_DTYPE)
+
+
+def semantic_tag_name(tag):
+    """Return the CARLA 0.9.16 name, preserving unknown/custom tag IDs."""
+
+    value = int(tag)
+    return CARLA_0916_SEMANTIC_TAGS.get(value, f"Unknown({value})")
+
+
+def semantic_material_name(tag):
+    """Return the material assigned to a CARLA 0.9.16 semantic tag."""
+
+    value = int(tag)
+    if not 0 <= value < len(_TAG_TO_MATERIAL):
+        return Material.UNLABELLED.name
+    return Material(int(_TAG_TO_MATERIAL[value])).name
 
 
 def map_semantic_materials(tags):
@@ -236,21 +288,53 @@ def extract_targets(returns, config=None):
     materials = map_semantic_materials(tags)
     powers = cshenron_return_power(ranges, cosine, materials, config)
 
-    # CARLA actor IDs group dynamic-object returns. Environment returns can use
-    # object_id=0, so split those into range/angle cells instead of merging the
-    # whole static world into one target.
+    # Actor IDs are a useful grouping key for dynamic extended objects. Static
+    # geometry is different: one CARLA object/mesh can span a long wall,
+    # building, or guard rail, and collapsing that whole surface to one return
+    # creates a nonphysical target. Split every static surface into stable
+    # range/angle/tag cells, irrespective of the CARLA object ID.
     keys = object_ids.copy()
-    static = keys == 0
+    static = ~np.isin(tags, tuple(_DYNAMIC_TAGS)) | (object_ids <= 0)
     if np.any(static):
-        range_bin = np.floor(ranges[static] / config.static_range_bin_m).astype(np.int64)
+        range_bin = np.floor(
+            ranges[static] / config.static_range_bin_m
+        ).astype(np.int64)
         angle_bin = np.floor(
             np.degrees(azimuth[static]) / config.static_angle_bin_deg
         ).astype(np.int64)
-        keys[static] = -(1 + range_bin * 10000 + angle_bin + 5000)
+        # Zig-zag encoding handles signed angle bins. Two Cantor pairings give
+        # a deterministic collision-free integer ID for non-negative inputs.
+        angle_key = np.where(
+            angle_bin >= 0,
+            2 * angle_bin,
+            -2 * angle_bin - 1,
+        )
+        first_sum = range_bin + angle_key
+        first_pair = first_sum * (first_sum + 1) // 2 + angle_key
+        static_tags = tags[static]
+        second_sum = first_pair + static_tags
+        static_key = (
+            second_sum * (second_sum + 1) // 2 + static_tags
+        )
+        keys[static] = -(1 + static_key)
 
     targets = []
-    for key in np.unique(keys):
-        indices = np.flatnonzero(keys == key)
+    # Sorting once avoids rescanning every return for every group. That matters
+    # for the realistic backend's wide field of view and dense semantic LiDAR.
+    order = np.argsort(keys, kind="stable")
+    sorted_keys = keys[order]
+    group_starts = np.concatenate(
+        (
+            np.array((0,), dtype=np.int64),
+            np.flatnonzero(sorted_keys[1:] != sorted_keys[:-1]) + 1,
+        )
+    )
+    group_ends = np.concatenate(
+        (group_starts[1:], np.array((len(order),), dtype=np.int64))
+    )
+    for start, end in zip(group_starts, group_ends):
+        key = int(sorted_keys[start])
+        indices = order[start:end]
         if len(indices) < config.min_points_per_target:
             continue
         signal_power = float(np.sum(powers[indices]))
@@ -271,7 +355,7 @@ def extract_targets(returns, config=None):
         )
         tag_counts = np.bincount(tags[indices], minlength=len(_TAG_TO_MATERIAL))
         semantic_tag = int(np.argmax(tag_counts))
-        object_id = int(object_ids[representative])
+        object_id = key
         targets.append(
             RadarTarget(
                 object_id=object_id,

@@ -57,6 +57,7 @@ from config import (
     S4_NPC_SPEED_KMH, S4_NPC_AHEAD_M, S4_CUT_IN_TRIGGER_STEP,
     FOG_LADDER, RANDOM_SEEDS, SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
 )
+from radar import add_radar_arguments
 
 
 
@@ -151,7 +152,9 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 radar_backend=None, stage_approach=True, stage_gap=8.0,
+                 radar_backend=None, radar_profile=None,
+                 radar_config_path=None, radar_seed=None,
+                 stage_approach=True, stage_gap=8.0,
                  cutin_stop=True,
                  scenario_id=4):
     """Run S4: Cut-In from Adjacent Lane at a given fog density."""
@@ -217,6 +220,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         model_dir=model_dir,
         pcla_agent=pcla_agent,
         radar_backend=radar_backend,
+        radar_profile=radar_profile,
+        radar_config_path=radar_config_path,
+        radar_seed=seed if radar_seed is None else radar_seed,
     )
     driver.setup(world, ego, carla_map, client)
 
@@ -452,6 +458,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 critical_event=cut_in_triggered,
                 collision=collision_occurred[0],
                 ego_accel=accel,
+                radar_diagnostics=driver.diagnostics(),
             )
 
             if collision_occurred[0]:
@@ -514,9 +521,7 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
-    parser.add_argument("--radar-backend", choices=["native", "cshenron"],
-                        default=os.environ.get("CARLA_RADAR_BACKEND", "native"),
-                        help="MLP forward-radar backend")
+    add_radar_arguments(parser)
     parser.add_argument("--stage-approach", action="store_true", default=True,
                         help="Stage the scenario: gap-keeper holds close follow, "
                              "then hand over on cut-in (default: on)")
@@ -577,6 +582,9 @@ def main():
                                       model_dir=args.model_dir,
                                       pcla_agent=args.pcla_agent,
                                       radar_backend=args.radar_backend,
+                                      radar_profile=args.radar_profile,
+                                      radar_config_path=args.radar_config,
+                                      radar_seed=args.radar_seed,
                                       stage_approach=args.stage_approach,
                                       stage_gap=args.stage_gap,
                                       cutin_stop=args.cutin_stop, scenario_id=4)

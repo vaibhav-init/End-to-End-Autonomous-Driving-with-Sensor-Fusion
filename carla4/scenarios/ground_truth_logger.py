@@ -41,6 +41,32 @@ class GroundTruthLogger:
         "time_to_collision_s",
         "ego_accel_mps2",
         "min_distance_so_far_m",
+        "radar_backend",
+        "radar_profile",
+        "radar_config_signature",
+        "radar_sensor_frame",
+        "radar_sensor_timestamp_s",
+        "radar_scan_index",
+        "radar_ideal_target_count",
+        "radar_generated_detection_count",
+        "radar_delivered_detection_count",
+        "radar_direct_detection_count",
+        "radar_dropped_direct_count",
+        "radar_ghost_detection_count",
+        "radar_clutter_detection_count",
+        "radar_interference_active",
+        "radar_active_ghost_count",
+        "radar_active_track_count",
+        "radar_confirmed_track_count",
+        "radar_selected_track_id",
+        "radar_selected_truth_object_id",
+        "radar_selected_source",
+        "radar_selected_confidence",
+        "radar_selected_azimuth_deg",
+        "radar_distance_m",
+        "radar_relative_velocity_mps",
+        "radar_obstacle_speed_mps",
+        "radar_last_error",
     ]
 
     def __init__(
@@ -83,6 +109,7 @@ class GroundTruthLogger:
         collision=False,
         tl_state=0,
         ego_accel=0.0,
+        radar_diagnostics=None,
     ):
         """Record one tick of ground truth data."""
         if distance_to_npc is not None:
@@ -99,6 +126,7 @@ class GroundTruthLogger:
         if collision:
             self._collision_count += 1
 
+        radar = radar_diagnostics or {}
         row = {
             "step": step,
             "fog_density": self.fog_density,
@@ -127,6 +155,58 @@ class GroundTruthLogger:
             "time_to_collision_s": round(ttc, 4),
             "ego_accel_mps2": round(ego_accel, 4),
             "min_distance_so_far_m": round(self._min_distance, 4),
+            "radar_backend": radar.get("backend", ""),
+            "radar_profile": radar.get("profile", ""),
+            "radar_config_signature": radar.get("config_signature", ""),
+            "radar_sensor_frame": radar.get("frame", ""),
+            "radar_sensor_timestamp_s": radar.get("timestamp", ""),
+            "radar_scan_index": radar.get("scan_index", ""),
+            "radar_ideal_target_count": radar.get("ideal_target_count", ""),
+            "radar_generated_detection_count": radar.get(
+                "generated_detection_count", ""
+            ),
+            "radar_delivered_detection_count": radar.get(
+                "delivered_detection_count", ""
+            ),
+            "radar_direct_detection_count": radar.get(
+                "direct_detection_count", ""
+            ),
+            "radar_dropped_direct_count": radar.get(
+                "dropped_direct_count", ""
+            ),
+            "radar_ghost_detection_count": radar.get(
+                "ghost_detection_count", ""
+            ),
+            "radar_clutter_detection_count": radar.get(
+                "clutter_detection_count", ""
+            ),
+            "radar_interference_active": radar.get(
+                "interference_active", ""
+            ),
+            "radar_active_ghost_count": radar.get("active_ghost_count", ""),
+            "radar_active_track_count": radar.get("active_track_count", ""),
+            "radar_confirmed_track_count": radar.get(
+                "confirmed_track_count", ""
+            ),
+            "radar_selected_track_id": radar.get("selected_track_id", ""),
+            "radar_selected_truth_object_id": radar.get(
+                "selected_truth_object_id", ""
+            ),
+            "radar_selected_source": radar.get("selected_source", ""),
+            "radar_selected_confidence": radar.get(
+                "selected_confidence", ""
+            ),
+            "radar_selected_azimuth_deg": radar.get(
+                "selected_azimuth_deg", ""
+            ),
+            "radar_distance_m": radar.get("controller_distance_m", ""),
+            "radar_relative_velocity_mps": radar.get(
+                "controller_relative_velocity_mps", ""
+            ),
+            "radar_obstacle_speed_mps": radar.get(
+                "controller_obstacle_speed_mps", ""
+            ),
+            "radar_last_error": radar.get("last_error", ""),
         }
         self._writer.writerow(row)
         self._rows += 1

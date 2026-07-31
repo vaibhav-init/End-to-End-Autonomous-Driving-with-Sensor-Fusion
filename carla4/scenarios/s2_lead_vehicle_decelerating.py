@@ -56,6 +56,7 @@ from config import (
     FOG_LADDER, RANDOM_SEEDS, SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
 )
 from driving_contract import MAX_TARGET_SPEED_KMH, S2_HANDOVER_SETTLE_S
+from radar import add_radar_arguments
 
 # Weather is now handled by the shared set_weather_condition() from scenario_weather.py
 
@@ -95,7 +96,9 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 radar_backend=None, stage_approach=True,
+                 radar_backend=None, radar_profile=None,
+                 radar_config_path=None, radar_seed=None,
+                 stage_approach=True,
                  stage_gap=S2_NPC_INITIAL_GAP,
                  initial_gap=S2_NPC_INITIAL_GAP,
                  target_speed_kmh=S2_NPC_SPEED_KMH,
@@ -138,6 +141,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         model_dir=model_dir,
         pcla_agent=pcla_agent,
         radar_backend=radar_backend,
+        radar_profile=radar_profile,
+        radar_config_path=radar_config_path,
+        radar_seed=seed if radar_seed is None else radar_seed,
     )
     driver.setup(world, ego, carla_map, client)
 
@@ -314,6 +320,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 critical_event=npc_braked,
                 collision=collision_occurred[0],
                 ego_accel=accel,
+                radar_diagnostics=driver.diagnostics(),
             )
 
             if collision_occurred[0]:
@@ -373,9 +380,7 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
-    parser.add_argument("--radar-backend", choices=["native", "cshenron"],
-                        default=os.environ.get("CARLA_RADAR_BACKEND", "native"),
-                        help="MLP forward-radar backend")
+    add_radar_arguments(parser)
     parser.add_argument("--stage-approach", action="store_true", default=True,
                         help="Tailgate the NPC with a gap-keeper, hand to the model when it brakes (default: on)")
     parser.add_argument("--no-stage-approach", dest="stage_approach",
@@ -462,6 +467,9 @@ def main():
                                       model_dir=args.model_dir,
                                       pcla_agent=args.pcla_agent,
                                       radar_backend=args.radar_backend,
+                                      radar_profile=args.radar_profile,
+                                      radar_config_path=args.radar_config,
+                                      radar_seed=args.radar_seed,
                                       stage_approach=args.stage_approach,
                                       stage_gap=args.stage_gap,
                                       initial_gap=args.initial_gap,

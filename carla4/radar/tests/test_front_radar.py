@@ -5,7 +5,8 @@ from unittest.mock import patch
 import numpy as np
 
 from radar.cshenron_core import SEMANTIC_LIDAR_DTYPE
-from radar.front_radar import CShenronFrontRadar
+from radar.front_radar import CShenronFrontRadar, RealisticFrontRadar
+from radar.realistic_core import load_realistic_radar_config
 
 
 class FakeVector:
@@ -73,6 +74,14 @@ class FakeWorld:
     def get_actor(self, actor_id):
         return self.actors.get(actor_id)
 
+    def get_weather(self):
+        return SimpleNamespace(
+            precipitation=0.0,
+            wetness=0.0,
+            fog_density=0.0,
+            dust_storm=0.0,
+        )
+
 
 class FrontRadarTest(unittest.TestCase):
     def test_cshenron_adapter_preserves_scalar_contract_and_closing_speed(self):
@@ -85,7 +94,13 @@ class FrontRadarTest(unittest.TestCase):
         )
 
         with patch("radar.front_radar._carla_module", return_value=fake_carla):
-            radar = CShenronFrontRadar(ego, world, range_m=100.0, fps=20)
+            radar = CShenronFrontRadar(
+                ego,
+                world,
+                range_m=100.0,
+                fps=20,
+                capture_debug=True,
+            )
 
         returns = np.zeros(3, dtype=SEMANTIC_LIDAR_DTYPE)
         returns[0] = (25.0, -0.2, 0.0, 1.0, 77, 14)
@@ -103,6 +118,65 @@ class FrontRadarTest(unittest.TestCase):
         self.assertAlmostEqual(state["relative_velocity"], 5.0, delta=0.5)
         self.assertAlmostEqual(state["obstacle_speed"], 5.0, delta=0.5)
         self.assertEqual(radar.diagnostics()["target_object_id"], 77)
+        debug = radar.debug_snapshot()
+        self.assertEqual(debug["ideal_targets"][0]["object_id"], 77)
+        self.assertEqual(debug["semantic_tag_counts"]["14"]["name"], "Car")
+        radar.cleanup()
+
+    def test_realistic_adapter_preserves_contract_without_carla_install(self):
+        ego = FakeActor(1, FakeVector(), FakeVector(10.0, 0.0, 0.0))
+        lead = FakeActor(
+            77,
+            FakeVector(25.0, 0.0, 0.0),
+            FakeVector(5.0, 0.0, 0.0),
+        )
+        world = FakeWorld((ego, lead))
+        fake_carla = SimpleNamespace(
+            Location=lambda **kwargs: SimpleNamespace(**kwargs),
+            Transform=lambda *args, **kwargs: SimpleNamespace(
+                args=args,
+                kwargs=kwargs,
+            ),
+        )
+        config = load_realistic_radar_config("ideal_target_list_v1")
+
+        with patch("radar.front_radar._carla_module", return_value=fake_carla):
+            radar = RealisticFrontRadar(
+                ego,
+                world,
+                range_m=100.0,
+                fps=20,
+                config=config,
+                capture_debug=True,
+            )
+
+        returns = np.zeros(3, dtype=SEMANTIC_LIDAR_DTYPE)
+        returns[0] = (25.0, -0.2, 0.0, 1.0, 77, 14)
+        returns[1] = (25.0, 0.0, 0.1, 1.0, 77, 14)
+        returns[2] = (25.0, 0.2, -0.1, 1.0, 77, 14)
+        measurement = SimpleNamespace(
+            raw_data=returns.tobytes(),
+            frame=123,
+            timestamp=6.15,
+        )
+        radar.update_ego_speed(10.0)
+        radar._on_semantic_lidar(measurement)
+
+        state = radar.get()
+        self.assertEqual(
+            set(state),
+            {"distance", "relative_velocity", "obstacle_speed"},
+        )
+        self.assertAlmostEqual(state["distance"], 25.0, delta=0.1)
+        self.assertAlmostEqual(state["relative_velocity"], 5.0, delta=0.1)
+        self.assertAlmostEqual(state["obstacle_speed"], 5.0, delta=0.1)
+        diagnostics = radar.diagnostics()
+        self.assertEqual(diagnostics["backend"], "realistic")
+        self.assertEqual(diagnostics["selected_truth_object_id"], 77)
+        self.assertEqual(diagnostics["selected_semantic_tag"], 14)
+        debug = radar.debug_snapshot()
+        self.assertEqual(debug["selected"]["truth_object_id"], 77)
+        self.assertEqual(debug["delivered_detections"][0]["semantic_tag"], 14)
         radar.cleanup()
 
 

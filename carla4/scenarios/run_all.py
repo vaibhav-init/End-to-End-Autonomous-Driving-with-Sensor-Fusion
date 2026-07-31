@@ -34,6 +34,10 @@ import subprocess
 import sys
 import time
 
+_CARLA4_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _CARLA4_DIR not in sys.path:
+    sys.path.insert(0, _CARLA4_DIR)
+
 from config import (
     FOG_LADDER,
     RANDOM_SEEDS,
@@ -42,6 +46,7 @@ from config import (
     S2_NPC_INITIAL_GAP,
     S2_NPC_SPEED_KMH,
 )
+from radar import add_radar_arguments
 
 
 SCENARIO_MODULES = {
@@ -70,9 +75,7 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
-    parser.add_argument("--radar-backend", choices=["native", "cshenron"],
-                        default=os.environ.get("CARLA_RADAR_BACKEND", "native"),
-                        help="MLP forward-radar backend")
+    add_radar_arguments(parser)
     parser.add_argument("--output-root", default=None,
                         help="Root dir for results (default: results_<driver>)")
     parser.add_argument("--timeout", type=int, default=300,
@@ -126,8 +129,8 @@ def main():
     ) <= 0.0:
         parser.error("S1 stress-test parameters must be positive")
     if args.output_root is None:
-        if args.driver == "mlp" and args.radar_backend == "cshenron":
-            args.output_root = "results_mlp_cshenron"
+        if args.driver == "mlp" and args.radar_backend != "native":
+            args.output_root = f"results_mlp_{args.radar_backend}"
         else:
             args.output_root = f"results_{args.driver}"
     os.makedirs(args.output_root, exist_ok=True)
@@ -139,6 +142,10 @@ def main():
     print(f"  Town:            {args.town}")
     print(f"  Driver:          {args.driver}")
     print(f"  Radar backend:   {args.radar_backend}")
+    if args.radar_backend == "realistic":
+        print(f"  Radar profile:   {args.radar_profile or 'generic_lrr_v1'}")
+        if args.radar_config:
+            print(f"  Radar config:    {args.radar_config}")
     print(f"  Output root:     {args.output_root}")
     print(f"  Scenarios:       {args.scenarios}")
     print(f"  Fog levels:      {args.fog}")
@@ -181,6 +188,12 @@ def main():
                         "--pcla-agent", args.pcla_agent,
                         "--radar-backend", args.radar_backend,
                     ]
+                    if args.radar_profile:
+                        cmd.extend(["--radar-profile", args.radar_profile])
+                    if args.radar_config:
+                        cmd.extend(["--radar-config", args.radar_config])
+                    if args.radar_seed is not None:
+                        cmd.extend(["--radar-seed", str(args.radar_seed)])
                     if sid == 1:
                         cmd.extend([
                             "--target-speed-kmh",

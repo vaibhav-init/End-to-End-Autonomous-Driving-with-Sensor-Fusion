@@ -43,7 +43,12 @@ from yolo_perception import (  # noqa: E402
 )
 from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS  # noqa: E402
 from speed_model import TargetSpeedMLP, flatten_history  # noqa: E402
-from radar import create_front_radar, normalize_radar_backend  # noqa: E402
+from radar import (  # noqa: E402
+    create_front_radar,
+    normalize_radar_backend,
+    realistic_radar_config_signature,
+    resolve_realistic_radar_config,
+)
 from driving_contract import (  # noqa: E402
     MAX_TARGET_SPEED_KMH,
     NATIVE_RADAR_POINTS_PER_SECOND,
@@ -116,12 +121,19 @@ class MLPDriver(Driver):
         fps=FPS,
         debug_every=20,
         radar_backend=None,
+        radar_profile=None,
+        radar_config_path=None,
+        radar_seed=42,
         **_ignored,
     ):
         self.model_dir = model_dir
         self.fps = fps
         self.debug_every = debug_every
         self.radar_backend = normalize_radar_backend(radar_backend)
+        self.radar_profile = radar_profile
+        self.radar_config_path = radar_config_path
+        self.radar_seed = int(radar_seed)
+        self.realistic_radar_config = None
         self.device = None
         self.model = None
         self.scaler = None
@@ -141,6 +153,7 @@ class MLPDriver(Driver):
         self.feature_history = None
         self._frame = 0
         self._prev_speed = 0.0
+        self._last_distance_state = None
 
     def setup(self, world, ego, carla_map, client):
         model_path = os.path.join(self.model_dir, "target_speed_mlp.pt")
@@ -205,6 +218,29 @@ class MLPDriver(Driver):
                 f"'{trained_radar_backend}', runtime requested "
                 f"'{self.radar_backend}'."
             )
+        if self.use_radar and self.radar_backend == "realistic":
+            embedded_config = (
+                None
+                if self.radar_profile or self.radar_config_path
+                else model_config.get("radar_config")
+            )
+            self.realistic_radar_config = resolve_realistic_radar_config(
+                range_m=self.max_range,
+                fps=self.fps,
+                profile_name=self.radar_profile,
+                config_path=self.radar_config_path,
+                config=embedded_config,
+            )
+            requested_signature = realistic_radar_config_signature(
+                self.realistic_radar_config
+            )
+            trained_signature = model_config.get("radar_config_signature")
+            if trained_signature != requested_signature:
+                raise RuntimeError(
+                    "Realistic radar configuration mismatch: model data used "
+                    f"{trained_signature!r}, runtime requested "
+                    f"{requested_signature!r}."
+                )
 
         # Camera + YOLO give traffic-light features in both modes (and obstacle
         # detection in vision mode). YOLO is required for vision, optional for radar.
@@ -218,6 +254,8 @@ class MLPDriver(Driver):
                 backend=self.radar_backend,
                 fps=self.fps,
                 points_per_second=self.radar_points_per_second,
+                config=self.realistic_radar_config,
+                seed=self.radar_seed,
             )
             self.vision_tracker = None
             if self.yolo is None:
@@ -236,6 +274,7 @@ class MLPDriver(Driver):
         self.feature_history = deque(maxlen=self.history_frames)
         self._frame = 0
         self._prev_speed = 0.0
+        self._last_distance_state = None
 
         print("  [mlp] driver ready")
         print(f"  [mlp]   model:          {model_path}")
@@ -251,6 +290,15 @@ class MLPDriver(Driver):
                 f"  [mlp]   radar sampling: "
                 f"{self.radar_points_per_second} points/s"
             )
+            if self.realistic_radar_config is not None:
+                print(
+                    "  [mlp]   radar profile:  "
+                    f"{self.realistic_radar_config.profile_name}"
+                )
+                print(
+                    "  [mlp]   radar config:   "
+                    f"{realistic_radar_config_signature(self.realistic_radar_config)}"
+                )
         print(f"  [mlp]   device:         {self.device}")
         print(f"  [mlp]   history_frames: {self.history_frames}")
         print(
@@ -280,6 +328,7 @@ class MLPDriver(Driver):
         else:
             self.vision_tracker.update_ego_speed(speed)
             dist_state = self.vision_tracker.update(obstacle)
+        self._last_distance_state = dist_state.copy()
 
         if dist_state["relative_velocity"] > 0.1:
             ttc = min(dist_state["distance"] / dist_state["relative_velocity"], 10.0)
@@ -362,6 +411,26 @@ class MLPDriver(Driver):
 
         self._frame += 1
         return carla.VehicleControl(throttle=throttle, steer=steer, brake=brake)
+
+    def diagnostics(self):
+        diagnostics = {}
+        if self.radar is not None:
+            diagnostics.update(self.radar.diagnostics())
+        if self._last_distance_state is not None:
+            diagnostics.update(
+                {
+                    "controller_distance_m": self._last_distance_state[
+                        "distance"
+                    ],
+                    "controller_relative_velocity_mps": (
+                        self._last_distance_state["relative_velocity"]
+                    ),
+                    "controller_obstacle_speed_mps": self._last_distance_state[
+                        "obstacle_speed"
+                    ],
+                }
+            )
+        return diagnostics
 
     def cleanup(self):
         if self.camera is not None:

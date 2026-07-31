@@ -20,7 +20,13 @@ import carla
 import numpy as np
 import pandas as pd
 
-from radar import FrontRadar, add_radar_arguments, create_front_radar
+from radar import (
+    FrontRadar,
+    add_radar_arguments,
+    create_front_radar,
+    describe_radar_configuration,
+    radar_diagnostics_row,
+)
 from driving_contract import (
     MAX_TARGET_SPEED_KMH,
     NATIVE_RADAR_POINTS_PER_SECOND,
@@ -432,6 +438,19 @@ def main():
     np.random.seed(args.seed)
 
     total_frames = args.duration * FPS
+    radar_points_per_second = (
+        NATIVE_RADAR_POINTS_PER_SECOND
+        if args.radar_backend == "native"
+        else 240000
+    )
+    radar_metadata = describe_radar_configuration(
+        backend=args.radar_backend,
+        range_m=MAX_RADAR_RANGE,
+        fps=FPS,
+        points_per_second=radar_points_per_second,
+        profile_name=args.radar_profile,
+        config_path=args.radar_config,
+    )
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, "data.csv")
     config_path = os.path.join(args.output, "dataset_config.json")
@@ -440,17 +459,17 @@ def main():
             existing_config = json.load(fh)
         expected = {
             "town": args.town,
-            "radar_backend": args.radar_backend,
-            "radar_range_m": MAX_RADAR_RANGE,
-            "radar_points_per_second": (
-                NATIVE_RADAR_POINTS_PER_SECOND
-                if args.radar_backend == "native"
-                else 240000
-            ),
             "max_target_speed_kmh": args.max_speed_kmh,
             "history_frames": args.history,
             "label_horizon": args.label_horizon,
         }
+        expected.update(
+            {
+                key: value
+                for key, value in radar_metadata.items()
+                if key != "radar_config"
+            }
+        )
         mismatches = []
         for key, requested in expected.items():
             existing = existing_config.get(key, requested)
@@ -475,6 +494,9 @@ def main():
     print(f"  Town:            {args.town}")
     print(f"  Radar range:     {MAX_RADAR_RANGE:.0f}m")
     print(f"  Radar backend:   {args.radar_backend}")
+    if args.radar_backend == "realistic":
+        print(f"  Radar profile:   {radar_metadata['radar_profile']}")
+        print(f"  Radar config ID: {radar_metadata['radar_config_signature']}")
     print(f"  Duration:        {args.duration}s")
     print(f"  History frames:  {args.history}")
     print(f"  Label horizon:   {args.label_horizon}")
@@ -538,11 +560,10 @@ def main():
         MAX_RADAR_RANGE,
         backend=args.radar_backend,
         fps=FPS,
-        points_per_second=(
-            NATIVE_RADAR_POINTS_PER_SECOND
-            if args.radar_backend == "native"
-            else 240000
-        ),
+        points_per_second=radar_points_per_second,
+        profile_name=args.radar_profile,
+        config_path=args.radar_config,
+        seed=args.radar_seed if args.radar_seed is not None else args.seed,
     )
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
@@ -755,6 +776,7 @@ def main():
 
             radar.update_ego_speed(speed)
             radar_state = radar.get()
+            radar_diagnostics = radar_diagnostics_row(radar)
             if radar_state["relative_velocity"] > 0.1:
                 ttc = min(radar_state["distance"] / radar_state["relative_velocity"], 10.0)
             else:
@@ -842,6 +864,7 @@ def main():
                         "autopilot_brake": round(control.brake, 4),
                     }
                 )
+                row.update(radar_diagnostics)
                 samples.append(row)
 
             if frame % (FPS * 5) == 0 and frame > 0:
@@ -892,13 +915,6 @@ def main():
                 config = {
                     "town": args.town,
                     "fps": FPS,
-                    "radar_backend": args.radar_backend,
-                    "radar_range_m": MAX_RADAR_RANGE,
-                    "radar_points_per_second": (
-                        NATIVE_RADAR_POINTS_PER_SECOND
-                        if args.radar_backend == "native"
-                        else 240000
-                    ),
                     "max_target_speed_kmh": args.max_speed_kmh,
                     "weather_interval_s": args.weather_interval_s,
                     "collection_seed": args.seed,
@@ -908,6 +924,7 @@ def main():
                     "stacked_feature_cols": stacked_feature_names(BASE_FEATURE_COLS, args.history),
                     "label_col": "teacher_target_speed",
                 }
+                config.update(radar_metadata)
                 with open(config_path, "w", encoding="utf-8") as fh:
                     json.dump(config, fh, indent=2)
 

@@ -18,7 +18,12 @@ import carla
 import numpy as np
 import torch
 
-from radar import add_radar_arguments, create_front_radar
+from radar import (
+    add_radar_arguments,
+    create_front_radar,
+    describe_radar_configuration,
+    resolve_realistic_radar_config,
+)
 from yolo_perception import (
     CameraManager,
     TL_RED,
@@ -434,6 +439,28 @@ def main():
             ),
         )
     )
+    runtime_radar_config = None
+    runtime_radar_metadata = None
+    if args.radar_backend == "realistic":
+        embedded_config = (
+            None
+            if args.radar_profile or args.radar_config
+            else model_config.get("radar_config")
+        )
+        runtime_radar_config = resolve_realistic_radar_config(
+            range_m=radar_range,
+            fps=FPS,
+            profile_name=args.radar_profile,
+            config_path=args.radar_config,
+            config=embedded_config,
+        )
+        runtime_radar_metadata = describe_radar_configuration(
+            backend="realistic",
+            range_m=radar_range,
+            fps=FPS,
+            points_per_second=radar_points_per_second,
+            config=runtime_radar_config,
+        )
     trained_max_speed_kmh = min(
         float(model_config.get("max_target_speed_kmh", MAX_TARGET_SPEED_KMH)),
         MAX_TARGET_SPEED_KMH,
@@ -474,6 +501,12 @@ def main():
     print(f"  Feature count:  {len(feature_cols)}")
     print(f"  Radar range:    {radar_range:.0f}m")
     print(f"  Radar sampling: {radar_points_per_second} points/s")
+    if runtime_radar_metadata is not None:
+        print(f"  Radar profile:  {runtime_radar_metadata['radar_profile']}")
+        print(
+            "  Radar config ID:"
+            f" {runtime_radar_metadata['radar_config_signature']}"
+        )
     print(f"  Speed ceiling:  {runtime_max_speed_kmh:.1f}km/h")
     trained_town = model_config.get("town")
     if trained_town and trained_town != args.town:
@@ -486,6 +519,17 @@ def main():
             f"'{trained_radar_backend}', runtime requested "
             f"'{args.radar_backend}'. Recollect/retrain or select the trained "
             "backend."
+        )
+    trained_radar_signature = model_config.get("radar_config_signature")
+    if (
+        args.radar_backend == "realistic"
+        and trained_radar_signature
+        != runtime_radar_metadata["radar_config_signature"]
+    ):
+        raise RuntimeError(
+            "Realistic radar configuration mismatch: model data used "
+            f"{trained_radar_signature!r}, runtime requested "
+            f"{runtime_radar_metadata['radar_config_signature']!r}."
         )
     print("=" * 76)
 
@@ -558,6 +602,8 @@ def main():
         backend=args.radar_backend,
         fps=FPS,
         points_per_second=radar_points_per_second,
+        config=runtime_radar_config,
+        seed=args.radar_seed if args.radar_seed is not None else 42,
     )
     print(f"  Distance source: Front radar ({args.radar_backend})")
 

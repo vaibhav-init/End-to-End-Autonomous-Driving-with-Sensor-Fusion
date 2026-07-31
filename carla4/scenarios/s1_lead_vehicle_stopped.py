@@ -59,6 +59,7 @@ from config import (
     BACKGROUND_VEHICLES, BACKGROUND_PEDESTRIANS,
 )
 from driving_contract import MAX_TARGET_SPEED_KMH
+from radar import add_radar_arguments
 
 # ---------------------------------------------------------------------------
 # Staging constants
@@ -83,7 +84,8 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 radar_backend=None,
+                 radar_backend=None, radar_profile=None,
+                 radar_config_path=None, radar_seed=None,
                  target_speed_kmh=STAGE_TARGET_SPEED_KMH,
                  obstacle_distance_m=S1_OBSTACLE_DISTANCE,
                  stage_stable_s=STAGE_STABLE_S,
@@ -148,6 +150,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         model_dir=model_dir,
         pcla_agent=pcla_agent,
         radar_backend=radar_backend,
+        radar_profile=radar_profile,
+        radar_config_path=radar_config_path,
+        radar_seed=seed if radar_seed is None else radar_seed,
     )
     driver.setup(world, ego, carla_map, client)
 
@@ -280,6 +285,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 critical_event=obstacle_spawned,
                 collision=collision_occurred[0],
                 ego_accel=accel,
+                radar_diagnostics=driver.diagnostics(),
             )
 
             # Stop early if collision
@@ -356,9 +362,7 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
-    parser.add_argument("--radar-backend", choices=["native", "cshenron"],
-                        default=os.environ.get("CARLA_RADAR_BACKEND", "native"),
-                        help="MLP forward-radar backend")
+    add_radar_arguments(parser)
     parser.add_argument("--headless", action="store_true", help="No spectator camera")
     parser.add_argument(
         "--target-speed-kmh",
@@ -439,6 +443,9 @@ def main():
                                       model_dir=args.model_dir,
                                       pcla_agent=args.pcla_agent,
                                       radar_backend=args.radar_backend,
+                                      radar_profile=args.radar_profile,
+                                      radar_config_path=args.radar_config,
+                                      radar_seed=args.radar_seed,
                                       target_speed_kmh=args.target_speed_kmh,
                                       obstacle_distance_m=args.obstacle_distance_m,
                                       stage_stable_s=args.stage_stable_s,

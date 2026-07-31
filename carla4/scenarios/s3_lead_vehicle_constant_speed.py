@@ -53,6 +53,9 @@ from config import (
     S3_NPC_CONSTANT_SPEED_KMH,
     FOG_LADDER, RANDOM_SEEDS, SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
 )
+from radar import add_radar_arguments
+
+
 def set_fog_density(world, density):
     weather = world.get_weather()
     weather.fog_density = density
@@ -99,7 +102,8 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 radar_backend=None, scenario_id=3):
+                 radar_backend=None, radar_profile=None,
+                 radar_config_path=None, radar_seed=None, scenario_id=3):
     """Run S3: Lead Vehicle at Lower Constant Speed at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -136,6 +140,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         model_dir=model_dir,
         pcla_agent=pcla_agent,
         radar_backend=radar_backend,
+        radar_profile=radar_profile,
+        radar_config_path=radar_config_path,
+        radar_seed=seed if radar_seed is None else radar_seed,
     )
     driver.setup(world, ego, carla_map, client)
 
@@ -229,6 +236,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 steer=steer,
                 collision=collision_occurred[0],
                 ego_accel=accel,
+                radar_diagnostics=driver.diagnostics(),
             )
 
             if collision_occurred[0]:
@@ -277,9 +285,7 @@ def main():
                         help="MLP model directory (for --driver mlp)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
-    parser.add_argument("--radar-backend", choices=["native", "cshenron"],
-                        default=os.environ.get("CARLA_RADAR_BACKEND", "native"),
-                        help="MLP forward-radar backend")
+    add_radar_arguments(parser)
     args = parser.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -322,6 +328,9 @@ def main():
                                       model_dir=args.model_dir,
                                       pcla_agent=args.pcla_agent,
                                       radar_backend=args.radar_backend,
+                                      radar_profile=args.radar_profile,
+                                      radar_config_path=args.radar_config,
+                                      radar_seed=args.radar_seed,
                                       scenario_id=3)
                 results.append({
                     "fog": fog,

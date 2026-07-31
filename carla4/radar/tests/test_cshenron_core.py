@@ -3,12 +3,15 @@ import unittest
 import numpy as np
 
 from radar.cshenron_core import (
+    CARLA_0916_SEMANTIC_TAGS,
     CShenronConfig,
     Material,
     SEMANTIC_LIDAR_DTYPE,
     cshenron_return_power,
     extract_targets,
     map_semantic_materials,
+    semantic_material_name,
+    semantic_tag_name,
 )
 
 
@@ -20,6 +23,16 @@ def make_returns(rows):
 
 
 class CShenronCoreTest(unittest.TestCase):
+    def test_carla_0916_semantic_contract(self):
+        self.assertEqual(SEMANTIC_LIDAR_DTYPE.itemsize, 24)
+        self.assertEqual(CARLA_0916_SEMANTIC_TAGS[0], "Unlabeled")
+        self.assertEqual(CARLA_0916_SEMANTIC_TAGS[14], "Car")
+        self.assertEqual(CARLA_0916_SEMANTIC_TAGS[28], "GuardRail")
+        self.assertEqual(semantic_tag_name(99), "Unknown(99)")
+        self.assertEqual(semantic_material_name(12), "HUMAN")
+        self.assertEqual(semantic_material_name(14), "METAL")
+        self.assertEqual(semantic_material_name(25), "CONCRETE")
+
     def test_carla_0916_material_mapping(self):
         tags = np.array((12, 1, 9, 14, 255))
         mapped = map_semantic_materials(tags)
@@ -65,6 +78,26 @@ class CShenronCoreTest(unittest.TestCase):
         config = CShenronConfig(min_snr_db=-20.0)
         targets = extract_targets(make_returns(rows), config)
         self.assertEqual([target.object_id for target in targets], [9, 4])
+
+    def test_static_surfaces_are_split_into_stable_range_angle_cells(self):
+        rows = [
+            (10.0, 0.0, 0.0, 1.0, 500, 4),
+            (10.1, 0.0, 0.0, 1.0, 500, 4),
+            (30.0, 0.0, 0.0, 1.0, 500, 4),
+            (30.1, 0.0, 0.0, 1.0, 500, 4),
+        ]
+        config = CShenronConfig(
+            horizontal_fov_deg=20.0,
+            min_snr_db=-40.0,
+        )
+        first = extract_targets(make_returns(rows), config)
+        second = extract_targets(make_returns(rows), config)
+        self.assertEqual(len(first), 2)
+        self.assertTrue(all(target.object_id < 0 for target in first))
+        self.assertEqual(
+            [target.object_id for target in first],
+            [target.object_id for target in second],
+        )
 
     def test_return_power_decays_with_range(self):
         config = CShenronConfig()

@@ -29,3 +29,8 @@ class Driver(ABC):
 
     def cleanup(self):
         """Destroy any actors/sensors the driver owns. Safe to call twice."""
+
+    def diagnostics(self):
+        """Return optional per-frame driver/sensor diagnostics."""
+
+        return {}

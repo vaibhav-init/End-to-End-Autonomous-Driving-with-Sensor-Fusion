@@ -478,6 +478,21 @@ def main():
             if dataset_config
             else NATIVE_RADAR_POINTS_PER_SECOND
         ),
+        "radar_profile": (
+            dataset_config.get("radar_profile")
+            if dataset_config
+            else None
+        ),
+        "radar_config_signature": (
+            dataset_config.get("radar_config_signature")
+            if dataset_config
+            else None
+        ),
+        "radar_config": (
+            dataset_config.get("radar_config")
+            if dataset_config
+            else None
+        ),
         "max_target_speed_kmh": max_speed_kmh,
         "validation": {
             "method": "episode_aware_stratified",

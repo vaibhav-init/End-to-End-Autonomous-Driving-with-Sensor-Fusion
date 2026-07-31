@@ -44,7 +44,36 @@ python3 test_throttle_brake_live.py --radar-backend native --town Town04 \
 Collectors attach episode IDs and reset feature history at scenario, weather,
 and respawn boundaries. Training holds out complete episodes, caps stopped
 frames at 15%, and rejects observed speeds above the configured envelope. Do
-not mix native and C-Shenron CSVs or reuse an old scaler after recollection.
+not mix radar backends or realism profiles, and do not reuse an old scaler
+after recollection.
+
+## Temporal Realistic-Radar Workflow
+
+For radar-artifact experiments, use the separate `realistic` backend and a
+new dataset/model pair:
+
+```bash
+python3 collect_throttle_brake_data.py --radar-backend realistic \
+  --radar-profile generic_lrr_v1 --town Town04 \
+  --output dataset_throttle_brake_realistic
+python3 collect_scenario_data.py --radar-backend realistic \
+  --radar-profile generic_lrr_v1 --town Town04 \
+  --output dataset_throttle_brake_realistic
+python3 train_throttle_brake.py --data dataset_throttle_brake_realistic \
+  --config dataset_throttle_brake_realistic/dataset_config.json \
+  --output model_throttle_brake_realistic
+```
+
+This backend adds sensor resolution and latency, SNR-conditioned measurement
+error and detection, correlated dropout, clutter, interference, persistent
+ghosts, tracking, and path gating to C-Shenron-derived ideal targets. The full
+configuration is fingerprinted in dataset/model metadata.
+
+`generic_lrr_v1` is a transparent research-prior profile, not a production
+radar calibration. Realism claims require a profile fitted on complete
+real-world sequences and evaluated on held-out sequences. See
+`radar/README.md` for the modeled effects, limitations, and calibration
+requirements.
 
 ## PCLA Integration
 
@@ -60,10 +89,11 @@ models under the same scenarios and weather conditions.
 | | Camera + Radar |
 |---|---|
 | **Clear weather** | Works — radar gives precise distance |
-| **Heavy fog** | Works — radar sees through fog |
+| **Heavy fog** | Usually degrades less than camera, but attenuation and artifacts still require validation |
 | **Open road cruising** | Model works naturally with hybrid override |
 | **Obstacle braking** | Smooth — direct distance measurement |
 
-Radar is cheap (~$50), works in all weather, and makes the control problem
-dramatically easier because distance is a direct measurement instead of a
-noisy geometric estimate from camera images.
+Radar directly observes range and radial velocity and often remains useful in
+conditions that degrade cameras. It is not error-free: sparse returns,
+azimuth uncertainty, missed detections, clutter, interference, multipath, wet
+surfaces, precipitation, and downstream tracking can all affect braking.

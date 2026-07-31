@@ -52,7 +52,12 @@ from collect_throttle_brake_data import (
     set_tm_target_speed,
     spawn_npc_adjacent_lane,
 )
-from radar import add_radar_arguments, create_front_radar
+from radar import (
+    add_radar_arguments,
+    create_front_radar,
+    describe_radar_configuration,
+    radar_diagnostics_row,
+)
 from staging import GapKeepController, SpeedController
 from driving_contract import (
     MAX_TARGET_SPEED_KMH,
@@ -219,11 +224,10 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         RADAR_RANGE,
         backend=args.radar_backend,
         fps=FPS,
-        points_per_second=(
-            NATIVE_RADAR_POINTS_PER_SECOND
-            if args.radar_backend == "native"
-            else 240000
-        ),
+        points_per_second=args.radar_points_per_second,
+        profile_name=args.radar_profile,
+        config_path=args.radar_config,
+        seed=args.radar_seed if args.radar_seed is not None else seed,
     )
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
@@ -323,6 +327,7 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         prev_speed = ego_speed
         radar.update_ego_speed(ego_speed)
         radar_state = radar.get()
+        radar_diagnostics = radar_diagnostics_row(radar)
         visual = empty_visual_features()
         cam_frame = camera.get_frame()
         if yolo is not None and cam_frame is not None:
@@ -344,6 +349,7 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
                 "autopilot_throttle": round(thr, 4),
                 "autopilot_brake": round(brk, 4),
             })
+            row.update(radar_diagnostics)
             rows.append(row)
         frame_counter += 1
 
@@ -389,6 +395,19 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
 
+    args.radar_points_per_second = (
+        NATIVE_RADAR_POINTS_PER_SECOND
+        if args.radar_backend == "native"
+        else 240000
+    )
+    radar_metadata = describe_radar_configuration(
+        backend=args.radar_backend,
+        range_m=RADAR_RANGE,
+        fps=FPS,
+        points_per_second=args.radar_points_per_second,
+        profile_name=args.radar_profile,
+        config_path=args.radar_config,
+    )
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, args.out_name)
     config_path = os.path.join(args.output, "dataset_config.json")
@@ -409,11 +428,7 @@ def main():
                 f"Dataset uses radar range {existing_range}m, but this collector "
                 f"uses {RADAR_RANGE}m. Use a separate --output directory."
             )
-        requested_points = (
-            NATIVE_RADAR_POINTS_PER_SECOND
-            if args.radar_backend == "native"
-            else 240000
-        )
+        requested_points = args.radar_points_per_second
         existing_points = int(
             existing_config.get("radar_points_per_second", requested_points)
         )
@@ -422,6 +437,15 @@ def main():
                 f"Dataset uses {existing_points} radar points/s, but this run "
                 f"uses {requested_points}."
             )
+        if args.radar_backend == "realistic":
+            existing_signature = existing_config.get("radar_config_signature")
+            requested_signature = radar_metadata["radar_config_signature"]
+            if existing_signature != requested_signature:
+                raise RuntimeError(
+                    "Dataset uses realistic radar config "
+                    f"{existing_signature!r}, but this run requested "
+                    f"{requested_signature!r}. Use a separate --output directory."
+                )
         existing_max_speed = float(
             existing_config.get("max_target_speed_kmh", args.max_speed_kmh)
         )
@@ -455,6 +479,9 @@ def main():
     print(f"  Town:        {args.town}")
     print(f"  Radar range: {RADAR_RANGE:.0f}m")
     print(f"  Radar:       {args.radar_backend}")
+    if args.radar_backend == "realistic":
+        print(f"  Profile:     {radar_metadata['radar_profile']}")
+        print(f"  Config ID:   {radar_metadata['radar_config_signature']}")
     print(f"  Speed cap:   {args.max_speed_kmh:.1f} km/h")
     print(f"  Seed:        {args.seed}")
     print(f"  Scenarios:   {args.scenarios}")
@@ -515,13 +542,6 @@ def main():
             dataset_config.update({
                 "town": dataset_config.get("town", args.town),
                 "fps": FPS,
-                "radar_backend": args.radar_backend,
-                "radar_range_m": RADAR_RANGE,
-                "radar_points_per_second": (
-                    NATIVE_RADAR_POINTS_PER_SECOND
-                    if args.radar_backend == "native"
-                    else 240000
-                ),
                 "max_target_speed_kmh": args.max_speed_kmh,
                 "history_frames": args.history,
                 "label_horizon": args.label_horizon,
@@ -532,6 +552,7 @@ def main():
                 "label_col": "teacher_target_speed",
                 "episode_col": "episode_id",
             })
+            dataset_config.update(radar_metadata)
             with open(config_path, "w", encoding="utf-8") as fh:
                 json.dump(dataset_config, fh, indent=2)
             print("\n" + "=" * 72)
