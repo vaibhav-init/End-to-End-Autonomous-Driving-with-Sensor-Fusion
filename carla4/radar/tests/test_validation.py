@@ -1,7 +1,10 @@
 import unittest
 
 from radar.validation import BackendAccuracy, error_statistics
-from validate_radar_accuracy import _assess_carla_versions
+from validate_radar_accuracy import (
+    _assess_carla_versions,
+    _is_path_relevant,
+)
 
 
 class RadarValidationMetricsTest(unittest.TestCase):
@@ -60,6 +63,61 @@ class RadarValidationMetricsTest(unittest.TestCase):
         self.assertEqual(summary["miss_rate_when_observable"], 0.5)
         self.assertEqual(summary["correct_target_rate"], 0.0)
         self.assertEqual(summary["unsynchronized_frames"], 1)
+
+    def test_identity_rate_excludes_outputs_when_lead_is_not_relevant(self):
+        metrics = BackendAccuracy("realistic", identity_available=True)
+        metrics.update(
+            observable=False,
+            reported=True,
+            target_id=99,
+            lead_id=7,
+            synchronized=True,
+            callback_error=False,
+            frame_lag=0,
+        )
+        metrics.update(
+            observable=True,
+            reported=True,
+            target_id=7,
+            lead_id=7,
+            synchronized=True,
+            callback_error=False,
+            frame_lag=0,
+        )
+        summary = metrics.summary()
+        self.assertEqual(summary["correct_target_rate"], 1.0)
+        self.assertEqual(
+            summary["correct_target_rate_all_reported_outputs"],
+            0.5,
+        )
+        self.assertEqual(summary["lead_detection_rate_when_observable"], 1.0)
+
+    def test_path_relevance_is_stricter_than_wide_sensor_visibility(self):
+        ground_truth = {
+            "longitudinal_m": 20.0,
+            "surface_range_m": 21.0,
+            "bbox_azimuth_min_deg": 20.0,
+            "bbox_azimuth_max_deg": 24.0,
+            "bbox_elevation_min_deg": -1.0,
+            "bbox_elevation_max_deg": 1.0,
+            "bbox_longitudinal_min_m": 18.0,
+            "bbox_lateral_min_m": 7.0,
+            "bbox_lateral_max_m": 8.5,
+        }
+        envelope = {
+            "horizontal_fov_deg": 120.0,
+            "min_elevation_deg": -8.0,
+            "max_elevation_deg": 8.0,
+            "max_range_m": 100.0,
+        }
+        self.assertFalse(
+            _is_path_relevant(
+                ground_truth,
+                envelope,
+                path_half_width_m=1.8,
+                path_width_growth_per_m=0.004,
+            )
+        )
 
 
 if __name__ == "__main__":

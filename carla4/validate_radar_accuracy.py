@@ -77,6 +77,10 @@ BASE_FIELDS = [
     "gt_bbox_azimuth_max_deg",
     "gt_bbox_elevation_min_deg",
     "gt_bbox_elevation_max_deg",
+    "gt_bbox_longitudinal_min_m",
+    "gt_bbox_longitudinal_max_m",
+    "gt_bbox_lateral_min_m",
+    "gt_bbox_lateral_max_m",
     "gt_closing_velocity_mps",
     "gt_radial_obstacle_speed_mps",
 ]
@@ -86,6 +90,7 @@ BACKEND_FIELDS = [
     "sensor_timestamp_s",
     "sensor_frame_lag",
     "sensor_synchronized",
+    "lead_sensor_visible",
     "lead_observable",
     "reported_detection",
     "target_truth_id",
@@ -200,12 +205,16 @@ def _ground_truth(carla, ego, lead, sensor_transform):
     )
     vertex_azimuths = []
     vertex_elevations = []
+    vertex_longitudinal = []
+    vertex_lateral = []
     for vertex in box_vertices:
         local = sensor_transform.inverse_transform(
             _copy_location(carla, vertex)
         )
         if float(local.x) <= 0.0:
             continue
+        vertex_longitudinal.append(float(local.x))
+        vertex_lateral.append(float(local.y))
         vertex_horizontal = math.hypot(float(local.x), float(local.y))
         vertex_azimuths.append(
             math.degrees(math.atan2(float(local.y), float(local.x)))
@@ -226,6 +235,8 @@ def _ground_truth(carla, ego, lead, sensor_transform):
                 math.atan2(float(center_local.z), max(horizontal, 1.0e-9))
             )
         ]
+        vertex_longitudinal = [float(center_local.x)]
+        vertex_lateral = [float(center_local.y)]
 
     return {
         "center_range_m": center_range,
@@ -246,6 +257,10 @@ def _ground_truth(carla, ego, lead, sensor_transform):
         "bbox_azimuth_max_deg": max(vertex_azimuths),
         "bbox_elevation_min_deg": min(vertex_elevations),
         "bbox_elevation_max_deg": max(vertex_elevations),
+        "bbox_longitudinal_min_m": min(vertex_longitudinal),
+        "bbox_longitudinal_max_m": max(vertex_longitudinal),
+        "bbox_lateral_min_m": min(vertex_lateral),
+        "bbox_lateral_max_m": max(vertex_lateral),
         "closing_velocity_mps": closing_speed,
         "radial_obstacle_speed_mps": max(0.0, ego_speed - closing_speed),
         "ego_speed_mps": ego_speed,
@@ -286,6 +301,35 @@ def _is_observable(ground_truth, envelope):
         >= envelope["min_elevation_deg"]
         and ground_truth["bbox_elevation_min_deg"]
         <= envelope["max_elevation_deg"]
+    )
+
+
+def _is_path_relevant(
+    ground_truth,
+    envelope,
+    path_half_width_m,
+    path_width_growth_per_m,
+):
+    """Whether the lead overlaps the scalar ACC target corridor.
+
+    Sensor visibility alone is insufficient for target-selection scoring. A
+    wide radar can see vehicles on crossing or adjacent roads that should not
+    become the longitudinal controller's selected obstacle.
+    """
+
+    if not _is_observable(ground_truth, envelope):
+        return False
+    forward_m = max(
+        0.0,
+        float(ground_truth["bbox_longitudinal_min_m"]),
+    )
+    half_width = (
+        float(path_half_width_m)
+        + float(path_width_growth_per_m) * forward_m
+    )
+    return bool(
+        ground_truth["bbox_lateral_max_m"] >= -half_width
+        and ground_truth["bbox_lateral_min_m"] <= half_width
     )
 
 
@@ -663,21 +707,37 @@ def _print_summary(summary):
             "selected_output_velocity_error_latency_aligned_mps"
         ]
         line = (
-            f"{backend:10s} detection="
+            f"{backend:10s} visible="
+            f"{summary['lead_sensor_visible_frames'].get(backend, 0)}/"
+            f"{values['samples']} "
+            f"path_relevant={values['lead_observable_frames']}/"
+            f"{values['samples']} any_output="
             f"{_format_ratio(values['detection_rate_when_observable'])} "
             f"miss={_format_ratio(values['miss_rate_when_observable'])} "
         )
         if values["identity_available"]:
             line += (
-                f"correct_target="
-                f"{_format_ratio(values['correct_target_rate'])} "
+                f"lead_recall="
+                f"{_format_ratio(values['lead_detection_rate_when_observable'])} "
+                f"wrong_target="
+                f"{_format_ratio(values['wrong_target_rate_when_observable'])} "
             )
         else:
-            line += "correct_target=n/a(native has no IDs) "
+            line += "lead_recall=n/a wrong_target=n/a "
+        correct_range_stats = values[
+            "correct_target_range_error_latency_aligned_m"
+        ]
+        correct_velocity_stats = values[
+            "correct_target_velocity_error_latency_aligned_mps"
+        ]
         line += (
-            f"range_MAE={_format_metric(range_stats['mae'], 'm')} "
-            f"range_RMSE={_format_metric(range_stats['rmse'], 'm')} "
-            f"velocity_MAE={_format_metric(velocity_stats['mae'], 'm/s')} "
+            f"correct_range_MAE="
+            f"{_format_metric(correct_range_stats['mae'], 'm')} "
+            f"correct_velocity_MAE="
+            f"{_format_metric(correct_velocity_stats['mae'], 'm/s')} "
+            f"selected_range_MAE={_format_metric(range_stats['mae'], 'm')} "
+            f"selected_velocity_MAE="
+            f"{_format_metric(velocity_stats['mae'], 'm/s')} "
             f"unsynced={values['unsynchronized_frames']} "
             f"callback_errors={values['callback_error_frames']}"
         )
@@ -691,8 +751,10 @@ def _print_summary(summary):
         )
         print(
             f"{backend:10s} semantic_tags=[{observed}] "
-            f"lead_tag14_frames="
-            f"{summary['lead_tag14_extracted_frames'].get(backend, 0)}"
+            f"lead_extracted_frames="
+            f"{summary['lead_extracted_frames'].get(backend, 0)} "
+            f"lead_tags="
+            f"{summary['lead_semantic_tags'].get(backend, {})}"
         )
     for warning in summary["warnings"]:
         print(f"WARNING: {warning}")
@@ -730,6 +792,7 @@ def _backend_csv_values(
     diagnostics,
     ground_truth,
     aligned_ground_truth,
+    sensor_visible,
     observable,
     synchronized,
     frame_lag,
@@ -770,6 +833,7 @@ def _backend_csv_values(
         "sensor_timestamp_s": diagnostics.get("timestamp"),
         "sensor_frame_lag": frame_lag,
         "sensor_synchronized": int(synchronized),
+        "lead_sensor_visible": int(sensor_visible),
         "lead_observable": int(observable),
         "reported_detection": int(reported),
         "target_truth_id": sensor["target_id"],
@@ -859,6 +923,18 @@ def _base_csv_values(
         "gt_bbox_elevation_max_deg": ground_truth[
             "bbox_elevation_max_deg"
         ],
+        "gt_bbox_longitudinal_min_m": ground_truth[
+            "bbox_longitudinal_min_m"
+        ],
+        "gt_bbox_longitudinal_max_m": ground_truth[
+            "bbox_longitudinal_max_m"
+        ],
+        "gt_bbox_lateral_min_m": ground_truth[
+            "bbox_lateral_min_m"
+        ],
+        "gt_bbox_lateral_max_m": ground_truth[
+            "bbox_lateral_max_m"
+        ],
         "gt_closing_velocity_mps": ground_truth[
             "closing_velocity_mps"
         ],
@@ -890,6 +966,21 @@ def build_argument_parser():
     parser.add_argument("--ego-speed-kmh", type=float, default=45.0)
     parser.add_argument("--lead-speed-kmh", type=float, default=25.0)
     parser.add_argument("--radar-range-m", type=float, default=100.0)
+    parser.add_argument(
+        "--evaluation-path-half-width-m",
+        type=float,
+        default=1.8,
+        help=(
+            "half-width of the ego-path corridor used to decide whether the "
+            "controlled lead is a relevant scalar ACC target"
+        ),
+    )
+    parser.add_argument(
+        "--evaluation-path-width-growth-per-m",
+        type=float,
+        default=0.004,
+        help="path-corridor half-width growth per metre of forward distance",
+    )
     parser.add_argument(
         "--backends",
         nargs="+",
@@ -957,6 +1048,7 @@ def _validate_arguments(parser, args):
         "duration_s",
         "spawn_gap_m",
         "radar_range_m",
+        "evaluation_path_half_width_m",
         "sensor_wait_timeout_s",
         "print_every_s",
     )
@@ -969,6 +1061,10 @@ def _validate_arguments(parser, args):
         parser.error("--native-points-per-second must be positive")
     if args.native_association_tolerance_m < 0:
         parser.error("--native-association-tolerance-m cannot be negative")
+    if args.evaluation_path_width_growth_per_m < 0:
+        parser.error(
+            "--evaluation-path-width-growth-per-m cannot be negative"
+        )
     if args.semantic_points_per_second <= 0:
         parser.error("--semantic-points-per-second must be positive")
     if args.detailed_log_every < 0:
@@ -1054,6 +1150,12 @@ def main():
         if backend in IDENTITY_BACKENDS
     }
     semantic_lead_frames = Counter()
+    semantic_lead_tags = {
+        backend: Counter()
+        for backend in args.backends
+        if backend in IDENTITY_BACKENDS
+    }
+    sensor_visible_frames = Counter()
     metrics = {
         backend: BackendAccuracy(
             backend,
@@ -1143,7 +1245,7 @@ def main():
             )
 
         metadata = {
-            "schema_version": 1,
+            "schema_version": 2,
             "created_at": datetime.now().astimezone().isoformat(),
             "expected_carla_version": EXPECTED_CARLA_VERSION,
             "carla_client_version": client_version,
@@ -1388,10 +1490,17 @@ def main():
                         ground_truth_by_backend[backend],
                     )
                     envelope = _backend_envelope(radar)
-                    observable = _is_observable(
+                    sensor_visible = _is_observable(
                         aligned_ground_truth,
                         envelope,
                     )
+                    observable = _is_path_relevant(
+                        aligned_ground_truth,
+                        envelope,
+                        args.evaluation_path_half_width_m,
+                        args.evaluation_path_width_growth_per_m,
+                    )
+                    sensor_visible_frames[backend] += int(sensor_visible)
 
                     range_error_current = (
                         sensor["distance_m"]
@@ -1442,6 +1551,7 @@ def main():
                             diagnostics,
                             ground_truth_by_backend[backend],
                             aligned_ground_truth,
+                            sensor_visible,
                             observable,
                             synchronized,
                             frame_lag,
@@ -1453,6 +1563,7 @@ def main():
                         "state": state,
                         "diagnostics": diagnostics,
                         "debug": debug_snapshot,
+                        "sensor_visible": sensor_visible,
                         "observable": observable,
                         "synchronized": synchronized,
                         "aligned_ground_truth_frame": aligned_frame,
@@ -1485,12 +1596,17 @@ def main():
                         "ideal_targets",
                         (),
                     )
-                    if any(
-                        int(target.get("object_id", -1)) == int(lead.id)
-                        and int(target.get("semantic_tag", -1)) == 14
+                    lead_targets = [
+                        target
                         for target in ideal_targets
-                    ):
+                        if int(target.get("object_id", -1)) == int(lead.id)
+                    ]
+                    if lead_targets:
                         semantic_lead_frames[backend] += 1
+                        for target in lead_targets:
+                            semantic_lead_tags[backend][
+                                int(target.get("semantic_tag", -1))
+                            ] += 1
 
                     if sensor["reported"]:
                         display_values.append(
@@ -1558,12 +1674,12 @@ def main():
                 )
             if semantic_lead_frames[backend] == 0:
                 warnings.append(
-                    f"{backend} never extracted lead actor {lead.id} as "
-                    "CARLA 0.9.16 semantic tag 14 (Car)"
+                    f"{backend} never extracted lead actor {lead.id}; inspect "
+                    "sensor FOV, occlusion, point density, and semantic IDs"
                 )
 
         summary = {
-            "schema_version": 1,
+            "schema_version": 2,
             "carla_client_version": client_version,
             "carla_server_version": server_version,
             "carla_version_assessment": version_assessment,
@@ -1579,6 +1695,7 @@ def main():
                 backend: accumulator.summary()
                 for backend, accumulator in metrics.items()
             },
+            "lead_sensor_visible_frames": dict(sensor_visible_frames),
             "semantic_tag_return_totals": {
                 backend: {
                     str(tag): {
@@ -1592,7 +1709,14 @@ def main():
                 }
                 for backend, counts in semantic_totals.items()
             },
-            "lead_tag14_extracted_frames": dict(semantic_lead_frames),
+            "lead_extracted_frames": dict(semantic_lead_frames),
+            "lead_semantic_tags": {
+                backend: {
+                    str(tag): count
+                    for tag, count in sorted(counts.items())
+                }
+                for backend, counts in semantic_lead_tags.items()
+            },
             "warnings": warnings,
             "files": metadata["files"],
         }
@@ -1600,10 +1724,12 @@ def main():
         metadata["result"] = {
             "samples": samples_written,
             "collision_state": collision_state,
+            "lead_sensor_visible_frames": dict(sensor_visible_frames),
             "semantic_tag_return_totals": summary[
                 "semantic_tag_return_totals"
             ],
-            "lead_tag14_extracted_frames": dict(semantic_lead_frames),
+            "lead_extracted_frames": dict(semantic_lead_frames),
+            "lead_semantic_tags": summary["lead_semantic_tags"],
             "warnings": warnings,
         }
         _write_json(metadata_path, metadata)

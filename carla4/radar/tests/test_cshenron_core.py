@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import numpy as np
@@ -78,6 +79,23 @@ class CShenronCoreTest(unittest.TestCase):
         config = CShenronConfig(min_snr_db=-20.0)
         targets = extract_targets(make_returns(rows), config)
         self.assertEqual([target.object_id for target in targets], [9, 4])
+
+    def test_extended_target_angle_uses_robust_cluster_centroid(self):
+        rows = [
+            (10.0, 3.0, 0.0, 1.0, 77, 14),
+            (12.0, -0.1, 0.0, 1.0, 77, 14),
+            (12.0, 0.0, 0.0, 1.0, 77, 14),
+            (12.0, 0.1, 0.0, 1.0, 77, 14),
+        ]
+        config = CShenronConfig(
+            horizontal_fov_deg=40.0,
+            min_snr_db=-40.0,
+        )
+        target = extract_targets(make_returns(rows), config)[0]
+        angle_deg = math.degrees(
+            math.atan2(target.direction[1], target.direction[0])
+        )
+        self.assertLess(abs(angle_deg), 1.0)
 
     def test_static_surfaces_are_split_into_stable_range_angle_cells(self):
         rows = [

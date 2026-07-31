@@ -60,6 +60,8 @@ class BackendAccuracy:
     missed_when_observable: int = 0
     correct_target_frames: int = 0
     wrong_target_frames: int = 0
+    correct_target_when_observable: int = 0
+    wrong_target_when_observable: int = 0
     callback_error_frames: int = 0
     unsynchronized_frames: int = 0
     range_errors_current: list = field(default_factory=list)
@@ -106,6 +108,11 @@ class BackendAccuracy:
                 self.correct_target_frames += 1
             else:
                 self.wrong_target_frames += 1
+            if observable:
+                if correct:
+                    self.correct_target_when_observable += 1
+                else:
+                    self.wrong_target_when_observable += 1
 
         def append_if_finite(destination, value):
             if value is not None and math.isfinite(float(value)):
@@ -149,6 +156,10 @@ class BackendAccuracy:
         """Return a JSON-serializable backend summary."""
 
         identified = self.correct_target_frames + self.wrong_target_frames
+        identified_when_observable = (
+            self.correct_target_when_observable
+            + self.wrong_target_when_observable
+        )
         return {
             "samples": self.samples,
             "lead_observable_frames": self.observable_frames,
@@ -165,9 +176,30 @@ class BackendAccuracy:
             "identified_output_frames": identified,
             "correct_target_frames": self.correct_target_frames,
             "wrong_target_frames": self.wrong_target_frames,
+            "correct_target_frames_when_observable": (
+                self.correct_target_when_observable
+            ),
+            "wrong_target_frames_when_observable": (
+                self.wrong_target_when_observable
+            ),
+            "identified_output_frames_when_observable": (
+                identified_when_observable
+            ),
             "correct_target_rate": self._ratio(
+                self.correct_target_when_observable,
+                identified_when_observable,
+            ),
+            "correct_target_rate_all_reported_outputs": self._ratio(
                 self.correct_target_frames,
                 identified,
+            ),
+            "lead_detection_rate_when_observable": self._ratio(
+                self.correct_target_when_observable,
+                self.observable_frames,
+            ),
+            "wrong_target_rate_when_observable": self._ratio(
+                self.wrong_target_when_observable,
+                self.observable_frames,
             ),
             "callback_error_frames": self.callback_error_frames,
             "unsynchronized_frames": self.unsynchronized_frames,

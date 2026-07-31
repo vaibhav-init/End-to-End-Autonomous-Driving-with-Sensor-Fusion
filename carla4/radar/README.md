@@ -100,8 +100,8 @@ It writes a timestamped directory containing:
   delivered, and tracked target;
 - `metadata.json`: exact arguments, versions, actor geometry, weather,
   resolved radar configuration, and the CARLA 0.9.16 semantic contract;
-- `summary.json`: detection/miss/correct-target rates and range/Doppler
-  bias, MAE, RMSE, median, p95, and maximum absolute errors.
+- `summary.json`: any-output, miss, lead-recall, and wrong-target rates plus
+  range/Doppler bias, MAE, RMSE, median, p95, and maximum absolute errors.
 
 The terminal ends with a block headed `RADAR VALIDATION SUMMARY — COPY THIS
 BLOCK BACK TO CODEX`. Send that block first. If semantic-tag or target
@@ -127,6 +127,12 @@ The validator geometrically associates CARLA native radar's selected hit with
 the lead oriented bounding box because the native radar API does not return an
 actor ID. The semantic backends expose CARLA truth IDs only for validation;
 the realistic tracker itself still associates by range, azimuth, and Doppler.
+For scalar ACC scoring, the lead must both be sensor-visible and overlap the
+ego-path corridor. A vehicle merely visible in a wide field of view is not
+automatically the correct longitudinal target. The terminal reports intrinsic
+range/Doppler error only on frames where the selected target is actually the
+lead; selected-output error remains available separately to diagnose target
+selection.
 
 ### CARLA 0.9.16 Compatibility Boundary
 
@@ -142,9 +148,10 @@ port does not copy that numeric table. For CARLA 0.9.16 it explicitly uses:
 - current actor IDs for dynamic objects and range/angle cells for static
   surfaces.
 
-Every validation run logs the observed raw tag histogram. Unknown IDs, an
-all-zero raw semantic stream, client/server version mismatch, and failure to
-extract the lead as tag `14 Car` are surfaced as terminal warnings.
+Every validation run logs the observed raw tag histogram and the semantic tags
+actually associated with the lead actor ID. Unknown IDs, an all-zero raw
+semantic stream, client/server version mismatch, and failure to extract the
+lead actor are surfaced as terminal warnings.
 
 ## Remote Usage
 

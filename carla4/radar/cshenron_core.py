@@ -346,12 +346,27 @@ def extract_targets(returns, config=None):
 
         target_ranges = ranges[indices]
         distance = float(np.quantile(target_ranges, 0.10))
-        representative = indices[int(np.argmin(np.abs(target_ranges - distance)))]
-        norm = max(ranges[representative], 1.0e-9)
+
+        # Range represents the front scattering surface, but using that one
+        # quantile's nearest LiDAR point for angle makes an extended vehicle
+        # jump between its visible corners.  A target-list radar reports a
+        # cluster angle, so use robust angular centroids across the object's
+        # returns.  This keeps ego-corridor gating stable on curves without
+        # using the CARLA actor transform or other privileged ground truth.
+        target_azimuth = float(np.median(azimuth[indices]))
+        target_elevation = float(
+            np.median(
+                np.arctan2(
+                    z[indices],
+                    np.hypot(x[indices], y[indices]),
+                )
+            )
+        )
+        cos_elevation = math.cos(target_elevation)
         direction = (
-            float(x[representative] / norm),
-            float(y[representative] / norm),
-            float(z[representative] / norm),
+            cos_elevation * math.cos(target_azimuth),
+            cos_elevation * math.sin(target_azimuth),
+            math.sin(target_elevation),
         )
         tag_counts = np.bincount(tags[indices], minlength=len(_TAG_TO_MATERIAL))
         semantic_tag = int(np.argmax(tag_counts))
