@@ -215,20 +215,15 @@ def build_summary(df):
 
 
 def _cdf(ax, values, label, point_labels=None, unit="", driver_idx=0):
-    """Plot a smooth CDF curve, labelling each point with what it represents.
-
-    Uses monotonic interpolation (PCHIP) to draw a smooth S-curve through the
-    empirical CDF points, with markers at the actual data points.
+    """Plot an empirical CDF and label each observation with its run ID.
 
     Args:
         point_labels: list of strings parallel to *values* (before NaN removal
-            and sorting) describing each point, e.g. weather condition names.
+            and sorting), such as ``M01`` or ``P04``.
         unit: suffix like 'm' or 's' appended after the numeric value.
-        driver_idx: index of this driver (0, 1, …) — used to alternate label
-            placement above vs below the curve so different drivers don't overlap.
+        driver_idx: used to place different drivers' labels on opposite sides
+            of their markers.
     """
-    from scipy.interpolate import PchipInterpolator
-
     # Pair values with labels, drop NaNs, sort by value
     if point_labels is not None:
         pairs = [(v, lbl) for v, lbl in zip(values, point_labels)
@@ -244,58 +239,79 @@ def _cdf(ax, values, label, point_labels=None, unit="", driver_idx=0):
     # Empirical CDF: (x_i, i/n)
     y_cdf = np.arange(1, vals.size + 1) / vals.size
 
-    # Build knot points for smooth interpolation:
-    #   start at (x_min - margin, 0), pass through data, end at (x_max + margin, 1)
+    # Draw a true step ECDF. Smooth interpolation creates values that were
+    # never observed and makes a small experiment look more precise than it is.
     x_range = vals[-1] - vals[0] if vals.size > 1 else 1.0
     margin = max(x_range * 0.15, 0.1)
-    x_knots = np.concatenate([[vals[0] - margin], vals, [vals[-1] + margin]])
-    y_knots = np.concatenate([[0.0], y_cdf, [1.0]])
-
-    # Smooth interpolation (monotonic so CDF never decreases)
-    if x_knots.size >= 2:
-        # Need unique x values for interpolation
-        # If duplicates exist, nudge them slightly
-        for j in range(1, len(x_knots)):
-            if x_knots[j] <= x_knots[j - 1]:
-                x_knots[j] = x_knots[j - 1] + 1e-6
-
-        interp = PchipInterpolator(x_knots, y_knots)
-        x_smooth = np.linspace(x_knots[0], x_knots[-1], 200)
-        y_smooth = np.clip(interp(x_smooth), 0.0, 1.0)
-
-        # Plot smooth curve
-        line = ax.plot(x_smooth, y_smooth, linewidth=2,
-                       label=f"{label} (n={vals.size})")
-    else:
-        line = ax.plot(vals, y_cdf, linewidth=2,
-                       label=f"{label} (n={vals.size})")
+    x_step = np.concatenate([[vals[0] - margin], vals,
+                             [vals[-1] + margin]])
+    y_step = np.concatenate([[0.0], y_cdf, [1.0]])
+    line = ax.step(
+        x_step,
+        y_step,
+        where="post",
+        linewidth=1.4,
+        linestyle="--",
+        alpha=0.65,
+        label=f"{label.upper()} (n={vals.size})",
+    )
 
     color = line[0].get_color()
+
+    # Add a monotonic smooth guide over the empirical steps. The dashed ECDF,
+    # markers, and run IDs remain the statistical observations; this solid
+    # curve is only a visual aid.
+    try:
+        from scipy.interpolate import PchipInterpolator
+
+        unique_x, counts = np.unique(vals, return_counts=True)
+        if unique_x.size >= 2:
+            unique_y = np.cumsum(counts) / vals.size
+            smooth_x_knots = np.concatenate([
+                [unique_x[0] - margin],
+                unique_x,
+                [unique_x[-1] + margin],
+            ])
+            smooth_y_knots = np.concatenate([[0.0], unique_y, [1.0]])
+            interpolator = PchipInterpolator(
+                smooth_x_knots, smooth_y_knots
+            )
+            smooth_x = np.linspace(
+                smooth_x_knots[0], smooth_x_knots[-1], 300
+            )
+            smooth_y = np.clip(interpolator(smooth_x), 0.0, 1.0)
+            ax.plot(
+                smooth_x,
+                smooth_y,
+                color=color,
+                linewidth=2.4,
+                alpha=0.9,
+                label="_nolegend_",
+                zorder=3,
+            )
+    except ImportError:
+        # The empirical graph remains complete when SciPy is unavailable.
+        pass
 
     # Plot actual data points as markers
     ax.scatter(vals, y_cdf, color=color, s=40, zorder=5, edgecolors="white",
                linewidths=0.8)
 
-    # Alternate label placement: even drivers above, odd drivers below.
+    # Labels are deliberately short. Their complete descriptions appear in
+    # the run-key tables below the plots, where text cannot overlap.
     base_y_sign = 1 if driver_idx % 2 == 0 else -1
     va = "bottom" if base_y_sign > 0 else "top"
-
-    # Dense 15+ run CDFs become unreadable if every empirical point is labelled.
-    if vals.size > 8:
-        return
     for i, (xv, yv) in enumerate(zip(vals, y_cdf)):
         plbl = plabels[i]
-        if plbl:
-            txt = f"{plbl}: {xv:.1f}{unit}"
-        else:
-            txt = f"{xv:.1f}{unit}"
-        # Stagger: alternate between two vertical offsets per point index
-        y_offset = base_y_sign * (10 + 12 * (i % 2))
+        txt = plbl if plbl else f"{xv:.1f}{unit}"
+        y_offset = base_y_sign * 7
         ax.annotate(txt,
                     xy=(xv, yv),
-                    textcoords="offset points", xytext=(6, y_offset),
-                    fontsize=6.5, color=color, fontweight="bold",
-                    va=va, ha="left")
+                    textcoords="offset points", xytext=(4, y_offset),
+                    fontsize=6.2, color=color, fontweight="bold",
+                    va=va, ha="left", clip_on=False,
+                    bbox={"boxstyle": "round,pad=0.12", "facecolor": "white",
+                          "edgecolor": "none", "alpha": 0.72})
 
 
 def plot_cdfs(df, out_dir):
@@ -310,33 +326,116 @@ def plot_cdfs(df, out_dir):
     drivers = sorted(df["driver"].unique())
     scenarios = sorted(df["scenario"].unique())
 
-    # Weather fog-code → human-readable name (matches compare_drivers.py)
+    # Human-readable names used in titles and run-key tables.
     weather_names = {
-        1: "Dark Night", 2: "Dense Fog", 3: "Clear Day", 4: "Night+Fog+Rain",
+        1: "Dark Night", 2: "Dense Fog", 3: "Clear Day",
+        4: "Night + Fog + Rain",
         80: "Heavy Rain", 50: "Moderate Rain", 20: "Light Rain", 0: "Clear",
+    }
+    scenario_names = {
+        1: "Lead Vehicle Stopped (NHTSA Scenario #25)",
+        2: "Lead Vehicle Decelerating (NHTSA Scenario #4)",
+        3: "Lead Vehicle Moving at Lower Constant Speed "
+           "(NHTSA Scenario #12)",
+        4: "Vehicle Cut-In from Adjacent Lane",
     }
 
     for sid in scenarios:
-        sdf = df[df["scenario"] == sid]
-        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+        sdf = df[df["scenario"] == sid].copy()
+        scenario_name = scenario_names.get(sid, f"Scenario S{sid}")
+
+        # The top row contains the two CDFs. The lower row contains one
+        # complete run-key table per driver so long labels never cover data.
+        fig = plt.figure(figsize=(max(18, 9 * len(drivers)), 14))
+        grid = fig.add_gridspec(
+            2, 2, height_ratios=[2.4, 2.0], hspace=0.28, wspace=0.12
+        )
+        axes = [fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[0, 1])]
+        table_grid = grid[1, :].subgridspec(
+            1, max(1, len(drivers)), wspace=0.12
+        )
+        table_axes = [
+            fig.add_subplot(table_grid[0, i]) for i in range(len(drivers))
+        ]
+
         for didx, label in enumerate(drivers):
-            ddf = sdf[sdf["driver"] == label]
-            # Build per-point weather labels aligned with the value lists
-            wlabels = [weather_names.get(int(f), f"fog={f}") for f in ddf["fog"]]
+            ddf = sdf[sdf["driver"] == label].sort_values(
+                ["fog", "seed"]
+            ).copy()
+            prefix = {"mlp": "M", "pcla": "P"}.get(
+                str(label).lower(), str(label)[:2].upper()
+            )
+            ddf["run_id"] = [
+                f"{prefix}{i:02d}" for i in range(1, len(ddf) + 1)
+            ]
+
             _cdf(axes[0], ddf["min_dist_m"].tolist(), label,
-                 point_labels=wlabels, unit="m", driver_idx=didx)
+                 point_labels=ddf["run_id"].tolist(), unit="m",
+                 driver_idx=didx)
             _cdf(axes[1], ddf["min_ttc_s"].tolist(), label,
-                 point_labels=wlabels, unit="s", driver_idx=didx)
-        axes[0].set(title=f"S{sid} — closest approach CDF",
+                 point_labels=ddf["run_id"].tolist(), unit="s",
+                 driver_idx=didx)
+
+            table_rows = []
+            collision_rows = []
+            for row_idx, (_, row) in enumerate(ddf.iterrows(), start=1):
+                collided = bool(row["collided"])
+                if collided:
+                    collision_rows.append(row_idx)
+                table_rows.append([
+                    row["run_id"],
+                    weather_names.get(int(row["fog"]), f"Fog code {row['fog']}"),
+                    str(int(row["seed"])),
+                    "COLLISION" if collided else "Safe",
+                    f"{row['min_dist_m']:.2f}",
+                    f"{row['min_ttc_s']:.2f}",
+                ])
+
+            table_ax = table_axes[didx]
+            table_ax.axis("off")
+            table_ax.set_title(
+                f"{label.upper()} run key — Scenario S{sid}: {scenario_name}",
+                fontsize=10, fontweight="bold", pad=8,
+            )
+            run_table = table_ax.table(
+                cellText=table_rows,
+                colLabels=[
+                    "Run ID", "Complete weather condition", "Seed", "Outcome",
+                    "Min distance (m)", "Min TTC (s)",
+                ],
+                cellLoc="center",
+                colLoc="center",
+                bbox=[0.0, 0.0, 1.0, 0.95],
+                colWidths=[0.09, 0.30, 0.09, 0.14, 0.19, 0.16],
+            )
+            run_table.auto_set_font_size(False)
+            run_table.set_fontsize(7.2)
+            for col in range(6):
+                run_table[(0, col)].set_facecolor("#d9e5f2")
+                run_table[(0, col)].set_text_props(weight="bold")
+            for row_idx in collision_rows:
+                for col in range(6):
+                    run_table[(row_idx, col)].set_facecolor("#f8d7da")
+                run_table[(row_idx, 3)].set_text_props(
+                    color="#9c1c24", weight="bold"
+                )
+
+        axes[0].set(title="Closest-approach ECDF — larger distance is safer",
                     xlabel="min distance to NPC (m)", ylabel="P(X ≤ x)")
-        axes[1].set(title=f"S{sid} — min TTC CDF",
+        axes[1].set(title="Minimum-TTC ECDF — larger TTC is safer",
                     xlabel="min time-to-collision (s)", ylabel="P(X ≤ x)")
         for ax in axes:
             ax.grid(True, alpha=0.3)
             ax.legend()
-        fig.tight_layout()
+            ax.set_ylim(-0.04, 1.09)
+        fig.suptitle(
+            f"Scenario S{sid}: {scenario_name}\n"
+            "Markers and dashed steps are empirical observations; "
+            "solid curves are smooth visual guides",
+            fontsize=15, fontweight="bold", y=0.995,
+        )
         path = os.path.join(out_dir, f"cdf_s{sid}.png")
-        fig.savefig(path, dpi=150)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"  wrote {path}")
 
@@ -361,8 +460,11 @@ def plot_cdfs(df, out_dir):
             for _, row in sub.iterrows():
                 fog_val = int(row["fog"])
                 rate_pct = row["collision_rate"] * 100
-                # Compact label: "MLP S4: 25%"
-                point_label = f"{label.upper()} S{sid}: {rate_pct:.0f}%"
+                point_label = (
+                    f"{label.upper()} — Scenario S{sid}: "
+                    f"{rate_pct:.0f}% "
+                    f"({int(row['n_collisions'])}/{int(row['n_runs'])})"
+                )
 
                 # Stagger vertically when multiple labels land on same coords
                 key = (fog_val, round(row["collision_rate"], 3))
@@ -382,7 +484,15 @@ def plot_cdfs(df, out_dir):
                             ha="left", va=va)
             series_idx += 1
 
-    ax.set(title="Collision rate by weather condition",
+    if len(scenarios) == 1:
+        sid = scenarios[0]
+        collision_title = (
+            f"Collision rate — Scenario S{sid}: "
+            f"{scenario_names.get(sid, f'Scenario S{sid}')}"
+        )
+    else:
+        collision_title = "Collision rate by complete scenario and weather condition"
+    ax.set(title=collision_title,
            xlabel="Weather preset", ylabel="collision rate",
            ylim=(-0.05, 1.05))
     # Use weather names on x-axis instead of raw fog codes

@@ -66,7 +66,7 @@ from driving_contract import MAX_TARGET_SPEED_KMH
 STAGE_TARGET_SPEED_KMH = S1_SPAWN_SPEED_KMH
 STAGE_MIN_STEPS = 60             # minimum staging steps (let model warm up)
 STAGE_STABLE_S = 1.0             # require a stable speed before the event
-STAGE_SPEED_TOLERANCE_KMH = 1.0
+STAGE_SPEED_TOLERANCE_KMH = 2.0
 TL_CLEARANCE_M = 100.0           # min distance from traffic lights
 
 

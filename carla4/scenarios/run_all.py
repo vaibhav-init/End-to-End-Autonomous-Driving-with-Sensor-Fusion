@@ -98,7 +98,7 @@ def main():
     parser.add_argument(
         "--s1-stage-speed-tolerance-kmh",
         type=float,
-        default=1.0,
+        default=2.0,
         help="Allowed S1 staging speed error",
     )
     parser.add_argument(

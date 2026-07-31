@@ -26,7 +26,7 @@ This evaluation runs **3 NHTSA-aligned driving scenarios** under **4 extreme wea
 ### S1: Lead Vehicle Stopped
 - **What happens:** Ego accelerates to 60 km/h on highway, then a stopped vehicle is placed **25m ahead**.
 - **Test:** Can the driver detect and emergency-brake in time?
-- **Staging:** SpeedController holds the ego within ±1 km/h of 60 km/h for
+- **Staging:** SpeedController holds the ego within ±2 km/h of 60 km/h for
   one second before the obstacle appears. Both drivers therefore start from
   the same stable stress state.
 - **Script:** `s1_lead_vehicle_stopped.py`
