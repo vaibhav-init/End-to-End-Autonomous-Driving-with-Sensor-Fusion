@@ -25,6 +25,7 @@ import math
 import os
 import platform
 import random
+import re
 import sys
 import time
 
@@ -552,7 +553,86 @@ def _prepare_output(path, overwrite):
 
 
 def _version_is_0916(version):
-    return str(version).split("-", 1)[0] == EXPECTED_CARLA_VERSION
+    match = re.search(r"\d+\.\d+\.\d+", str(version))
+    return bool(match and match.group(0) == EXPECTED_CARLA_VERSION)
+
+
+def _assess_carla_versions(client_version, server_version):
+    """Handle both packaged semver strings and source-build Git hashes."""
+
+    client_text = str(client_version)
+    server_text = str(server_version)
+    if _version_is_0916(client_text) and _version_is_0916(server_text):
+        return {
+            "accepted": True,
+            "mode": "verified_semantic_version",
+            "message": "client and server report CARLA 0.9.16",
+        }
+    client_semver = re.search(r"\d+\.\d+\.\d+", client_text)
+    server_semver = re.search(r"\d+\.\d+\.\d+", server_text)
+    if (
+        client_text == server_text
+        and client_text
+        and client_semver is None
+        and server_semver is None
+    ):
+        return {
+            "accepted": True,
+            "mode": "matching_source_build_id",
+            "message": (
+                "client and server expose the same source-build identifier "
+                f"'{client_text}'; semantic version will be capability-audited"
+            ),
+        }
+    return {
+        "accepted": False,
+        "mode": "unverified_or_mismatched",
+        "message": (
+            f"client/server version identifiers are "
+            f"{client_text!r}/{server_text!r}"
+        ),
+    }
+
+
+def _probe_required_sensor_capabilities(world):
+    requirements = {
+        "sensor.other.radar": (
+            "horizontal_fov",
+            "vertical_fov",
+            "range",
+            "points_per_second",
+            "sensor_tick",
+        ),
+        "sensor.lidar.ray_cast_semantic": (
+            "channels",
+            "range",
+            "points_per_second",
+            "rotation_frequency",
+            "upper_fov",
+            "lower_fov",
+            "horizontal_fov",
+            "sensor_tick",
+        ),
+    }
+    result = {"blueprints": {}, "missing": []}
+    library = world.get_blueprint_library()
+    for blueprint_id, attributes in requirements.items():
+        matches = list(library.filter(blueprint_id))
+        if not matches:
+            result["missing"].append(f"blueprint:{blueprint_id}")
+            continue
+        blueprint = matches[0]
+        available = {
+            name: bool(blueprint.has_attribute(name))
+            for name in attributes
+        }
+        result["blueprints"][blueprint_id] = available
+        result["missing"].extend(
+            f"{blueprint_id}.{name}"
+            for name, present in available.items()
+            if not present
+        )
+    return result
 
 
 def _format_ratio(value):
@@ -926,17 +1006,15 @@ def main():
     client.set_timeout(30.0)
     client_version = client.get_client_version()
     server_version = client.get_server_version()
-    if (
-        not args.allow_version_mismatch
-        and (
-            not _version_is_0916(client_version)
-            or not _version_is_0916(server_version)
-        )
-    ):
+    version_assessment = _assess_carla_versions(
+        client_version,
+        server_version,
+    )
+    if not args.allow_version_mismatch and not version_assessment["accepted"]:
         raise RuntimeError(
-            "This validator is pinned to CARLA 0.9.16, but client/server are "
-            f"{client_version!r}/{server_version!r}. Install matching APIs or "
-            "use --allow-version-mismatch only for diagnostics."
+            "This validator requires matching CARLA 0.9.16-compatible client "
+            f"and server APIs: {version_assessment['message']}. Use "
+            "--allow-version-mismatch only for diagnostics."
         )
 
     world = client.get_world()
@@ -945,6 +1023,12 @@ def main():
         if current_town != args.town:
             print(f"Loading {args.town} ...")
             world = client.load_world(args.town)
+    capability_audit = _probe_required_sensor_capabilities(world)
+    if capability_audit["missing"]:
+        raise RuntimeError(
+            "CARLA build is missing required radar/semantic-LiDAR "
+            "capabilities: " + ", ".join(capability_audit["missing"])
+        )
 
     original_settings = world.get_settings()
     original_weather = world.get_weather()
@@ -1064,6 +1148,8 @@ def main():
             "expected_carla_version": EXPECTED_CARLA_VERSION,
             "carla_client_version": client_version,
             "carla_server_version": server_version,
+            "carla_version_assessment": version_assessment,
+            "sensor_capability_audit": capability_audit,
             "python_version": platform.python_version(),
             "platform": platform.platform(),
             "map": world.get_map().name,
@@ -1139,6 +1225,8 @@ def main():
         print("CARLA 0.9.16 RADAR VS GROUND-TRUTH VALIDATION")
         print("=" * 88)
         print(f"Client/server:  {client_version} / {server_version}")
+        print(f"Version mode:   {version_assessment['mode']}")
+        print(f"Version audit:  {version_assessment['message']}")
         print(f"Map:            {world.get_map().name}")
         print(f"Ego/lead IDs:   {ego.id} / {lead.id}")
         print(f"Backends:       {', '.join(args.backends)}")
@@ -1444,13 +1532,16 @@ def main():
                             del history[old_frame]
 
         warnings = []
-        if not _version_is_0916(client_version):
+        if version_assessment["mode"] == "matching_source_build_id":
             warnings.append(
-                f"CARLA client is {client_version}, expected 0.9.16"
+                "CARLA reports a matching source-build identifier rather than "
+                "a semantic version; required 0.9.16 sensor capabilities "
+                "passed, and the runtime tag histogram must confirm semantics"
             )
-        if not _version_is_0916(server_version):
+        elif not version_assessment["accepted"]:
             warnings.append(
-                f"CARLA server is {server_version}, expected 0.9.16"
+                "CARLA version mismatch was explicitly allowed: "
+                f"{version_assessment['message']}"
             )
         for backend, counts in semantic_totals.items():
             unknown = sorted(
@@ -1475,6 +1566,8 @@ def main():
             "schema_version": 1,
             "carla_client_version": client_version,
             "carla_server_version": server_version,
+            "carla_version_assessment": version_assessment,
+            "sensor_capability_audit": capability_audit,
             "map": world.get_map().name,
             "samples": samples_written,
             "collision_count": collision_state["count"],

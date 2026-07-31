@@ -1,9 +1,28 @@
 import unittest
 
 from radar.validation import BackendAccuracy, error_statistics
+from validate_radar_accuracy import _assess_carla_versions
 
 
 class RadarValidationMetricsTest(unittest.TestCase):
+    def test_version_assessment_accepts_semver_and_matching_build_hash(self):
+        semantic = _assess_carla_versions("0.9.16", "0.9.16")
+        self.assertTrue(semantic["accepted"])
+        self.assertEqual(
+            semantic["mode"],
+            "verified_semantic_version",
+        )
+
+        source_build = _assess_carla_versions("9c62014", "9c62014")
+        self.assertTrue(source_build["accepted"])
+        self.assertEqual(
+            source_build["mode"],
+            "matching_source_build_id",
+        )
+
+        mismatch = _assess_carla_versions("9c62014", "294096e")
+        self.assertFalse(mismatch["accepted"])
+
     def test_error_statistics(self):
         result = error_statistics((-2.0, 0.0, 2.0))
         self.assertEqual(result["count"], 3)

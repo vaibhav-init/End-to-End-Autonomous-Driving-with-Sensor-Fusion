@@ -86,8 +86,10 @@ python3 validate_radar_accuracy.py
 The script verifies both CARLA client and server versions, spawns a same-lane
 ego/lead pair, runs `native`, `cshenron`, and `realistic` simultaneously in
 synchronous mode, and compares them with CARLA actor/bounding-box ground
-truth. It restores world settings and weather and destroys only the actors and
-sensors that it created.
+truth. Source builds sometimes return a Git build identifier instead of
+`0.9.16`; matching client/server identifiers are accepted after the required
+radar and semantic-LiDAR blueprint capabilities are audited. It restores world
+settings and weather and destroys only the actors and sensors that it created.
 
 It writes a timestamped directory containing:
 
