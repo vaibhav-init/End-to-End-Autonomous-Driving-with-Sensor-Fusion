@@ -128,6 +128,8 @@ BACKEND_FIELDS = [
     "selected_track_id",
     "selected_confidence",
     "selected_azimuth_deg",
+    "selected_lateral_extent_m",
+    "path_curvature_per_m",
     "last_error",
 ]
 
@@ -309,6 +311,8 @@ def _is_path_relevant(
     envelope,
     path_half_width_m,
     path_width_growth_per_m,
+    path_curvature_per_m=0.0,
+    max_path_lateral_offset_m=8.0,
 ):
     """Whether the lead overlaps the scalar ACC target corridor.
 
@@ -327,9 +331,14 @@ def _is_path_relevant(
         float(path_half_width_m)
         + float(path_width_growth_per_m) * forward_m
     )
+    path_lateral = 0.5 * float(path_curvature_per_m) * forward_m * forward_m
+    path_lateral = max(
+        -float(max_path_lateral_offset_m),
+        min(float(max_path_lateral_offset_m), path_lateral),
+    )
     return bool(
-        ground_truth["bbox_lateral_max_m"] >= -half_width
-        and ground_truth["bbox_lateral_min_m"] <= half_width
+        ground_truth["bbox_lateral_max_m"] >= path_lateral - half_width
+        and ground_truth["bbox_lateral_min_m"] <= path_lateral + half_width
     )
 
 
@@ -1499,6 +1508,7 @@ def main():
                         envelope,
                         args.evaluation_path_half_width_m,
                         args.evaluation_path_width_growth_per_m,
+                        diagnostics.get("path_curvature_per_m", 0.0) or 0.0,
                     )
                     sensor_visible_frames[backend] += int(sensor_visible)
 

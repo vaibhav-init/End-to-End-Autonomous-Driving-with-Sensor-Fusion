@@ -183,6 +183,8 @@ _LOGGED_DIAGNOSTIC_KEYS = (
     "selected_source",
     "selected_confidence",
     "selected_azimuth_deg",
+    "selected_lateral_extent_m",
+    "path_curvature_per_m",
     "last_error",
 )
 
@@ -596,6 +598,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
         self._raw_return_count = 0
         self._semantic_tag_counts = {}
         self._capture_debug = bool(capture_debug)
+        self._path_curvature_per_m = 0.0
         self.realistic_config = resolve_realistic_radar_config(
             range_m=range_m,
             fps=fps,
@@ -665,6 +668,38 @@ class RealisticFrontRadar(CShenronFrontRadar):
             dust=normalized("dust_storm"),
         )
 
+    def _update_path_curvature(self, ego_velocity):
+        """Estimate driven-path curvature from production-like ego motion.
+
+        Automotive target selectors commonly consume yaw rate from the ego
+        motion/IMU interface. CARLA exposes angular velocity in deg/s, so the
+        planar curvature is yaw_rate / speed in 1/m.
+        """
+
+        ego_speed = float(np.linalg.norm(ego_velocity[:2]))
+        if ego_speed < 1.0:
+            raw_curvature = 0.0
+        else:
+            try:
+                angular_velocity = self.vehicle.get_angular_velocity()
+                raw_curvature = math.radians(
+                    float(angular_velocity.z)
+                ) / ego_speed
+            except (AttributeError, RuntimeError):
+                raw_curvature = 0.0
+        raw_curvature = float(
+            np.clip(
+                raw_curvature,
+                -self.realistic_config.max_abs_path_curvature_per_m,
+                self.realistic_config.max_abs_path_curvature_per_m,
+            )
+        )
+        gain = self.realistic_config.path_curvature_filter_gain
+        self._path_curvature_per_m += gain * (
+            raw_curvature - self._path_curvature_per_m
+        )
+        return self._path_curvature_per_m
+
     def _on_semantic_lidar(self, measurement):
         try:
             returns = decode_semantic_lidar(measurement.raw_data)
@@ -685,6 +720,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
             ego_yaw_rad = math.radians(
                 self.vehicle.get_transform().rotation.yaw
             )
+            path_curvature_per_m = self._update_path_curvature(ego_velocity)
             ideal_targets = []
             for target in targets:
                 ideal_targets.append(
@@ -703,6 +739,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
                         ),
                         snr_db=target.snr_db,
                         point_count=target.point_count,
+                        lateral_extent_m=target.lateral_extent_m,
                     )
                 )
             timestamp = getattr(measurement, "timestamp", None)
@@ -710,6 +747,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
                 ideal_targets,
                 timestamp_s=timestamp,
                 environment=self._read_environment(),
+                path_curvature_per_m=path_curvature_per_m,
             )
             model_snapshot = self.model.debug_snapshot()
             state = {

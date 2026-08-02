@@ -119,6 +119,34 @@ class RadarValidationMetricsTest(unittest.TestCase):
             )
         )
 
+    def test_path_relevance_follows_yaw_rate_curvature(self):
+        ground_truth = {
+            "longitudinal_m": 18.0,
+            "surface_range_m": 18.2,
+            "bbox_azimuth_min_deg": 4.0,
+            "bbox_azimuth_max_deg": 9.0,
+            "bbox_elevation_min_deg": -1.0,
+            "bbox_elevation_max_deg": 1.0,
+            "bbox_longitudinal_min_m": 17.0,
+            "bbox_lateral_min_m": 1.9,
+            "bbox_lateral_max_m": 2.8,
+        }
+        envelope = {
+            "horizontal_fov_deg": 120.0,
+            "min_elevation_deg": -8.0,
+            "max_elevation_deg": 8.0,
+            "max_range_m": 100.0,
+        }
+        self.assertTrue(
+            _is_path_relevant(
+                ground_truth,
+                envelope,
+                path_half_width_m=1.8,
+                path_width_growth_per_m=0.004,
+                path_curvature_per_m=0.014,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

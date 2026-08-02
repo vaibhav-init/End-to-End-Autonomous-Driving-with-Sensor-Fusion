@@ -18,6 +18,7 @@ def ideal_target(
     relative_velocity_mps=4.0,
     snr_db=40.0,
     semantic_tag=14,
+    lateral_extent_m=0.0,
 ):
     return IdealRadarTarget(
         object_id=object_id,
@@ -27,6 +28,7 @@ def ideal_target(
         relative_velocity_mps=relative_velocity_mps,
         snr_db=snr_db,
         point_count=4,
+        lateral_extent_m=lateral_extent_m,
     )
 
 
@@ -70,6 +72,62 @@ class RealisticRadarCoreTest(unittest.TestCase):
         self.assertEqual(model.step([target]).track_id, 0)
         self.assertNotEqual(model.step([target]).track_id, 0)
         self.assertEqual(model.diagnostics()["confirmed_track_count"], 1)
+
+    def test_extended_target_overlap_prevents_centroid_rejection(self):
+        config = load_realistic_radar_config("ideal_target_list_v1")
+        model = RealisticRadarModel(config, seed=30)
+        output = model.step(
+            [
+                ideal_target(
+                    distance_m=18.0,
+                    lateral_m=2.2,
+                    lateral_extent_m=0.6,
+                )
+            ]
+        )
+        self.assertEqual(output.truth_object_id, 10)
+
+    def test_curved_path_and_road_user_priority_reject_tangent_mesh(self):
+        config = load_realistic_radar_config("ideal_target_list_v1")
+        model = RealisticRadarModel(config, seed=31)
+        output = model.step(
+            [
+                ideal_target(
+                    object_id=43,
+                    distance_m=18.0,
+                    lateral_m=2.2,
+                    lateral_extent_m=0.4,
+                    semantic_tag=14,
+                ),
+                ideal_target(
+                    object_id=-900,
+                    distance_m=10.0,
+                    lateral_m=0.1,
+                    semantic_tag=21,
+                ),
+            ],
+            path_curvature_per_m=0.014,
+        )
+        self.assertEqual(output.truth_object_id, 43)
+
+    def test_immediate_infrastructure_hazard_can_override_class_penalty(self):
+        config = load_realistic_radar_config("ideal_target_list_v1")
+        model = RealisticRadarModel(config, seed=32)
+        output = model.step(
+            [
+                ideal_target(
+                    object_id=43,
+                    distance_m=30.0,
+                    semantic_tag=14,
+                ),
+                ideal_target(
+                    object_id=-10,
+                    distance_m=2.0,
+                    semantic_tag=4,
+                ),
+            ]
+        )
+        self.assertEqual(output.truth_object_id, -10)
 
     def test_correlated_dropout_can_remove_an_entire_burst(self):
         base = load_realistic_radar_config("ideal_target_list_v1")

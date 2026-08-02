@@ -119,6 +119,10 @@ class RealisticRadarConfig:
     path_half_width_m: float = 1.8
     path_width_growth_per_m: float = 0.004
     minimum_forward_distance_m: float = 1.0
+    path_curvature_filter_gain: float = 0.25
+    max_abs_path_curvature_per_m: float = 0.08
+    max_path_lateral_offset_m: float = 8.0
+    non_road_user_priority_penalty_m: float = 15.0
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,7 @@ class IdealRadarTarget:
     relative_velocity_mps: float
     snr_db: float
     point_count: int = 1
+    lateral_extent_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -163,6 +168,7 @@ class RadarDetection:
     source: str
     truth_object_id: int
     semantic_tag: int
+    lateral_extent_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -177,6 +183,7 @@ class RadarModelOutput:
     truth_object_id: int = 0
     semantic_tag: int = 0
     azimuth_rad: float = 0.0
+    lateral_extent_m: float = 0.0
 
 
 @dataclass
@@ -189,6 +196,7 @@ class _Track:
     source: str
     truth_object_id: int
     semantic_tag: int
+    lateral_extent_m: float = 0.0
     age: int = 1
     hits: int = 1
     misses: int = 0
@@ -209,6 +217,7 @@ class _Ghost:
     azimuth_rad: float
     relative_velocity_mps: float
     snr_db: float
+    lateral_extent_m: float = 0.0
     age: int = 0
 
 
@@ -290,6 +299,7 @@ def _validate_config(config):
         "association_azimuth_gate_deg",
         "association_doppler_gate_mps",
         "path_half_width_m",
+        "max_path_lateral_offset_m",
     )
     for name in positive:
         if getattr(config, name) <= 0.0:
@@ -311,6 +321,8 @@ def _validate_config(config):
         "latency_scans",
         "minimum_forward_distance_m",
         "path_width_growth_per_m",
+        "max_abs_path_curvature_per_m",
+        "non_road_user_priority_penalty_m",
         "ghost_snr_loss_db",
         "ghost_min_range_bias_m",
         "ghost_max_range_bias_m",
@@ -338,6 +350,7 @@ def _validate_config(config):
         "azimuth_filter_gain",
         "doppler_filter_gain",
         "minimum_track_confidence",
+        "path_curvature_filter_gain",
     )
     for name in probabilities:
         _validate_probability(name, getattr(config, name))
@@ -442,6 +455,7 @@ class RealisticRadarModel:
     """Stateful target-list error model and longitudinal target tracker."""
 
     _DYNAMIC_TAGS = frozenset((12, 13, 14, 15, 16, 17, 18, 19, 21))
+    _ROAD_USER_TAGS = frozenset((12, 13, 14, 15, 16, 17, 18, 19))
     _REFLECTOR_TAGS = frozenset((3, 4, 5, 20, 26, 28))
 
     def __init__(self, config=None, seed=42, capture_debug=False):
@@ -601,6 +615,7 @@ class RealisticRadarModel:
             source=source,
             truth_object_id=int(target.object_id),
             semantic_tag=int(target.semantic_tag),
+            lateral_extent_m=max(0.0, float(target.lateral_extent_m)),
         )
 
     def _update_interference(self):
@@ -732,6 +747,7 @@ class RealisticRadarModel:
                 azimuth_rad=target.azimuth_rad + azimuth_bias,
                 relative_velocity_mps=target.relative_velocity_mps,
                 snr_db=target.snr_db - self.config.ghost_snr_loss_db,
+                lateral_extent_m=target.lateral_extent_m,
             )
 
     def _update_ghosts(self, targets, environment, dt):
@@ -755,6 +771,7 @@ class RealisticRadarModel:
                     parent.relative_velocity_mps * ghost.velocity_scale
                 )
                 ghost.snr_db = parent.snr_db - ghost.snr_loss_db
+                ghost.lateral_extent_m = parent.lateral_extent_m
             else:
                 ghost.distance_m -= ghost.relative_velocity_mps * dt
 
@@ -777,6 +794,7 @@ class RealisticRadarModel:
                 azimuth_rad=ghost.azimuth_rad,
                 relative_velocity_mps=ghost.relative_velocity_mps,
                 snr_db=ghost.snr_db,
+                lateral_extent_m=ghost.lateral_extent_m,
             )
             detection = self._measure_target(
                 ideal_ghost,
@@ -834,6 +852,7 @@ class RealisticRadarModel:
             source=detection.source,
             truth_object_id=detection.truth_object_id,
             semantic_tag=detection.semantic_tag,
+            lateral_extent_m=detection.lateral_extent_m,
             confirmed=confirmed,
             hit_history=history,
         )
@@ -854,6 +873,9 @@ class RealisticRadarModel:
         track.source = detection.source
         track.truth_object_id = detection.truth_object_id
         track.semantic_tag = detection.semantic_tag
+        track.lateral_extent_m += self.config.azimuth_filter_gain * (
+            detection.lateral_extent_m - track.lateral_extent_m
+        )
         track.hits += 1
         track.misses = 0
         track.hit_history.append(1)
@@ -907,7 +929,24 @@ class RealisticRadarModel:
         miss_penalty = math.exp(-0.45 * track.misses)
         return float(np.clip(hit_ratio * maturity * miss_penalty, 0.0, 1.0))
 
-    def _select_track(self):
+    def _path_lateral_offset(self, forward_m, path_curvature_per_m):
+        curvature = float(
+            np.clip(
+                path_curvature_per_m,
+                -self.config.max_abs_path_curvature_per_m,
+                self.config.max_abs_path_curvature_per_m,
+            )
+        )
+        offset = 0.5 * curvature * forward_m * forward_m
+        return float(
+            np.clip(
+                offset,
+                -self.config.max_path_lateral_offset_m,
+                self.config.max_path_lateral_offset_m,
+            )
+        )
+
+    def _select_track(self, path_curvature_per_m=0.0):
         candidates = []
         for track in self._tracks.values():
             confidence = self._track_confidence(track)
@@ -917,24 +956,49 @@ class RealisticRadarModel:
                 or track.distance_m < self.config.minimum_forward_distance_m
             ):
                 continue
+            forward_m = track.distance_m * math.cos(track.azimuth_rad)
+            if forward_m < self.config.minimum_forward_distance_m:
+                continue
             lateral_m = track.distance_m * math.sin(track.azimuth_rad)
+            path_lateral_m = self._path_lateral_offset(
+                forward_m,
+                path_curvature_per_m,
+            )
             path_half_width = (
                 self.config.path_half_width_m
                 + self.config.path_width_growth_per_m * track.distance_m
             )
-            if abs(lateral_m) > path_half_width:
+            target_min_lateral = lateral_m - track.lateral_extent_m
+            target_max_lateral = lateral_m + track.lateral_extent_m
+            path_min_lateral = path_lateral_m - path_half_width
+            path_max_lateral = path_lateral_m + path_half_width
+            if (
+                target_max_lateral < path_min_lateral
+                or target_min_lateral > path_max_lateral
+            ):
                 continue
-            forward_m = track.distance_m * math.cos(track.azimuth_rad)
-            if forward_m < self.config.minimum_forward_distance_m:
-                continue
-            candidates.append((forward_m, -confidence, track.track_id, track))
+            class_penalty = (
+                0.0
+                if track.semantic_tag in self._ROAD_USER_TAGS
+                else self.config.non_road_user_priority_penalty_m
+            )
+            selection_score = forward_m + class_penalty
+            candidates.append(
+                (
+                    selection_score,
+                    forward_m,
+                    -confidence,
+                    track.track_id,
+                    track,
+                )
+            )
 
         if not candidates:
             return RadarModelOutput(
                 distance_m=self.config.max_range_m,
                 relative_velocity_mps=0.0,
             )
-        _, negative_confidence, _, selected = min(candidates)
+        _, _, negative_confidence, _, selected = min(candidates)
         return RadarModelOutput(
             distance_m=float(
                 np.clip(
@@ -950,12 +1014,22 @@ class RealisticRadarModel:
             truth_object_id=selected.truth_object_id,
             semantic_tag=selected.semantic_tag,
             azimuth_rad=selected.azimuth_rad,
+            lateral_extent_m=selected.lateral_extent_m,
         )
 
-    def step(self, ideal_targets, timestamp_s=None, environment=None):
+    def step(
+        self,
+        ideal_targets,
+        timestamp_s=None,
+        environment=None,
+        path_curvature_per_m=0.0,
+    ):
         """Advance one sensor cycle and return the selected tracked target."""
 
         environment = (environment or RadarEnvironment()).clamped()
+        path_curvature_per_m = float(path_curvature_per_m)
+        if not math.isfinite(path_curvature_per_m):
+            path_curvature_per_m = 0.0
         self._scan_index += 1
         if timestamp_s is None or self._last_timestamp_s is None:
             dt = self.config.cycle_time_s
@@ -975,6 +1049,8 @@ class RealisticRadarModel:
                 and math.isfinite(target.azimuth_rad)
                 and math.isfinite(target.relative_velocity_mps)
                 and math.isfinite(target.snr_db)
+                and math.isfinite(target.lateral_extent_m)
+                and target.lateral_extent_m >= 0.0
                 and self.config.minimum_forward_distance_m
                 <= target.distance_m
                 <= self.config.max_range_m
@@ -1010,7 +1086,7 @@ class RealisticRadarModel:
             )
 
         self._update_tracks(delivered, dt)
-        selected = self._select_track()
+        selected = self._select_track(path_curvature_per_m)
         confirmed_count = sum(track.confirmed for track in self._tracks.values())
         self._diagnostics = {
             "profile": self.config.profile_name,
@@ -1039,12 +1115,15 @@ class RealisticRadarModel:
             "selected_source": selected.source,
             "selected_confidence": selected.confidence,
             "selected_azimuth_deg": math.degrees(selected.azimuth_rad),
+            "selected_lateral_extent_m": selected.lateral_extent_m,
+            "path_curvature_per_m": float(path_curvature_per_m),
             "environment": asdict(environment),
         }
         if self._capture_debug:
             self._debug_snapshot = {
                 "scan_index": self._scan_index,
                 "delivered_source_scan_index": delivered_source_scan_index,
+                "path_curvature_per_m": float(path_curvature_per_m),
                 "ideal_targets": [asdict(target) for target in targets],
                 "generated_detections": [
                     asdict(detection) for detection in detections
@@ -1064,6 +1143,7 @@ class RealisticRadarModel:
                         "source": track.source,
                         "truth_object_id": track.truth_object_id,
                         "semantic_tag": track.semantic_tag,
+                        "lateral_extent_m": track.lateral_extent_m,
                         "age": track.age,
                         "hits": track.hits,
                         "misses": track.misses,

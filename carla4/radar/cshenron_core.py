@@ -144,6 +144,7 @@ class RadarTarget:
     direction: tuple
     snr_db: float
     point_count: int
+    lateral_extent_m: float = 0.0
 
 
 def decode_semantic_lidar(raw_data):
@@ -368,6 +369,15 @@ def extract_targets(returns, config=None):
             cos_elevation * math.sin(target_azimuth),
             math.sin(target_elevation),
         )
+        target_lateral = distance * math.sin(target_azimuth)
+        lateral_low, lateral_high = np.quantile(
+            y[indices],
+            (0.05, 0.95),
+        )
+        lateral_extent = max(
+            abs(float(lateral_low) - target_lateral),
+            abs(float(lateral_high) - target_lateral),
+        )
         tag_counts = np.bincount(tags[indices], minlength=len(_TAG_TO_MATERIAL))
         semantic_tag = int(np.argmax(tag_counts))
         object_id = key
@@ -379,6 +389,7 @@ def extract_targets(returns, config=None):
                 direction=direction,
                 snr_db=snr_db,
                 point_count=len(indices),
+                lateral_extent_m=float(lateral_extent),
             )
         )
 

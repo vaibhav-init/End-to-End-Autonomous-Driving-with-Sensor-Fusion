@@ -103,8 +103,9 @@ realism claim.
    surface-normal geometry and labeled bounce-type models.
 3. Log every delivered detection and track state to a sidecar Parquet/JSONL
    stream for OSPA, cardinality, and association evaluation.
-4. Add curved predicted-path gating based on steering/yaw rate rather than the
-   current expanding straight corridor.
+4. Validate and calibrate the implemented yaw-rate curved-path gate, extended
+   target overlap, and ACC road-user priority on curved-road and stationary
+   infrastructure sequences.
 5. Separate normal ACC and emergency AEB from the MLP's existing fixed
    30 m/TTC overrides so sensor artifacts can be causally attributed.
 6. If raw-radar perception becomes the research target, integrate full

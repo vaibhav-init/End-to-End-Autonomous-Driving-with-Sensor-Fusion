@@ -60,6 +60,7 @@ class CShenronCoreTest(unittest.TestCase):
         self.assertEqual(targets[0].object_id, 77)
         self.assertEqual(targets[0].semantic_tag, 14)
         self.assertAlmostEqual(targets[0].distance_m, 25.0, places=1)
+        self.assertGreater(targets[0].lateral_extent_m, 0.2)
 
     def test_out_of_cone_vehicle_is_rejected(self):
         rows = [

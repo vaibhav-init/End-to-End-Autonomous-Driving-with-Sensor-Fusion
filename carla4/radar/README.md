@@ -45,7 +45,11 @@ Temporal target-list sensor model
 Nearest-neighbour tracking + M-of-N confirmation + deletion
         |
         v
-Ego-path gate -> distance / relative_velocity / obstacle_speed
+Yaw-rate curved-path + extended-target overlap gate
+  road-user priority with immediate-infrastructure override
+        |
+        v
+distance / relative_velocity / obstacle_speed
 ```
 
 The ideal radial velocity is calculated from CARLA actor motion and then
@@ -53,6 +57,14 @@ corrupted and quantized. That mirrors a perception-error-model workflow:
 CARLA provides the latent truth, while the sensor model produces the
 observable target list. Static world returns without a live CARLA actor use
 zero world velocity.
+
+The scalar selector consumes ego yaw rate and speed to estimate short-horizon
+path curvature, as an automotive radar ECU would consume ego-motion data. It
+tests the target's measured lateral extent against that corridor instead of
+testing only its centroid. Road-user classes receive a configurable selection
+advantage over infrastructure, while a sufficiently closer infrastructure
+track can still override it. This is an ACC-oriented selector, not a complete
+independent AEB safety function.
 
 ## Built-in Profiles
 

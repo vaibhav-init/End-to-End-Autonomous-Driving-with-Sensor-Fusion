@@ -63,7 +63,18 @@ def _find_by_id(items, field, object_id):
     ]
 
 
-def _track_eligibility(track, config):
+def _path_lateral_offset(forward_m, curvature, config):
+    curvature_limit = float(
+        config.get("max_abs_path_curvature_per_m", 0.0)
+    )
+    if curvature_limit > 0.0:
+        curvature = max(-curvature_limit, min(curvature_limit, curvature))
+    offset = 0.5 * curvature * forward_m * forward_m
+    lateral_limit = float(config.get("max_path_lateral_offset_m", math.inf))
+    return max(-lateral_limit, min(lateral_limit, offset))
+
+
+def _track_eligibility(track, config, path_curvature_per_m=0.0):
     if not bool(track.get("confirmed", False)):
         return False, "lead_track_unconfirmed"
     if float(track.get("confidence", 0.0)) < float(
@@ -77,14 +88,24 @@ def _track_eligibility(track, config):
         return False, "lead_track_below_minimum_range"
 
     azimuth = float(track["azimuth_rad"])
+    forward = distance * math.cos(azimuth)
     lateral = distance * math.sin(azimuth)
+    lateral_extent = float(track.get("lateral_extent_m", 0.0) or 0.0)
+    path_lateral = _path_lateral_offset(
+        forward,
+        path_curvature_per_m,
+        config,
+    )
     half_width = (
         float(config["path_half_width_m"])
         + float(config["path_width_growth_per_m"]) * distance
     )
-    if abs(lateral) > half_width:
+    if (
+        lateral + lateral_extent < path_lateral - half_width
+        or lateral - lateral_extent > path_lateral + half_width
+    ):
         return False, "lead_track_outside_path_corridor"
-    if distance * math.cos(azimuth) < minimum_distance:
+    if forward < minimum_distance:
         return False, "lead_track_not_forward"
     return True, "eligible"
 
@@ -124,8 +145,13 @@ def _wrong_selection_reason(debug, lead_id, config):
 
     eligible = []
     rejection_reasons = []
+    path_curvature = float(debug.get("path_curvature_per_m", 0.0) or 0.0)
     for track in lead_tracks:
-        accepted, reason = _track_eligibility(track, config)
+        accepted, reason = _track_eligibility(
+            track,
+            config,
+            path_curvature,
+        )
         if accepted:
             eligible.append(track)
         else:
@@ -149,7 +175,16 @@ def _wrong_selection_reason(debug, lead_id, config):
     lead_forward = float(lead_track["distance_m"]) * math.cos(
         float(lead_track["azimuth_rad"])
     )
-    if selected_forward <= lead_forward + 1.0e-6:
+    road_user_tags = frozenset((12, 13, 14, 15, 16, 17, 18, 19))
+    penalty = float(config.get("non_road_user_priority_penalty_m", 0.0))
+    selected_score = selected_forward + (
+        0.0 if selected_tag in road_user_tags else penalty
+    )
+    lead_tag = int(lead_track.get("semantic_tag", 0) or 0)
+    lead_score = lead_forward + (
+        0.0 if lead_tag in road_user_tags else penalty
+    )
+    if selected_score <= lead_score + 1.0e-6:
         return (
             f"closer_{selected_source}_{SEMANTIC_NAMES.get(selected_tag, selected_tag)}",
             ideal[0],
@@ -165,9 +200,11 @@ def _format_target(item, id_field):
     tag = int(item.get("semantic_tag", 0) or 0)
     distance = item.get("distance_m")
     azimuth = math.degrees(float(item.get("azimuth_rad", 0.0)))
+    extent = float(item.get("lateral_extent_m", 0.0) or 0.0)
     return (
         f"id={object_id} tag={tag}:{SEMANTIC_NAMES.get(tag, 'Unknown')} "
-        f"range={float(distance):.2f}m az={azimuth:+.2f}deg"
+        f"range={float(distance):.2f}m az={azimuth:+.2f}deg "
+        f"lat_extent={extent:.2f}m"
     )
 
 
