@@ -251,6 +251,11 @@ Each JSON row reports actual spawned densities, ego speed, event count,
 ghost detections. Confirm that every preset runs and that the combined pilot
 has both real and ghost points before a long collection.
 
+Each sequence runs in a fresh Python worker so CARLA world transitions cannot
+retain native sensor callbacks. A crashed worker is retried once. If a long
+run is interrupted, rerun the identical command with `--resume`; completed H5
+files with valid summary sidecars are skipped.
+
 ### 6.3 Full collection
 
 Use separate seeds and official directories for train, validation, and test:

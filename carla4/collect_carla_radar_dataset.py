@@ -7,6 +7,8 @@ import json
 import math
 from pathlib import Path
 import random
+import subprocess
+import sys
 
 import h5py
 import numpy as np
@@ -137,6 +139,22 @@ def parse_args():
         default="chase",
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--sequence-retries",
+        type=int,
+        default=1,
+        help="retries after a sequence worker exits or crashes",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="skip sequences with an existing H5 and summary sidecar",
+    )
+    parser.add_argument(
+        "--worker-index",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
@@ -566,8 +584,9 @@ def collect_sequence(client, args, sequence_index, town, preset):
         if ego is not None:
             destroy_ids.append(ego.id)
         if destroy_ids:
-            client.apply_batch(
-                [carla.command.DestroyActor(actor_id) for actor_id in destroy_ids]
+            client.apply_batch_sync(
+                [carla.command.DestroyActor(actor_id) for actor_id in destroy_ids],
+                True,
             )
         traffic_manager.set_synchronous_mode(False)
         world.apply_settings(original_settings)
@@ -601,6 +620,109 @@ def _write_sequence(path, radar_data, diagnostics, events, failures, args):
         handle.attrs["multipath_event_failures"] = json.dumps(failures)
 
 
+def _sequence_job(args, sequence_index, scene_names):
+    scene_block = sequence_index // len(args.towns)
+    scene_name = scene_names[scene_block % len(scene_names)]
+    town = args.towns[sequence_index % len(args.towns)]
+    filename = (
+        f"scenario-{sequence_index:04d}-{scene_name}-{town.lower()}-"
+        f"{args.split}.h5"
+    )
+    output = Path(args.output) / args.split
+    return {
+        "sequence_index": sequence_index,
+        "scene_name": scene_name,
+        "town": town,
+        "preset": SCENE_PRESETS[scene_name],
+        "path": output / filename,
+        "summary_path": output / f"{Path(filename).stem}.summary.json",
+    }
+
+
+def _write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def _run_supervisor(args, scene_names):
+    output = Path(args.output) / args.split
+    output.mkdir(parents=True, exist_ok=True)
+    worker_arguments = list(sys.argv[1:])
+    summaries = []
+    failures = []
+    completed_indices = set()
+    for sequence_index in range(args.sequences):
+        job = _sequence_job(args, sequence_index, scene_names)
+        if (
+            args.resume
+            and job["path"].is_file()
+            and job["summary_path"].is_file()
+        ):
+            print(
+                f"Skipping completed sequence {sequence_index + 1}/"
+                f"{args.sequences}: {job['summary_path']}"
+            )
+            completed_indices.add(sequence_index)
+            continue
+
+        return_code = None
+        for attempt in range(args.sequence_retries + 1):
+            if attempt:
+                print(
+                    f"Retrying sequence {sequence_index + 1}/"
+                    f"{args.sequences} after worker exit {return_code}"
+                )
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                *worker_arguments,
+                "--worker-index",
+                str(sequence_index),
+            ]
+            result = subprocess.run(command)
+            return_code = int(result.returncode)
+            if return_code == 0 and job["summary_path"].is_file():
+                completed_indices.add(sequence_index)
+                break
+        if return_code != 0 or not job["summary_path"].is_file():
+            failures.append(
+                {
+                    "sequence_index": sequence_index,
+                    "scene": job["scene_name"],
+                    "town": job["town"],
+                    "worker_return_code": return_code,
+                }
+            )
+
+    for sequence_index in range(args.sequences):
+        if sequence_index not in completed_indices:
+            continue
+        job = _sequence_job(args, sequence_index, scene_names)
+        if not job["summary_path"].is_file():
+            continue
+        with job["summary_path"].open("r", encoding="utf-8") as handle:
+            summaries.append(json.load(handle))
+    summary_path = Path(args.output) / f"collection_{args.split}.json"
+    _write_json(
+        summary_path,
+        {
+            "sequences": summaries,
+            "failed_sequences": failures,
+        },
+    )
+    print(
+        f"Ready: {len(summaries)} sequences, {len(failures)} failures, "
+        f"summary={summary_path}"
+    )
+    if failures:
+        raise RuntimeError(
+            "Some CARLA sequence workers failed; rerun the same command with "
+            "--resume after checking that the CARLA server is alive"
+        )
+
+
 def main():
     args = parse_args()
     if (
@@ -613,21 +735,27 @@ def main():
         or args.event_duration <= 0.0
         or args.event_cooldown < 0.0
         or args.event_retry <= 0.0
+        or args.sequence_retries < 0
     ):
         raise ValueError("Collection counts, durations, fps, and timeout are invalid")
     scene_names = _scene_names(args.scenes)
+    if args.worker_index is None:
+        _run_supervisor(args, scene_names)
+        return
+    if not 0 <= args.worker_index < args.sequences:
+        raise ValueError("worker-index is outside the requested sequence range")
+
     carla = _carla_module()
     client = carla.Client(args.host, args.port)
     client.set_timeout(30.0)
     output = Path(args.output) / args.split
     output.mkdir(parents=True, exist_ok=True)
     summaries = []
-    failed_sequences = []
-    for sequence_index in range(args.sequences):
-        scene_block = sequence_index // len(args.towns)
-        scene_name = scene_names[scene_block % len(scene_names)]
-        preset = SCENE_PRESETS[scene_name]
-        town = args.towns[sequence_index % len(args.towns)]
+    for sequence_index in (args.worker_index,):
+        job = _sequence_job(args, sequence_index, scene_names)
+        scene_name = job["scene_name"]
+        preset = job["preset"]
+        town = job["town"]
         print(
             f"Collecting sequence {sequence_index + 1}/{args.sequences}: "
             f"scene={scene_name} town={town}"
@@ -640,11 +768,7 @@ def main():
                 town,
                 preset,
             )
-            filename = (
-                f"scenario-{sequence_index:04d}-{scene_name}-{town.lower()}-"
-                f"{args.split}.h5"
-            )
-            path = output / filename
+            path = job["path"]
             _write_sequence(
                 path,
                 radar_data,
@@ -668,6 +792,7 @@ def main():
                 **diagnostics,
             }
             summaries.append(counts)
+            _write_json(job["summary_path"], counts)
             print(json.dumps(counts, sort_keys=True))
         except Exception as exc:
             failure = {
@@ -676,27 +801,12 @@ def main():
                 "town": town,
                 "error": f"{type(exc).__name__}: {exc}",
             }
-            failed_sequences.append(failure)
             print(json.dumps(failure, sort_keys=True))
 
-    summary_path = Path(args.output) / f"collection_{args.split}.json"
-    with summary_path.open("w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "sequences": summaries,
-                "failed_sequences": failed_sequences,
-            },
-            handle,
-            indent=2,
-            sort_keys=True,
-        )
-        handle.write("\n")
-    if not summaries:
-        raise RuntimeError("Every requested CARLA sequence failed")
-    print(
-        f"Ready: {len(summaries)} sequences, "
-        f"{len(failed_sequences)} failures, summary={summary_path}"
-    )
+    if args.worker_index is not None:
+        if not summaries:
+            raise RuntimeError("CARLA sequence worker failed")
+        return
 
 
 if __name__ == "__main__":
