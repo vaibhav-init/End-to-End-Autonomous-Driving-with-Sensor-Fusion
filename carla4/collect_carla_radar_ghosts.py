@@ -57,6 +57,12 @@ def parse_args():
     parser.add_argument("--walkers", type=int, default=25)
     parser.add_argument("--range", dest="range_m", type=float, default=100.0)
     parser.add_argument("--points-per-second", type=int, default=240000)
+    parser.add_argument(
+        "--radar-timeout",
+        type=float,
+        default=30.0,
+        help="seconds to wait for each processed semantic-LiDAR radar frame",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--radar-config", help="optional geometry-profile overrides")
     return parser.parse_args()
@@ -246,14 +252,27 @@ def _spawn_walkers(client, world, count, seed):
     return walker_ids, controller_ids
 
 
-def _wait_for_radar_frame(radar, frame, timeout_s=1.0):
+def _wait_for_radar_frame(radar, frame, timeout_s):
     deadline = time.monotonic() + timeout_s
+    diagnostics = {}
     while time.monotonic() < deadline:
         diagnostics = radar.diagnostics()
+        callback_error = diagnostics.get("last_error")
+        if callback_error:
+            raise RuntimeError(
+                f"Radar callback failed while waiting for frame {frame}: "
+                f"{callback_error}"
+            )
         if int(diagnostics.get("frame", -1)) >= int(frame):
             return diagnostics
         time.sleep(0.002)
-    raise TimeoutError(f"Radar callback did not reach CARLA frame {frame}")
+    raise TimeoutError(
+        f"Radar callback did not reach CARLA frame {frame} within "
+        f"{timeout_s:.1f}s; latest radar frame="
+        f"{diagnostics.get('frame', -1)}, raw returns="
+        f"{diagnostics.get('raw_return_count', 0)}, last error="
+        f"{diagnostics.get('last_error')!r}"
+    )
 
 
 def collect_sequence(client, args, sequence_index):
@@ -303,29 +322,51 @@ def collect_sequence(client, args, sequence_index):
             seed=sequence_seed,
             capture_debug=True,
         )
+        # A newly spawned CARLA sensor is not guaranteed to emit on its first
+        # simulation tick. Advance two startup ticks, then require at least the
+        # first one to have been processed before entering the frame-by-frame
+        # collection loop. This avoids deadlocking on a skipped spawn tick.
+        startup_frame = world.tick()
+        world.tick()
+        _wait_for_radar_frame(
+            radar,
+            startup_frame,
+            timeout_s=args.radar_timeout,
+        )
         warmup_frames = int(round(args.warmup * args.fps))
         capture_frames = int(round(args.duration * args.fps))
         for _ in range(warmup_frames):
             frame = world.tick()
-            _wait_for_radar_frame(radar, frame)
+            _wait_for_radar_frame(
+                radar,
+                frame,
+                timeout_s=args.radar_timeout,
+            )
         for _ in range(capture_frames):
             frame = world.tick()
-            diagnostics = _wait_for_radar_frame(radar, frame)
+            diagnostics = _wait_for_radar_frame(
+                radar,
+                frame,
+                timeout_s=args.radar_timeout,
+            )
             snapshot = radar.debug_snapshot()
-            timestamp = float(diagnostics.get("timestamp") or frame / args.fps)
+            radar_frame = int(diagnostics.get("frame", frame))
+            timestamp = float(
+                diagnostics.get("timestamp") or radar_frame / args.fps
+            )
             detections = snapshot.get("generated_detections", ())
             for detection_index, detection in enumerate(detections):
                 rows.append(
                     _detection_row(
                         sequence_index,
-                        frame,
+                        radar_frame,
                         timestamp,
                         detection_index,
                         detection,
                     )
                 )
             diagnostics_summary = {
-                "last_frame": int(frame),
+                "last_frame": radar_frame,
                 "last_reflector_count": int(
                     diagnostics.get("reflector_count", 0)
                 ),
@@ -362,8 +403,15 @@ def collect_sequence(client, args, sequence_index):
 
 def main():
     args = parse_args()
-    if args.sequences < 1 or args.duration <= 0.0 or args.fps < 1:
-        raise ValueError("sequences, duration, and fps must be positive")
+    if (
+        args.sequences < 1
+        or args.duration <= 0.0
+        or args.fps < 1
+        or args.radar_timeout <= 0.0
+    ):
+        raise ValueError(
+            "sequences, duration, fps, and radar-timeout must be positive"
+        )
     carla = _carla_module()
     client = carla.Client(args.host, args.port)
     client.set_timeout(30.0)

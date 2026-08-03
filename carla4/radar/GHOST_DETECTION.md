@@ -178,8 +178,14 @@ python3 collect_carla_radar_ghosts.py \
   --sequences 1 \
   --duration 10 \
   --vehicles 30 \
-  --walkers 15
+  --walkers 15 \
+  --radar-timeout 30
 ```
+
+The semantic-LiDAR callback also fits reflectors and generates multipath, so
+it can be slower than simulation time. If a frame times out with no callback
+error, increase `--radar-timeout`; do not lower the radar density merely to
+hide a processing-latency problem.
 
 Inspect printed real/ghost counts. Use a new folder for the full run:
 
