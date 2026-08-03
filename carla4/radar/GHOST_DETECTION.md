@@ -186,11 +186,20 @@ python3 collect_carla_radar_ghosts.py \
 The semantic-LiDAR callback also fits reflectors and generates multipath, so
 it can be slower than simulation time. If a frame times out with no callback
 error, increase `--radar-timeout`; do not lower the radar density merely to
-hide a processing-latency problem. The collector guarantees one lead road
-user in the radar field of view; the remaining actors still use Traffic
-Manager for scene diversity.
+hide a processing-latency problem. The collector keeps the ego stationary,
+discovers a real wall/building/fence/guardrail in its semantic scan, and moves
+one real CARLA vehicle to a placement that the same production geometry solver
+has already accepted. It verifies the path again using returns from that actual
+CARLA vehicle, then moves the vehicle slowly along the surface. The remaining
+actors still use Traffic Manager for scene diversity. This is a controlled
+radar experiment, not a driving test, and ghost labels are created only for
+paths that pass the specular-reflection gates.
 
-Inspect printed real/ghost counts. Use a new folder for the full run:
+Inspect the printed output before a full run. `controlled_reflector_id` and
+`controlled_validated_path_families` must be present, and both `ghost` and
+`max_multipath_count` must be greater than zero. If validation fails, the
+collector exits rather than saving invalid ghost labels. Use a new folder for
+the full run:
 
 ```bash
 for town in Town03 Town04; do
