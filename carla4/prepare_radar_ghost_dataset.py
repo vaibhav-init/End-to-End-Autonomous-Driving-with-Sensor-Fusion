@@ -78,6 +78,15 @@ def _sensor_codes(values):
     return np.asarray([mapping[name] for name in texts], dtype=np.int8), mapping
 
 
+def _attribute_text(attributes, name, default=None):
+    value = attributes.get(name, default)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if value is None:
+        return None
+    return str(value)
+
+
 def _scenario_name(path):
     match = SCENARIO_PATTERN.search(path.name)
     return f"scenario-{int(match.group(1)):02d}" if match else path.stem
@@ -142,6 +151,12 @@ def prepare_file(path, input_root, output_root, args, scenario_splits=None):
         if "radar" not in handle:
             raise ValueError(f"H5 file has no 'radar' dataset: {path}")
         radar = np.copy(handle["radar"])
+        source_metadata = {
+            "scene": _attribute_text(handle.attrs, "scene"),
+            "town": _attribute_text(handle.attrs, "town"),
+            "weather": _attribute_text(handle.attrs, "weather"),
+            "seed": int(handle.attrs["seed"]) if "seed" in handle.attrs else None,
+        }
     if radar.dtype.names is None:
         raise ValueError(f"Radar entry must be a NumPy structured array: {path}")
 
@@ -226,7 +241,11 @@ def prepare_file(path, input_root, output_root, args, scenario_splits=None):
         "name": path.stem,
         "path": str(output_relative),
         "source_path": str(path.relative_to(input_root)),
-        "scenario": _scenario_name(path),
+        "scenario": source_metadata["scene"] or _scenario_name(path),
+        "sequence_id": _scenario_name(path),
+        "town": source_metadata["town"],
+        "weather": source_metadata["weather"],
+        "seed": source_metadata["seed"],
         "split": _split_for(path, args.split_mode, scenario_splits),
         "points": int(len(target)),
         "labeled_points": int(np.count_nonzero(target >= 0)),

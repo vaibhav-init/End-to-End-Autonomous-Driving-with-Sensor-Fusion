@@ -486,6 +486,24 @@ def _controlled_target_candidates(reflector, actor_id, config):
                     config,
                 )
                 robust_count += int(bool(nearby_paths))
+            motion_amplitude = 0.75
+            for candidate_amplitude in (1.5, 2.5, 4.0):
+                endpoint_paths = [
+                    generate_multipath_targets(
+                        [
+                            _probe_target(
+                                actor_id,
+                                target_xy + sign * candidate_amplitude * tangent,
+                            )
+                        ],
+                        [reflector],
+                        config,
+                    )
+                    for sign in (-1.0, 1.0)
+                ]
+                if not all(endpoint_paths):
+                    break
+                motion_amplitude = candidate_amplitude
             path_families = sorted(
                 {
                     f"{path.bounce_type}-order{path.bounce_order}"
@@ -495,6 +513,7 @@ def _controlled_target_candidates(reflector, actor_id, config):
             score = (
                 robust_count,
                 len(path_families),
+                motion_amplitude,
                 min(float(path.snr_db) for path in paths),
                 min(float(reflector.length_m), 20.0),
                 -target_range,
@@ -506,6 +525,7 @@ def _controlled_target_candidates(reflector, actor_id, config):
                 "reflector": reflector,
                 "path_families": path_families,
                 "robust_count": robust_count,
+                "motion_amplitude_m": motion_amplitude,
             }
 
 
@@ -532,7 +552,8 @@ def _configure_controlled_target(radar, world, target_actor):
             "The radar observed reflector surfaces but could not find a "
             "valid controlled multipath placement. "
             f"reflectors={len(reflectors)}, tags={observed_tags}. "
-            "Try another Town04 seed before changing the geometry gates."
+            "Try another seed or continue to a reflector-rich road before "
+            "changing the geometry gates."
         )
 
     candidate = max(candidates, key=lambda item: item["score"])
@@ -592,8 +613,11 @@ def _configure_controlled_target(radar, world, target_actor):
         "world_z": world_z,
         "tangent_world": tangent_world,
         "yaw": target_yaw,
-        "amplitude_m": min(0.75, max(0.25, 0.08 * reflector.length_m)),
-        "period_s": 8.0,
+        "amplitude_m": float(candidate["motion_amplitude_m"]),
+        "period_s": max(
+            4.0,
+            2.0 * math.pi * float(candidate["motion_amplitude_m"]) / 3.0,
+        ),
         "reflector_id": int(reflector.reflector_id),
         "reflector_tag": int(reflector.semantic_tag),
         "reflector_length_m": float(reflector.length_m),
@@ -601,6 +625,7 @@ def _configure_controlled_target(radar, world, target_actor):
         "target_surface_distance_m": float(candidate["surface_distance_m"]),
         "expected_path_families": candidate["path_families"],
         "robust_probe_count": int(candidate["robust_count"]),
+        "motion_amplitude_m": float(candidate["motion_amplitude_m"]),
     }
 
 
@@ -896,6 +921,9 @@ def collect_sequence(client, args, sequence_index):
                 ],
                 "controlled_robust_probe_count": controlled_plan[
                     "robust_probe_count"
+                ],
+                "controlled_motion_amplitude_m": controlled_plan[
+                    "motion_amplitude_m"
                 ],
                 "controlled_validated_path_families": controlled_plan[
                     "validated_path_families"

@@ -20,13 +20,14 @@ amplitude, and point age. The controller still receives only `distance`,
 | 2 | `prepare_radar_ghost_dataset.py` | Convert official or CARLA H5 sequences |
 | 3 | `train_radar_ghost_detector.py` | Train the point or temporal detector |
 | 4 | `evaluate_radar_ghost_detector.py` | Evaluate held-out real sequences |
-| 5 | `collect_carla_radar_ghosts.py` | Generate path-labeled CARLA multipath |
-| 6 | `validate_radar_accuracy.py` | Validate the CARLA target-list sensor |
-| 7 | `collect_throttle_brake_data.py` | Recollect final controller data |
-| 8 | `collect_scenario_data.py` | Add staged controller-training episodes |
-| 9 | `train_throttle_brake.py` | Retrain the target-speed MLP |
-| 10 | `test_throttle_brake_live.py` | Run the final controller |
-| 11 | `scenarios/run_all.py` | Run scenario evaluation |
+| 5 | `collect_carla_radar_ghosts.py` | Run a controlled multipath smoke test |
+| 6 | `collect_carla_radar_dataset.py` | Collect diverse moving CARLA radar data |
+| 7 | `validate_radar_accuracy.py` | Validate the CARLA target-list sensor |
+| 8 | `collect_throttle_brake_data.py` | Recollect final controller data |
+| 9 | `collect_scenario_data.py` | Add staged controller-training episodes |
+| 10 | `train_throttle_brake.py` | Retrain the target-speed MLP |
+| 11 | `test_throttle_brake_live.py` | Run the final controller |
+| 12 | `scenarios/run_all.py` | Run scenario evaluation |
 
 ## Step 0: Remote Environment
 
@@ -166,7 +167,9 @@ and multipath counts should be nonzero near walls, buildings, fences, or
 guardrails. If always zero, first increase semantic-LiDAR density or use
 Town03/Town04; do not lower geometry-quality gates blindly.
 
-## Step 6: Collect Synthetic Path Labels
+## Step 6: Collect CARLA Path Labels
+
+### 6.1 Geometry smoke test
 
 First make a short smoke artifact:
 
@@ -203,31 +206,77 @@ actors still use Traffic Manager for scene diversity. This is a controlled
 radar experiment, not a driving test, and ghost labels are created only for
 paths that pass the specular-reflection gates.
 
-Inspect the printed output before a full run. `controlled_reflector_id` and
+Inspect the printed output before moving on. `controlled_reflector_id` and
 `controlled_validated_path_families` must be present, and both `ghost` and
 `max_multipath_count` must be greater than zero. If validation fails, the
-collector exits rather than saving invalid ghost labels. Use a new folder for
-the full run:
+collector exits rather than saving invalid ghost labels. This script is only a
+geometry smoke test; do not use repeated stationary captures as the main CARLA
+training dataset.
+
+### 6.2 Moving multi-scenario pilot
+
+Use `collect_carla_radar_dataset.py` for research data. The ego and background
+vehicles use Traffic Manager, pedestrians use CARLA walker controllers, and
+the collector rotates through:
+
+- `urban_dense`: slow dense traffic with many pedestrians;
+- `highway_flow`: faster, denser vehicle flow with lane changes;
+- `pedestrian_dense`: slower traffic with twice the base walker count;
+- `mixed_weather`: balanced traffic under changing weather.
+
+During each sequence, a separate event vehicle periodically traverses a live
+wall/fence/guardrail reflection zone. Its trajectory endpoints are checked by
+the production image-method solver. Between events, ordinary traffic supplies
+direct-target and clutter negatives. The ego continues driving throughout.
+Only paths accepted from the actual semantic-LiDAR scan receive ghost labels.
+
+First collect all eight town/scene combinations for 30 seconds:
 
 ```bash
-for town in Town03 Town04; do
-  python3 collect_carla_radar_ghosts.py --town "$town" \
-    --output artifacts/carla_ghost_full --split train \
-    --sequences 30 --duration 45 --vehicles 45 --walkers 25 --seed 100
-  python3 collect_carla_radar_ghosts.py --town "$town" \
-    --output artifacts/carla_ghost_full --split val \
-    --sequences 8 --duration 45 --vehicles 45 --walkers 25 --seed 2000
-  python3 collect_carla_radar_ghosts.py --town "$town" \
-    --output artifacts/carla_ghost_full --split test \
-    --sequences 8 --duration 45 --vehicles 45 --walkers 25 --seed 4000
-done
+python3 collect_carla_radar_dataset.py \
+  --towns Town03 Town04 \
+  --output artifacts/carla_radar_pilot \
+  --split train \
+  --sequences 8 \
+  --duration 30 \
+  --vehicles 45 \
+  --walkers 25 \
+  --seed 100 \
+  --radar-timeout 30 \
+  --camera-view chase
+```
+
+Each JSON row reports actual spawned densities, ego speed, event count,
+`frames_with_dynamic_targets`, `frames_with_multipath`, real detections, and
+ghost detections. Confirm that every preset runs and that the combined pilot
+has both real and ghost points before a long collection.
+
+### 6.3 Full collection
+
+Use separate seeds and official directories for train, validation, and test:
+
+```bash
+python3 collect_carla_radar_dataset.py \
+  --towns Town03 Town04 --output artifacts/carla_radar_full \
+  --split train --sequences 80 --duration 60 \
+  --vehicles 45 --walkers 25 --seed 100 --headless
+
+python3 collect_carla_radar_dataset.py \
+  --towns Town03 Town04 --output artifacts/carla_radar_full \
+  --split val --sequences 16 --duration 60 \
+  --vehicles 45 --walkers 25 --seed 2000 --headless
+
+python3 collect_carla_radar_dataset.py \
+  --towns Town03 Town04 --output artifacts/carla_radar_full \
+  --split test --sequences 16 --duration 60 \
+  --vehicles 45 --walkers 25 --seed 4000 --headless
 ```
 
 Prepare the CARLA H5 files through the identical pipeline:
 
 ```bash
 python3 prepare_radar_ghost_dataset.py \
-  --input artifacts/carla_ghost_full \
+  --input artifacts/carla_radar_full \
   --output artifacts/ghost_carla_prepared \
   --split-mode official
 ```
