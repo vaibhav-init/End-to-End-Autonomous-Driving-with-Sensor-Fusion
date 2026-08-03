@@ -55,6 +55,12 @@ def parse_args():
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--vehicles", type=int, default=45)
     parser.add_argument("--walkers", type=int, default=25)
+    parser.add_argument(
+        "--lead-distance",
+        type=float,
+        default=25.0,
+        help="distance ahead of ego for the guaranteed dynamic radar target",
+    )
     parser.add_argument("--range", dest="range_m", type=float, default=100.0)
     parser.add_argument("--points-per-second", type=int, default=240000)
     parser.add_argument(
@@ -161,7 +167,14 @@ def _set_weather(world, sequence_index):
     return sequence_index % len(presets)
 
 
-def _spawn_vehicles(client, world, traffic_manager, count, seed):
+def _spawn_vehicles(
+    client,
+    world,
+    traffic_manager,
+    count,
+    seed,
+    lead_distance_m,
+):
     carla = _carla_module()
     rng = random.Random(seed)
     blueprints = [
@@ -178,16 +191,57 @@ def _spawn_vehicles(client, world, traffic_manager, count, seed):
     if ego_blueprint.has_attribute("role_name"):
         ego_blueprint.set_attribute("role_name", "hero")
     ego = None
-    for transform in spawn_points:
+    ego_spawn_index = None
+    for index, transform in enumerate(spawn_points):
         ego = world.try_spawn_actor(ego_blueprint, transform)
         if ego is not None:
+            ego_spawn_index = index
             break
     if ego is None:
         raise RuntimeError("Unable to spawn ego vehicle")
     ego.set_autopilot(True, traffic_manager.get_port())
 
+    actor_ids = []
+    ego_waypoint = world.get_map().get_waypoint(
+        ego.get_transform().location,
+        project_to_road=True,
+    )
+    lead = None
+    if ego_waypoint is not None:
+        candidate_distances = (
+            float(lead_distance_m),
+            float(lead_distance_m) + 5.0,
+            max(12.0, float(lead_distance_m) - 5.0),
+        )
+        for distance in candidate_distances:
+            lead_waypoints = list(ego_waypoint.next(distance))
+            rng.shuffle(lead_waypoints)
+            for waypoint in lead_waypoints:
+                transform = waypoint.transform
+                transform.location.z += 0.35
+                blueprint = rng.choice(blueprints)
+                if blueprint.has_attribute("role_name"):
+                    blueprint.set_attribute("role_name", "radar_target")
+                lead = world.try_spawn_actor(blueprint, transform)
+                if lead is not None:
+                    break
+            if lead is not None:
+                break
+    if lead is None:
+        raise RuntimeError(
+            "Unable to spawn the guaranteed lead radar target ahead of ego"
+        )
+    lead.set_autopilot(True, traffic_manager.get_port())
+    actor_ids.append(lead.id)
+
     batch = []
-    for transform in spawn_points[1 : count + 1]:
+    available_spawn_points = [
+        transform
+        for index, transform in enumerate(spawn_points)
+        if index != ego_spawn_index
+        and transform.location.distance(lead.get_transform().location) > 8.0
+    ]
+    for transform in available_spawn_points[: max(0, count - 1)]:
         blueprint = rng.choice(blueprints)
         if blueprint.has_attribute("role_name"):
             blueprint.set_attribute("role_name", "autopilot")
@@ -201,7 +255,9 @@ def _spawn_vehicles(client, world, traffic_manager, count, seed):
             )
         )
     responses = client.apply_batch_sync(batch, True)
-    actor_ids = [response.actor_id for response in responses if not response.error]
+    actor_ids.extend(
+        response.actor_id for response in responses if not response.error
+    )
     return ego, actor_ids
 
 
@@ -287,6 +343,14 @@ def collect_sequence(client, args, sequence_index):
     walker_controller_ids = []
     rows = []
     diagnostics_summary = {}
+    aggregate = {
+        "capture_frames": 0,
+        "max_reflector_count": 0,
+        "max_multipath_count": 0,
+        "sum_reflector_count": 0,
+        "sum_multipath_count": 0,
+        "sum_dynamic_ideal_targets": 0,
+    }
     sequence_seed = args.seed + sequence_index * 1009
     try:
         settings = world.get_settings()
@@ -303,6 +367,7 @@ def collect_sequence(client, args, sequence_index):
             traffic_manager,
             args.vehicles,
             sequence_seed,
+            args.lead_distance,
         )
         walker_ids, walker_controller_ids = _spawn_walkers(
             client,
@@ -355,6 +420,28 @@ def collect_sequence(client, args, sequence_index):
                 diagnostics.get("timestamp") or radar_frame / args.fps
             )
             detections = snapshot.get("generated_detections", ())
+            ideal_targets = snapshot.get("ideal_targets", ())
+            reflector_count = int(diagnostics.get("reflector_count", 0))
+            multipath_count = int(
+                diagnostics.get("multipath_ideal_target_count", 0)
+            )
+            dynamic_ideal_count = sum(
+                int(target.get("semantic_tag", -1))
+                in (12, 13, 14, 15, 16, 17, 18, 19, 21)
+                for target in ideal_targets
+            )
+            aggregate["capture_frames"] += 1
+            aggregate["max_reflector_count"] = max(
+                aggregate["max_reflector_count"],
+                reflector_count,
+            )
+            aggregate["max_multipath_count"] = max(
+                aggregate["max_multipath_count"],
+                multipath_count,
+            )
+            aggregate["sum_reflector_count"] += reflector_count
+            aggregate["sum_multipath_count"] += multipath_count
+            aggregate["sum_dynamic_ideal_targets"] += dynamic_ideal_count
             for detection_index, detection in enumerate(detections):
                 rows.append(
                     _detection_row(
@@ -368,16 +455,17 @@ def collect_sequence(client, args, sequence_index):
             diagnostics_summary = {
                 "last_frame": radar_frame,
                 "last_reflector_count": int(
-                    diagnostics.get("reflector_count", 0)
+                    reflector_count
                 ),
                 "last_multipath_count": int(
-                    diagnostics.get("multipath_ideal_target_count", 0)
+                    multipath_count
                 ),
                 "radar_profile": diagnostics.get("profile"),
                 "radar_config_signature": diagnostics.get(
                     "config_signature"
                 ),
                 "weather_index": weather_index,
+                **aggregate,
             }
     finally:
         if radar is not None:
@@ -408,9 +496,11 @@ def main():
         or args.duration <= 0.0
         or args.fps < 1
         or args.radar_timeout <= 0.0
+        or args.lead_distance <= 0.0
     ):
         raise ValueError(
-            "sequences, duration, fps, and radar-timeout must be positive"
+            "sequences, duration, fps, radar-timeout, and lead-distance "
+            "must be positive"
         )
     carla = _carla_module()
     client = carla.Client(args.host, args.port)

@@ -179,13 +179,16 @@ python3 collect_carla_radar_ghosts.py \
   --duration 10 \
   --vehicles 30 \
   --walkers 15 \
+  --lead-distance 25 \
   --radar-timeout 30
 ```
 
 The semantic-LiDAR callback also fits reflectors and generates multipath, so
 it can be slower than simulation time. If a frame times out with no callback
 error, increase `--radar-timeout`; do not lower the radar density merely to
-hide a processing-latency problem.
+hide a processing-latency problem. The collector guarantees one lead road
+user in the radar field of view; the remaining actors still use Traffic
+Manager for scene diversity.
 
 Inspect printed real/ghost counts. Use a new folder for the full run:
 
