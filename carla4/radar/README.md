@@ -33,13 +33,19 @@ CARLA semantic LiDAR
 C-Shenron-derived material scattering and ideal target extraction
         |
         v
+Planar reflector fitting + image-method path generation (geometry profile)
+        |
+        v
 Temporal target-list sensor model
   SNR-conditioned detections and errors
   correlated dropout and colored noise
   rain/fog/dust attenuation priors
   clutter and interference bursts
-  persistent multipath-like ghosts
+  probabilistic or deterministic geometry-derived multipath ghosts
   range/azimuth/Doppler quantization and latency
+        |
+        v
+Optional real-data-trained temporal ghost rejection
         |
         v
 Nearest-neighbour tracking + M-of-N confirmation + deletion
@@ -73,6 +79,10 @@ independent AEB safety function.
 | `ideal_target_list_v1` | No noise, misses, latency, clutter, or ghosts; useful as the upper-bound baseline |
 | `gaussian_baseline_v1` | Independent fixed Gaussian error and independent misses; deliberately simple ablation |
 | `generic_lrr_v1` | Full temporal model, tracking, path gating, clutter, interference, ghosts, latency, and weather priors |
+| `geometry_multipath_v1` | Planar type-1/type-2 second- and type-2 third-order multipath plus the temporal sensor/tracker model |
+
+The complete real-data training, synthetic pretraining, deployment, and
+closed-loop protocol is in [GHOST_DETECTION.md](GHOST_DETECTION.md).
 
 The default `generic_lrr_v1` envelope follows the public RadarScenes setup
 where applicable: 100 m range, approximately ±60° field of view, 0.15 m range
@@ -286,7 +296,9 @@ Implemented:
   processing latency, SNR-conditioned misses and errors;
 - temporally correlated dropout and measurement error;
 - rain/fog/dust attenuation priors and wet-road ghost-rate scaling;
-- random clutter, interference bursts, persistent dynamic ghosts;
+- random clutter, interference bursts, persistent probabilistic ghosts, and
+  deterministic planar second-/third-order multipath;
+- optional real-data-trained point/temporal ghost rejection before tracking;
 - multi-frame tracking, confirmation, confidence, coasting, deletion, and
   path-aware longitudinal target selection.
 
@@ -294,8 +306,8 @@ Not implemented:
 
 - raw FMCW chirps, phase noise, ADC saturation, CFAR, antenna calibration, or
   a range-Doppler-angle cube;
-- geometrically exact multi-bounce ray tracing and surface-normal-aware ghost
-  placement;
+- general mesh ray tracing across arbitrary numbers of bounces (the geometry
+  profile implements locally planar image-method paths through third order);
 - micro-Doppler from wheels, limbs, vibration, or rotating parts;
 - polarization, radome/bumper effects, mutual coupling, sidelobe maps, or
   commercial object-list firmware;

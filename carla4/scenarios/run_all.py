@@ -146,6 +146,8 @@ def main():
         print(f"  Radar profile:   {args.radar_profile or 'generic_lrr_v1'}")
         if args.radar_config:
             print(f"  Radar config:    {args.radar_config}")
+        if args.radar_ghost_detector:
+            print(f"  Ghost detector:  {args.radar_ghost_detector}")
     print(f"  Output root:     {args.output_root}")
     print(f"  Scenarios:       {args.scenarios}")
     print(f"  Fog levels:      {args.fog}")
@@ -194,6 +196,24 @@ def main():
                         cmd.extend(["--radar-config", args.radar_config])
                     if args.radar_seed is not None:
                         cmd.extend(["--radar-seed", str(args.radar_seed)])
+                    if args.radar_ghost_detector:
+                        cmd.extend(
+                            [
+                                "--radar-ghost-detector",
+                                args.radar_ghost_detector,
+                            ]
+                        )
+                    if args.radar_ghost_threshold is not None:
+                        cmd.extend(
+                            [
+                                "--radar-ghost-threshold",
+                                str(args.radar_ghost_threshold),
+                            ]
+                        )
+                    if args.radar_ghost_device:
+                        cmd.extend(
+                            ["--radar-ghost-device", args.radar_ghost_device]
+                        )
                     if sid == 1:
                         cmd.extend([
                             "--target-speed-kmh",

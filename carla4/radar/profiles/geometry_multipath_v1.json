@@ -1,0 +1,7 @@
+{
+  "profile_name": "geometry_multipath_v1",
+  "multipath_mode": "geometry",
+  "ghost_start_probability": 0.0,
+  "ghost_survival_probability": 0.0,
+  "max_active_ghosts": 0
+}

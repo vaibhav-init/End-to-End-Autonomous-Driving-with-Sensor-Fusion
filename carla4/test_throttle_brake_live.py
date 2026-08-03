@@ -460,6 +460,8 @@ def main():
             fps=FPS,
             points_per_second=radar_points_per_second,
             config=runtime_radar_config,
+            ghost_detector_path=args.radar_ghost_detector,
+            ghost_threshold=args.radar_ghost_threshold,
         )
     trained_max_speed_kmh = min(
         float(model_config.get("max_target_speed_kmh", MAX_TARGET_SPEED_KMH)),
@@ -530,6 +532,33 @@ def main():
             "Realistic radar configuration mismatch: model data used "
             f"{trained_radar_signature!r}, runtime requested "
             f"{runtime_radar_metadata['radar_config_signature']!r}."
+        )
+    trained_ghost_signature = model_config.get(
+        "radar_ghost_detector_signature"
+    )
+    runtime_ghost_signature = (
+        runtime_radar_metadata.get("radar_ghost_detector_signature")
+        if runtime_radar_metadata is not None
+        else None
+    )
+    if trained_ghost_signature != runtime_ghost_signature:
+        raise RuntimeError(
+            "Radar ghost-detector mismatch: model data used "
+            f"{trained_ghost_signature!r}, runtime requested "
+            f"{runtime_ghost_signature!r}. Pass the detector used during "
+            "collection, or recollect and retrain."
+        )
+    trained_ghost_threshold = model_config.get("radar_ghost_threshold")
+    runtime_ghost_threshold = (
+        runtime_radar_metadata.get("radar_ghost_threshold")
+        if runtime_radar_metadata is not None
+        else None
+    )
+    if trained_ghost_threshold != runtime_ghost_threshold:
+        raise RuntimeError(
+            "Radar ghost rejection threshold differs from training data: "
+            f"trained={trained_ghost_threshold!r}, "
+            f"runtime={runtime_ghost_threshold!r}."
         )
     print("=" * 76)
 
@@ -604,6 +633,9 @@ def main():
         points_per_second=radar_points_per_second,
         config=runtime_radar_config,
         seed=args.radar_seed if args.radar_seed is not None else 42,
+        ghost_detector_path=args.radar_ghost_detector,
+        ghost_threshold=args.radar_ghost_threshold,
+        ghost_device=args.radar_ghost_device,
     )
     print(f"  Distance source: Front radar ({args.radar_backend})")
 

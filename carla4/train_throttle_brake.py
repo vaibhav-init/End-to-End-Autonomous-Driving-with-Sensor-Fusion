@@ -493,6 +493,31 @@ def main():
             if dataset_config
             else None
         ),
+        "radar_ghost_detector": (
+            dataset_config.get("radar_ghost_detector")
+            if dataset_config
+            else None
+        ),
+        "radar_ghost_detector_signature": (
+            dataset_config.get("radar_ghost_detector_signature")
+            if dataset_config
+            else None
+        ),
+        "radar_ghost_threshold": (
+            dataset_config.get("radar_ghost_threshold")
+            if dataset_config
+            else None
+        ),
+        "radar_ghost_model": (
+            dataset_config.get("radar_ghost_model")
+            if dataset_config
+            else None
+        ),
+        "radar_ghost_feature_schema": (
+            dataset_config.get("radar_ghost_feature_schema")
+            if dataset_config
+            else None
+        ),
         "max_target_speed_kmh": max_speed_kmh,
         "validation": {
             "method": "episode_aware_stratified",

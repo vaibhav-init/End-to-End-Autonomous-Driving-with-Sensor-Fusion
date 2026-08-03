@@ -228,6 +228,9 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         profile_name=args.radar_profile,
         config_path=args.radar_config,
         seed=args.radar_seed if args.radar_seed is not None else seed,
+        ghost_detector_path=args.radar_ghost_detector,
+        ghost_threshold=args.radar_ghost_threshold,
+        ghost_device=args.radar_ghost_device,
     )
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None
@@ -407,6 +410,8 @@ def main():
         points_per_second=args.radar_points_per_second,
         profile_name=args.radar_profile,
         config_path=args.radar_config,
+        ghost_detector_path=args.radar_ghost_detector,
+        ghost_threshold=args.radar_ghost_threshold,
     )
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, args.out_name)
@@ -446,6 +451,18 @@ def main():
                     f"{existing_signature!r}, but this run requested "
                     f"{requested_signature!r}. Use a separate --output directory."
                 )
+            for key in (
+                "radar_ghost_detector_signature",
+                "radar_ghost_threshold",
+            ):
+                existing_value = existing_config.get(key)
+                requested_value = radar_metadata.get(key)
+                if existing_value != requested_value:
+                    raise RuntimeError(
+                        f"Dataset uses {key}={existing_value!r}, but this run "
+                        f"requested {requested_value!r}. Use a separate "
+                        "--output directory."
+                    )
         existing_max_speed = float(
             existing_config.get("max_target_speed_kmh", args.max_speed_kmh)
         )

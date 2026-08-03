@@ -48,7 +48,11 @@ class GroundTruthLogger:
         "radar_sensor_timestamp_s",
         "radar_scan_index",
         "radar_ideal_target_count",
+        "radar_multipath_mode",
+        "radar_reflector_count",
+        "radar_multipath_ideal_target_count",
         "radar_generated_detection_count",
+        "radar_rejected_detection_count",
         "radar_delivered_detection_count",
         "radar_direct_detection_count",
         "radar_dropped_direct_count",
@@ -60,6 +64,12 @@ class GroundTruthLogger:
         "radar_confirmed_track_count",
         "radar_selected_track_id",
         "radar_selected_truth_object_id",
+        "radar_selected_truth_parent_object_id",
+        "radar_selected_reflector_id",
+        "radar_selected_bounce_type",
+        "radar_selected_bounce_order",
+        "radar_selected_path_length_m",
+        "radar_selected_ghost_probability",
         "radar_selected_source",
         "radar_selected_confidence",
         "radar_selected_azimuth_deg",
@@ -162,8 +172,16 @@ class GroundTruthLogger:
             "radar_sensor_timestamp_s": radar.get("timestamp", ""),
             "radar_scan_index": radar.get("scan_index", ""),
             "radar_ideal_target_count": radar.get("ideal_target_count", ""),
+            "radar_multipath_mode": radar.get("multipath_mode", ""),
+            "radar_reflector_count": radar.get("reflector_count", ""),
+            "radar_multipath_ideal_target_count": radar.get(
+                "multipath_ideal_target_count", ""
+            ),
             "radar_generated_detection_count": radar.get(
                 "generated_detection_count", ""
+            ),
+            "radar_rejected_detection_count": radar.get(
+                "rejected_detection_count", ""
             ),
             "radar_delivered_detection_count": radar.get(
                 "delivered_detection_count", ""
@@ -191,6 +209,24 @@ class GroundTruthLogger:
             "radar_selected_track_id": radar.get("selected_track_id", ""),
             "radar_selected_truth_object_id": radar.get(
                 "selected_truth_object_id", ""
+            ),
+            "radar_selected_truth_parent_object_id": radar.get(
+                "selected_truth_parent_object_id", ""
+            ),
+            "radar_selected_reflector_id": radar.get(
+                "selected_reflector_id", ""
+            ),
+            "radar_selected_bounce_type": radar.get(
+                "selected_bounce_type", ""
+            ),
+            "radar_selected_bounce_order": radar.get(
+                "selected_bounce_order", ""
+            ),
+            "radar_selected_path_length_m": radar.get(
+                "selected_path_length_m", ""
+            ),
+            "radar_selected_ghost_probability": radar.get(
+                "selected_ghost_probability", ""
             ),
             "radar_selected_source": radar.get("selected_source", ""),
             "radar_selected_confidence": radar.get(

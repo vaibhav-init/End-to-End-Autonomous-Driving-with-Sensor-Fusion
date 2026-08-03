@@ -1,1 +1,7 @@
 __pycache__
+/carla4/artifacts/
+/carla4/data/
+/carla4/dataset_*/
+/carla4/model_*/
+/carla4/radar_validation_*/
+/carla4/scenarios/results*/

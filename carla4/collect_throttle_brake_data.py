@@ -450,6 +450,8 @@ def main():
         points_per_second=radar_points_per_second,
         profile_name=args.radar_profile,
         config_path=args.radar_config,
+        ghost_detector_path=args.radar_ghost_detector,
+        ghost_threshold=args.radar_ghost_threshold,
     )
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, "data.csv")
@@ -564,6 +566,9 @@ def main():
         profile_name=args.radar_profile,
         config_path=args.radar_config,
         seed=args.radar_seed if args.radar_seed is not None else args.seed,
+        ghost_detector_path=args.radar_ghost_detector,
+        ghost_threshold=args.radar_ghost_threshold,
+        ghost_device=args.radar_ghost_device,
     )
     camera = CameraManager(ego, world)
     yolo = YOLOPerception() if YOLO_AVAILABLE else None

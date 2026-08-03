@@ -29,6 +29,12 @@ from .realistic_core import (
     load_realistic_radar_config,
     realistic_radar_config_signature,
 )
+from .multipath import (
+    MultipathTarget,
+    ReflectorSegment,
+    extract_reflector_segments,
+    generate_multipath_targets,
+)
 
 __all__ = [
     "DEFAULT_REALISTIC_RADAR_PROFILE",
@@ -40,13 +46,17 @@ __all__ = [
     "FrontRadar",
     "IdealRadarTarget",
     "NativeFrontRadar",
+    "MultipathTarget",
     "RadarEnvironment",
     "RealisticFrontRadar",
     "RealisticRadarConfig",
     "RealisticRadarModel",
+    "ReflectorSegment",
     "add_radar_arguments",
     "create_front_radar",
     "describe_radar_configuration",
+    "extract_reflector_segments",
+    "generate_multipath_targets",
     "load_realistic_radar_config",
     "normalize_radar_backend",
     "radar_diagnostics_row",

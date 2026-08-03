@@ -33,6 +33,7 @@ REALISTIC_RADAR_PROFILES = (
     "ideal_target_list_v1",
     "gaussian_baseline_v1",
     "generic_lrr_v1",
+    "geometry_multipath_v1",
 )
 _PROFILE_DIRECTORY = os.path.join(os.path.dirname(__file__), "profiles")
 
@@ -95,6 +96,26 @@ class RealisticRadarConfig:
     ghost_max_range_bias_m: float = 18.0
     wet_road_ghost_multiplier: float = 2.0
 
+    # Multipath source. ``probabilistic`` preserves the original stochastic
+    # target-list model. ``geometry`` accepts deterministic image-method paths
+    # fitted to semantic-LiDAR walls/guardrails. ``off`` disables both.
+    multipath_mode: str = "probabilistic"
+    multipath_reflector_cell_size_m: float = 8.0
+    multipath_reflector_min_points: int = 8
+    multipath_reflector_min_length_m: float = 1.5
+    multipath_reflector_max_residual_m: float = 0.45
+    multipath_reflector_min_height_m: float = -1.5
+    multipath_reflector_max_height_m: float = 3.0
+    multipath_max_reflectors: int = 48
+    multipath_segment_margin_m: float = 1.0
+    multipath_min_incidence_cosine: float = 0.015
+    multipath_max_target_surface_distance_m: float = 18.0
+    multipath_min_range_separation_m: float = 0.30
+    multipath_second_order_loss_db: float = 5.0
+    multipath_third_order_loss_db: float = 9.0
+    multipath_enable_third_order: bool = True
+    multipath_max_ghosts_per_target: int = 6
+
     # Weather is deliberately modest at 77 GHz.  Values represent additional
     # dB loss over 100 m at a normalized CARLA weather setting of 1.0.
     rain_attenuation_db_per_100m: float = 1.0
@@ -155,6 +176,12 @@ class IdealRadarTarget:
     snr_db: float
     point_count: int = 1
     lateral_extent_m: float = 0.0
+    source: str = "direct"
+    parent_object_id: int = 0
+    reflector_id: int = 0
+    bounce_type: str = "direct"
+    bounce_order: int = 1
+    path_length_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -169,6 +196,12 @@ class RadarDetection:
     truth_object_id: int
     semantic_tag: int
     lateral_extent_m: float = 0.0
+    truth_parent_object_id: int = 0
+    reflector_id: int = 0
+    bounce_type: str = "direct"
+    bounce_order: int = 1
+    path_length_m: float = 0.0
+    ghost_probability: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -184,6 +217,12 @@ class RadarModelOutput:
     semantic_tag: int = 0
     azimuth_rad: float = 0.0
     lateral_extent_m: float = 0.0
+    truth_parent_object_id: int = 0
+    reflector_id: int = 0
+    bounce_type: str = "direct"
+    bounce_order: int = 1
+    path_length_m: float = 0.0
+    ghost_probability: float = 0.0
 
 
 @dataclass
@@ -197,6 +236,12 @@ class _Track:
     truth_object_id: int
     semantic_tag: int
     lateral_extent_m: float = 0.0
+    truth_parent_object_id: int = 0
+    reflector_id: int = 0
+    bounce_type: str = "direct"
+    bounce_order: int = 1
+    path_length_m: float = 0.0
+    ghost_probability: float = 0.0
     age: int = 1
     hits: int = 1
     misses: int = 0
@@ -267,6 +312,9 @@ def _validate_config(config):
         "schema_version",
         "ghost_max_age_scans",
         "max_active_ghosts",
+        "multipath_reflector_min_points",
+        "multipath_max_reflectors",
+        "multipath_max_ghosts_per_target",
         "latency_scans",
         "confirmation_hits",
         "confirmation_window",
@@ -279,7 +327,12 @@ def _validate_config(config):
     numeric_fields = (
         item.name
         for item in fields(RealisticRadarConfig)
-        if item.name != "profile_name"
+        if item.name
+        not in (
+            "profile_name",
+            "multipath_mode",
+            "multipath_enable_third_order",
+        )
     )
     for name in numeric_fields:
         value = getattr(config, name)
@@ -300,6 +353,9 @@ def _validate_config(config):
         "association_doppler_gate_mps",
         "path_half_width_m",
         "max_path_lateral_offset_m",
+        "multipath_reflector_cell_size_m",
+        "multipath_reflector_min_length_m",
+        "multipath_max_target_surface_distance_m",
     )
     for name in positive:
         if getattr(config, name) <= 0.0:
@@ -329,6 +385,13 @@ def _validate_config(config):
         "rain_attenuation_db_per_100m",
         "fog_attenuation_db_per_100m",
         "dust_attenuation_db_per_100m",
+        "multipath_reflector_max_residual_m",
+        "multipath_max_reflectors",
+        "multipath_segment_margin_m",
+        "multipath_min_range_separation_m",
+        "multipath_second_order_loss_db",
+        "multipath_third_order_loss_db",
+        "multipath_max_ghosts_per_target",
     )
     for name in non_negative:
         if getattr(config, name) < 0:
@@ -385,6 +448,23 @@ def _validate_config(config):
         raise ValueError("deletion_misses must be at least 1")
     if config.ghost_max_age_scans < 1 or config.max_active_ghosts < 0:
         raise ValueError("ghost ages/counts must be valid non-negative integers")
+    if config.multipath_mode not in ("off", "probabilistic", "geometry"):
+        raise ValueError(
+            "multipath_mode must be 'off', 'probabilistic', or 'geometry'"
+        )
+    if not isinstance(config.multipath_enable_third_order, bool):
+        raise ValueError("multipath_enable_third_order must be a boolean")
+    if config.multipath_reflector_min_points < 2:
+        raise ValueError("multipath_reflector_min_points must be at least 2")
+    if (
+        config.multipath_reflector_max_height_m
+        <= config.multipath_reflector_min_height_m
+    ):
+        raise ValueError(
+            "multipath reflector maximum height must exceed minimum height"
+        )
+    if not 0.0 <= config.multipath_min_incidence_cosine <= 1.0:
+        raise ValueError("multipath_min_incidence_cosine must be in [0, 1]")
     return config
 
 
@@ -458,11 +538,18 @@ class RealisticRadarModel:
     _ROAD_USER_TAGS = frozenset((12, 13, 14, 15, 16, 17, 18, 19))
     _REFLECTOR_TAGS = frozenset((3, 4, 5, 20, 26, 28))
 
-    def __init__(self, config=None, seed=42, capture_debug=False):
+    def __init__(
+        self,
+        config=None,
+        seed=42,
+        capture_debug=False,
+        detection_filter=None,
+    ):
         self.config = config or load_realistic_radar_config()
         _validate_config(self.config)
         self._rng = np.random.default_rng(int(seed))
         self._capture_debug = bool(capture_debug)
+        self._detection_filter = detection_filter
         self._scan_index = 0
         self._last_timestamp_s = None
         self._dropout_bad = {}
@@ -480,7 +567,10 @@ class RealisticRadarModel:
         }
         self._debug_snapshot = {
             "ideal_targets": [],
+            "multipath_ideal_targets": [],
             "generated_detections": [],
+            "accepted_detections": [],
+            "rejected_detections": [],
             "delivered_detections": [],
             "tracks": [],
             "selected": asdict(
@@ -612,10 +702,15 @@ class RealisticRadarModel:
             azimuth_rad=azimuth,
             relative_velocity_mps=velocity,
             snr_db=float(snr_db),
-            source=source,
+            source=target.source if target.source != "direct" else source,
             truth_object_id=int(target.object_id),
             semantic_tag=int(target.semantic_tag),
             lateral_extent_m=max(0.0, float(target.lateral_extent_m)),
+            truth_parent_object_id=int(target.parent_object_id),
+            reflector_id=int(target.reflector_id),
+            bounce_type=str(target.bounce_type),
+            bounce_order=int(target.bounce_order),
+            path_length_m=max(0.0, float(target.path_length_m)),
         )
 
     def _update_interference(self):
@@ -795,6 +890,11 @@ class RealisticRadarModel:
                 relative_velocity_mps=ghost.relative_velocity_mps,
                 snr_db=ghost.snr_db,
                 lateral_extent_m=ghost.lateral_extent_m,
+                source="ghost",
+                parent_object_id=ghost.parent_object_id,
+                bounce_type="probabilistic",
+                bounce_order=0,
+                path_length_m=2.0 * ghost.distance_m,
             )
             detection = self._measure_target(
                 ideal_ghost,
@@ -853,6 +953,12 @@ class RealisticRadarModel:
             truth_object_id=detection.truth_object_id,
             semantic_tag=detection.semantic_tag,
             lateral_extent_m=detection.lateral_extent_m,
+            truth_parent_object_id=detection.truth_parent_object_id,
+            reflector_id=detection.reflector_id,
+            bounce_type=detection.bounce_type,
+            bounce_order=detection.bounce_order,
+            path_length_m=detection.path_length_m,
+            ghost_probability=detection.ghost_probability,
             confirmed=confirmed,
             hit_history=history,
         )
@@ -876,6 +982,12 @@ class RealisticRadarModel:
         track.lateral_extent_m += self.config.azimuth_filter_gain * (
             detection.lateral_extent_m - track.lateral_extent_m
         )
+        track.truth_parent_object_id = detection.truth_parent_object_id
+        track.reflector_id = detection.reflector_id
+        track.bounce_type = detection.bounce_type
+        track.bounce_order = detection.bounce_order
+        track.path_length_m = detection.path_length_m
+        track.ghost_probability = detection.ghost_probability
         track.hits += 1
         track.misses = 0
         track.hit_history.append(1)
@@ -1015,6 +1127,12 @@ class RealisticRadarModel:
             semantic_tag=selected.semantic_tag,
             azimuth_rad=selected.azimuth_rad,
             lateral_extent_m=selected.lateral_extent_m,
+            truth_parent_object_id=selected.truth_parent_object_id,
+            reflector_id=selected.reflector_id,
+            bounce_type=selected.bounce_type,
+            bounce_order=selected.bounce_order,
+            path_length_m=selected.path_length_m,
+            ghost_probability=selected.ghost_probability,
         )
 
     def step(
@@ -1023,6 +1141,7 @@ class RealisticRadarModel:
         timestamp_s=None,
         environment=None,
         path_curvature_per_m=0.0,
+        multipath_targets=None,
     ):
         """Advance one sensor cycle and return the selected tracked target."""
 
@@ -1057,6 +1176,22 @@ class RealisticRadarModel:
                 and abs(target.azimuth_rad) <= half_fov
             )
         ]
+        geometry_targets = [
+            target
+            for target in (multipath_targets or ())
+            if (
+                math.isfinite(target.distance_m)
+                and math.isfinite(target.azimuth_rad)
+                and math.isfinite(target.relative_velocity_mps)
+                and math.isfinite(target.snr_db)
+                and math.isfinite(target.lateral_extent_m)
+                and target.lateral_extent_m >= 0.0
+                and self.config.minimum_forward_distance_m
+                <= target.distance_m
+                <= self.config.max_range_m
+                and abs(target.azimuth_rad) <= half_fov
+            )
+        ]
 
         self._update_interference()
         detections = []
@@ -1068,14 +1203,35 @@ class RealisticRadarModel:
             else:
                 detections.append(detection)
 
-        self._spawn_ghosts(targets, environment)
-        detections.extend(self._update_ghosts(targets, environment, dt))
+        if self.config.multipath_mode == "probabilistic":
+            self._spawn_ghosts(targets, environment)
+            detections.extend(self._update_ghosts(targets, environment, dt))
+        elif self.config.multipath_mode == "geometry":
+            for target in geometry_targets:
+                detection = self._measure_target(
+                    target,
+                    environment,
+                    source="ghost",
+                )
+                if detection is not None:
+                    detections.append(detection)
+        else:
+            self._ghosts.clear()
         detections.extend(self._create_clutter())
 
         generated_counts = {
             source: sum(item.source == source for item in detections)
             for source in ("direct", "ghost", "clutter")
         }
+        generated_detection_count = len(detections)
+        generated_detections = list(detections)
+        rejected = []
+        if self._detection_filter is not None:
+            detections, rejected = self._detection_filter.filter_detections(
+                detections,
+                timestamp_s=timestamp_s,
+                scan_index=self._scan_index,
+            )
         self._latency_queue.append((self._scan_index, detections))
         if len(self._latency_queue) <= self.config.latency_scans:
             delivered_source_scan_index = None
@@ -1093,7 +1249,11 @@ class RealisticRadarModel:
             "config_signature": realistic_radar_config_signature(self.config),
             "scan_index": self._scan_index,
             "ideal_target_count": len(targets),
-            "generated_detection_count": len(detections),
+            "multipath_mode": self.config.multipath_mode,
+            "multipath_ideal_target_count": len(geometry_targets),
+            "generated_detection_count": generated_detection_count,
+            "accepted_detection_count": len(detections),
+            "rejected_detection_count": len(rejected),
             "delivered_detection_count": len(delivered),
             "delivered_source_scan_index": delivered_source_scan_index,
             "configured_latency_scans": self.config.latency_scans,
@@ -1113,6 +1273,16 @@ class RealisticRadarModel:
                 selected.semantic_tag if selected.track_id else None
             ),
             "selected_source": selected.source,
+            "selected_truth_parent_object_id": (
+                selected.truth_parent_object_id if selected.track_id else None
+            ),
+            "selected_reflector_id": (
+                selected.reflector_id if selected.track_id else None
+            ),
+            "selected_bounce_type": selected.bounce_type,
+            "selected_bounce_order": selected.bounce_order,
+            "selected_path_length_m": selected.path_length_m,
+            "selected_ghost_probability": selected.ghost_probability,
             "selected_confidence": selected.confidence,
             "selected_azimuth_deg": math.degrees(selected.azimuth_rad),
             "selected_lateral_extent_m": selected.lateral_extent_m,
@@ -1125,8 +1295,17 @@ class RealisticRadarModel:
                 "delivered_source_scan_index": delivered_source_scan_index,
                 "path_curvature_per_m": float(path_curvature_per_m),
                 "ideal_targets": [asdict(target) for target in targets],
+                "multipath_ideal_targets": [
+                    asdict(target) for target in geometry_targets
+                ],
                 "generated_detections": [
+                    asdict(detection) for detection in generated_detections
+                ],
+                "accepted_detections": [
                     asdict(detection) for detection in detections
+                ],
+                "rejected_detections": [
+                    asdict(detection) for detection in rejected
                 ],
                 "delivered_detections": [
                     asdict(detection) for detection in delivered
@@ -1144,6 +1323,14 @@ class RealisticRadarModel:
                         "truth_object_id": track.truth_object_id,
                         "semantic_tag": track.semantic_tag,
                         "lateral_extent_m": track.lateral_extent_m,
+                        "truth_parent_object_id": (
+                            track.truth_parent_object_id
+                        ),
+                        "reflector_id": track.reflector_id,
+                        "bounce_type": track.bounce_type,
+                        "bounce_order": track.bounce_order,
+                        "path_length_m": track.path_length_m,
+                        "ghost_probability": track.ghost_probability,
                         "age": track.age,
                         "hits": track.hits,
                         "misses": track.misses,
@@ -1171,7 +1358,10 @@ class RealisticRadarModel:
         result = self._debug_snapshot.copy()
         for key in (
             "ideal_targets",
+            "multipath_ideal_targets",
             "generated_detections",
+            "accepted_detections",
+            "rejected_detections",
             "delivered_detections",
             "tracks",
         ):

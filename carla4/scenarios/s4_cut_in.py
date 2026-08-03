@@ -154,6 +154,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
                  radar_backend=None, radar_profile=None,
                  radar_config_path=None, radar_seed=None,
+                 radar_ghost_detector=None, radar_ghost_threshold=None,
+                 radar_ghost_device="cpu",
                  stage_approach=True, stage_gap=8.0,
                  cutin_stop=True,
                  scenario_id=4):
@@ -223,6 +225,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         radar_profile=radar_profile,
         radar_config_path=radar_config_path,
         radar_seed=seed if radar_seed is None else radar_seed,
+        radar_ghost_detector=radar_ghost_detector,
+        radar_ghost_threshold=radar_ghost_threshold,
+        radar_ghost_device=radar_ghost_device,
     )
     driver.setup(world, ego, carla_map, client)
 
@@ -585,6 +590,9 @@ def main():
                                       radar_profile=args.radar_profile,
                                       radar_config_path=args.radar_config,
                                       radar_seed=args.radar_seed,
+                                      radar_ghost_detector=args.radar_ghost_detector,
+                                      radar_ghost_threshold=args.radar_ghost_threshold,
+                                      radar_ghost_device=args.radar_ghost_device,
                                       stage_approach=args.stage_approach,
                                       stage_gap=args.stage_gap,
                                       cutin_stop=args.cutin_stop, scenario_id=4)

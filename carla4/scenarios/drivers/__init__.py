@@ -21,6 +21,9 @@ def make_driver(
     radar_profile=None,
     radar_config_path=None,
     radar_seed=42,
+    radar_ghost_detector=None,
+    radar_ghost_threshold=None,
+    radar_ghost_device="cpu",
     debug_every=20,
 ):
     """Build a Driver by name. Heavy deps are imported only for the chosen one."""
@@ -37,6 +40,9 @@ def make_driver(
             radar_profile=radar_profile,
             radar_config_path=radar_config_path,
             radar_seed=radar_seed,
+            radar_ghost_detector=radar_ghost_detector,
+            radar_ghost_threshold=radar_ghost_threshold,
+            radar_ghost_device=radar_ghost_device,
             debug_every=debug_every,
         )
     raise ValueError(f"Unknown driver '{name}'. Choose from {DRIVER_NAMES}")

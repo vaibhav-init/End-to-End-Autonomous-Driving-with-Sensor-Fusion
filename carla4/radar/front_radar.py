@@ -23,6 +23,7 @@ from .realistic_core import (
     realistic_radar_config_dict,
     realistic_radar_config_signature,
 )
+from .multipath import extract_reflector_segments, generate_multipath_targets
 
 
 RADAR_BACKENDS = ("native", "cshenron", "realistic")
@@ -82,6 +83,26 @@ def add_radar_arguments(parser):
         default=None,
         help="sensor-error RNG seed (default: collection/scenario seed or 42)",
     )
+    parser.add_argument(
+        "--radar-ghost-detector",
+        default=os.environ.get("CARLA_RADAR_GHOST_DETECTOR"),
+        help="optional trained real-vs-multipath detector checkpoint",
+    )
+    parser.add_argument(
+        "--radar-ghost-threshold",
+        type=float,
+        default=(
+            float(os.environ["CARLA_RADAR_GHOST_THRESHOLD"])
+            if os.environ.get("CARLA_RADAR_GHOST_THRESHOLD")
+            else None
+        ),
+        help="override the detector checkpoint's rejection threshold",
+    )
+    parser.add_argument(
+        "--radar-ghost-device",
+        default=os.environ.get("CARLA_RADAR_GHOST_DEVICE", "cpu"),
+        help="PyTorch device for online ghost filtering (default: cpu)",
+    )
     return parser
 
 
@@ -127,6 +148,8 @@ def describe_radar_configuration(
     profile_name=None,
     config_path=None,
     config=None,
+    ghost_detector_path=None,
+    ghost_threshold=None,
 ):
     """Return serializable metadata for dataset/model compatibility checks."""
 
@@ -154,6 +177,26 @@ def describe_radar_configuration(
                 "radar_config": realistic_radar_config_dict(resolved),
             }
         )
+        if ghost_detector_path:
+            from .ghost_detection.runtime import checkpoint_metadata
+
+            detector = checkpoint_metadata(
+                ghost_detector_path,
+                threshold=ghost_threshold,
+            )
+            metadata.update(
+                {
+                    "radar_ghost_detector": os.path.basename(
+                        ghost_detector_path
+                    ),
+                    "radar_ghost_detector_signature": detector["signature"],
+                    "radar_ghost_threshold": detector["threshold"],
+                    "radar_ghost_model": detector["model_name"],
+                    "radar_ghost_feature_schema": detector["feature_schema"],
+                    "radar_ghost_window_frames": detector["window_frames"],
+                    "radar_ghost_max_points": detector["max_points"],
+                }
+            )
     return metadata
 
 
@@ -165,7 +208,12 @@ _LOGGED_DIAGNOSTIC_KEYS = (
     "timestamp",
     "scan_index",
     "ideal_target_count",
+    "multipath_mode",
+    "reflector_count",
+    "multipath_ideal_target_count",
     "generated_detection_count",
+    "accepted_detection_count",
+    "rejected_detection_count",
     "delivered_detection_count",
     "delivered_source_scan_index",
     "configured_latency_scans",
@@ -181,9 +229,17 @@ _LOGGED_DIAGNOSTIC_KEYS = (
     "selected_truth_object_id",
     "selected_semantic_tag",
     "selected_source",
+    "selected_truth_parent_object_id",
+    "selected_reflector_id",
+    "selected_bounce_type",
+    "selected_bounce_order",
+    "selected_path_length_m",
+    "selected_ghost_probability",
     "selected_confidence",
     "selected_azimuth_deg",
     "selected_lateral_extent_m",
+    "ghost_detector_signature",
+    "ghost_detector_threshold",
     "path_curvature_per_m",
     "last_error",
 )
@@ -581,6 +637,9 @@ class RealisticFrontRadar(CShenronFrontRadar):
         config_path=None,
         config=None,
         capture_debug=False,
+        ghost_detector_path=None,
+        ghost_threshold=None,
+        ghost_device="cpu",
         **_ignored,
     ):
         self.vehicle = vehicle
@@ -593,10 +652,12 @@ class RealisticFrontRadar(CShenronFrontRadar):
         self._last_error = None
         self._reported_error = False
         self._ideal_target_count = 0
+        self._reflector_count = 0
         self._state = _empty_state(range_m)
         self._model_snapshot = {}
         self._raw_return_count = 0
         self._semantic_tag_counts = {}
+        self._reflector_snapshot = []
         self._capture_debug = bool(capture_debug)
         self._path_curvature_per_m = 0.0
         self.realistic_config = resolve_realistic_radar_config(
@@ -606,10 +667,21 @@ class RealisticFrontRadar(CShenronFrontRadar):
             config_path=config_path,
             config=config,
         )
+        detection_filter = None
+        if ghost_detector_path:
+            from .ghost_detection.runtime import RuntimeGhostFilter
+
+            detection_filter = RuntimeGhostFilter(
+                ghost_detector_path,
+                threshold=ghost_threshold,
+                device=ghost_device,
+            )
+        self._detection_filter = detection_filter
         self.model = RealisticRadarModel(
             config=self.realistic_config,
             seed=seed,
             capture_debug=self._capture_debug,
+            detection_filter=detection_filter,
         )
 
         # Let the temporal probability-of-detection model, rather than the
@@ -740,14 +812,44 @@ class RealisticFrontRadar(CShenronFrontRadar):
                         snr_db=target.snr_db,
                         point_count=target.point_count,
                         lateral_extent_m=target.lateral_extent_m,
+                        parent_object_id=target.object_id,
+                        path_length_m=2.0 * target.distance_m,
                     )
                 )
+            reflectors = extract_reflector_segments(
+                returns,
+                self.realistic_config,
+            )
+            multipath_paths = generate_multipath_targets(
+                ideal_targets,
+                reflectors,
+                self.realistic_config,
+            )
+            multipath_targets = [
+                IdealRadarTarget(
+                    object_id=path.object_id,
+                    semantic_tag=path.semantic_tag,
+                    distance_m=path.distance_m,
+                    azimuth_rad=path.azimuth_rad,
+                    relative_velocity_mps=path.relative_velocity_mps,
+                    snr_db=path.snr_db,
+                    lateral_extent_m=path.lateral_extent_m,
+                    source="ghost",
+                    parent_object_id=path.parent_object_id,
+                    reflector_id=path.reflector_id,
+                    bounce_type=path.bounce_type,
+                    bounce_order=path.bounce_order,
+                    path_length_m=path.path_length_m,
+                )
+                for path in multipath_paths
+            ]
             timestamp = getattr(measurement, "timestamp", None)
             selected = self.model.step(
                 ideal_targets,
                 timestamp_s=timestamp,
                 environment=self._read_environment(),
                 path_curvature_per_m=path_curvature_per_m,
+                multipath_targets=multipath_targets,
             )
             model_snapshot = self.model.debug_snapshot()
             state = {
@@ -760,8 +862,14 @@ class RealisticFrontRadar(CShenronFrontRadar):
                     float(timestamp) if timestamp is not None else None
                 )
                 self._ideal_target_count = len(ideal_targets)
+                self._reflector_count = len(reflectors)
                 self._raw_return_count = len(returns)
                 self._semantic_tag_counts = tag_counts
+                self._reflector_snapshot = (
+                    [asdict(reflector) for reflector in reflectors]
+                    if self._capture_debug
+                    else []
+                )
                 self._model_snapshot = model_snapshot
                 self._state = state
                 self._last_error = None
@@ -794,9 +902,17 @@ class RealisticFrontRadar(CShenronFrontRadar):
                     "timestamp": self._timestamp,
                     "raw_return_count": self._raw_return_count,
                     "ideal_target_count": self._ideal_target_count,
+                    "reflector_count": self._reflector_count,
                     "last_error": self._last_error,
                 }
             )
+            if self._detection_filter is not None:
+                model_diagnostics["ghost_detector_signature"] = (
+                    self._detection_filter.signature
+                )
+                model_diagnostics["ghost_detector_threshold"] = (
+                    self._detection_filter.threshold
+                )
         return model_diagnostics
 
     def debug_snapshot(self):
@@ -804,7 +920,10 @@ class RealisticFrontRadar(CShenronFrontRadar):
             result = self._model_snapshot.copy()
             for key in (
                 "ideal_targets",
+                "multipath_ideal_targets",
                 "generated_detections",
+                "accepted_detections",
+                "rejected_detections",
                 "delivered_detections",
                 "tracks",
             ):
@@ -823,6 +942,9 @@ class RealisticFrontRadar(CShenronFrontRadar):
                 }
                 for tag, count in self._semantic_tag_counts.items()
             }
+            result["reflectors"] = [
+                reflector.copy() for reflector in self._reflector_snapshot
+            ]
             return result
 
 

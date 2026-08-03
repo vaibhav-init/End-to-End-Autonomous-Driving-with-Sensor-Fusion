@@ -103,7 +103,9 @@ def cleanup_actor(actor):
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
                  radar_backend=None, radar_profile=None,
-                 radar_config_path=None, radar_seed=None, scenario_id=3):
+                 radar_config_path=None, radar_seed=None,
+                 radar_ghost_detector=None, radar_ghost_threshold=None,
+                 radar_ghost_device="cpu", scenario_id=3):
     """Run S3: Lead Vehicle at Lower Constant Speed at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -143,6 +145,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         radar_profile=radar_profile,
         radar_config_path=radar_config_path,
         radar_seed=seed if radar_seed is None else radar_seed,
+        radar_ghost_detector=radar_ghost_detector,
+        radar_ghost_threshold=radar_ghost_threshold,
+        radar_ghost_device=radar_ghost_device,
     )
     driver.setup(world, ego, carla_map, client)
 
@@ -331,6 +336,9 @@ def main():
                                       radar_profile=args.radar_profile,
                                       radar_config_path=args.radar_config,
                                       radar_seed=args.radar_seed,
+                                      radar_ghost_detector=args.radar_ghost_detector,
+                                      radar_ghost_threshold=args.radar_ghost_threshold,
+                                      radar_ghost_device=args.radar_ghost_device,
                                       scenario_id=3)
                 results.append({
                     "fog": fog,

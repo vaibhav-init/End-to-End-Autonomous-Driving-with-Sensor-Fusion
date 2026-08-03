@@ -45,6 +45,7 @@ from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS  # noqa: 
 from speed_model import TargetSpeedMLP, flatten_history  # noqa: E402
 from radar import (  # noqa: E402
     create_front_radar,
+    describe_radar_configuration,
     normalize_radar_backend,
     realistic_radar_config_signature,
     resolve_realistic_radar_config,
@@ -124,6 +125,9 @@ class MLPDriver(Driver):
         radar_profile=None,
         radar_config_path=None,
         radar_seed=42,
+        radar_ghost_detector=None,
+        radar_ghost_threshold=None,
+        radar_ghost_device="cpu",
         **_ignored,
     ):
         self.model_dir = model_dir
@@ -133,6 +137,9 @@ class MLPDriver(Driver):
         self.radar_profile = radar_profile
         self.radar_config_path = radar_config_path
         self.radar_seed = int(radar_seed)
+        self.radar_ghost_detector = radar_ghost_detector
+        self.radar_ghost_threshold = radar_ghost_threshold
+        self.radar_ghost_device = radar_ghost_device
         self.realistic_radar_config = None
         self.device = None
         self.model = None
@@ -241,6 +248,33 @@ class MLPDriver(Driver):
                     f"{trained_signature!r}, runtime requested "
                     f"{requested_signature!r}."
                 )
+            runtime_metadata = describe_radar_configuration(
+                backend="realistic",
+                range_m=self.max_range,
+                fps=self.fps,
+                points_per_second=self.radar_points_per_second,
+                config=self.realistic_radar_config,
+                ghost_detector_path=self.radar_ghost_detector,
+                ghost_threshold=self.radar_ghost_threshold,
+            )
+            trained_ghost_signature = model_config.get(
+                "radar_ghost_detector_signature"
+            )
+            requested_ghost_signature = runtime_metadata.get(
+                "radar_ghost_detector_signature"
+            )
+            if trained_ghost_signature != requested_ghost_signature:
+                raise RuntimeError(
+                    "Ghost-detector mismatch: model data used "
+                    f"{trained_ghost_signature!r}, runtime requested "
+                    f"{requested_ghost_signature!r}."
+                )
+            if model_config.get("radar_ghost_threshold") != runtime_metadata.get(
+                "radar_ghost_threshold"
+            ):
+                raise RuntimeError(
+                    "Ghost rejection threshold differs from training data."
+                )
 
         # Camera + YOLO give traffic-light features in both modes (and obstacle
         # detection in vision mode). YOLO is required for vision, optional for radar.
@@ -256,6 +290,9 @@ class MLPDriver(Driver):
                 points_per_second=self.radar_points_per_second,
                 config=self.realistic_radar_config,
                 seed=self.radar_seed,
+                ghost_detector_path=self.radar_ghost_detector,
+                ghost_threshold=self.radar_ghost_threshold,
+                ghost_device=self.radar_ghost_device,
             )
             self.vision_tracker = None
             if self.yolo is None:
