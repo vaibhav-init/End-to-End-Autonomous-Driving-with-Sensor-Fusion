@@ -74,7 +74,13 @@ def parse_args():
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="do not update the CARLA spectator chase camera",
+        help="do not update the CARLA spectator camera",
+    )
+    parser.add_argument(
+        "--camera-view",
+        choices=("target", "chase"),
+        default="target",
+        help="spectator view: controlled-target close-up or scenarios-style chase",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--radar-config", help="optional geometry-profile overrides")
@@ -174,13 +180,37 @@ def _set_weather(world, sequence_index):
     return sequence_index % len(presets)
 
 
-def _update_spectator_camera(spectator, ego):
-    """Match the scenarios/ third-person chase-camera placement."""
+def _update_spectator_camera(spectator, ego, target=None, view="target"):
+    """Show the controlled target, with the scenarios/ chase view available."""
 
     if spectator is None or ego is None or not ego.is_alive:
         return
     carla = _carla_module()
     ego_transform = ego.get_transform()
+    if view == "target" and target is not None and target.is_alive:
+        target_location = target.get_transform().location
+        delta_x = float(target_location.x - ego_transform.location.x)
+        delta_y = float(target_location.y - ego_transform.location.y)
+        horizontal_distance = max(math.hypot(delta_x, delta_y), 1.0e-6)
+        direction_x = delta_x / horizontal_distance
+        direction_y = delta_y / horizontal_distance
+        stand_off = min(12.0, max(5.0, 0.3 * horizontal_distance))
+        camera_location = carla.Location(
+            x=float(target_location.x) - stand_off * direction_x,
+            y=float(target_location.y) - stand_off * direction_y,
+            z=float(target_location.z) + 6.0,
+        )
+        yaw = math.degrees(math.atan2(direction_y, direction_x))
+        pitch = math.degrees(math.atan2(-6.0, stand_off))
+        spectator.set_transform(
+            carla.Transform(
+                camera_location,
+                carla.Rotation(pitch=pitch, yaw=yaw),
+            )
+        )
+        return
+
+    # This is the exact third-person placement used by scenarios/.
     spectator.set_transform(
         carla.Transform(
             ego_transform.location
@@ -685,7 +715,12 @@ def collect_sequence(client, args, sequence_index):
         )
         if not args.headless:
             spectator = world.get_spectator()
-            _update_spectator_camera(spectator, ego)
+            _update_spectator_camera(
+                spectator,
+                ego,
+                controlled_target,
+                args.camera_view,
+            )
         walker_ids, walker_controller_ids = _spawn_walkers(
             client,
             world,
@@ -708,7 +743,12 @@ def collect_sequence(client, args, sequence_index):
         # Advance twice but wait for the first frame: this proves that one
         # complete scan exists without deadlocking on a frame CARLA omitted.
         startup_frame = world.tick()
-        _update_spectator_camera(spectator, ego)
+        _update_spectator_camera(
+            spectator,
+            ego,
+            controlled_target,
+            args.camera_view,
+        )
         world.tick()
         _wait_for_radar_frame(
             radar,
@@ -719,6 +759,21 @@ def collect_sequence(client, args, sequence_index):
             radar,
             world,
             controlled_target,
+        )
+        _update_spectator_camera(
+            spectator,
+            ego,
+            controlled_target,
+            args.camera_view,
+        )
+        print(
+            "  Controlled target "
+            f"{controlled_target.id} at "
+            f"{controlled_plan['base_target_range_m']:.1f} m; "
+            f"reflector tag={controlled_plan['reflector_tag']}, "
+            f"surface gap="
+            f"{controlled_plan['target_surface_distance_m']:.1f} m; "
+            f"camera={args.camera_view}"
         )
         controlled_step = _validate_controlled_target(
             radar,
@@ -736,7 +791,13 @@ def collect_sequence(client, args, sequence_index):
                 args.fps,
             )
             controlled_step += 1
-            _update_spectator_camera(spectator, ego)
+            if args.camera_view == "chase":
+                _update_spectator_camera(
+                    spectator,
+                    ego,
+                    controlled_target,
+                    args.camera_view,
+                )
             frame = world.tick()
             _wait_for_radar_frame(
                 radar,
@@ -750,7 +811,13 @@ def collect_sequence(client, args, sequence_index):
                 args.fps,
             )
             controlled_step += 1
-            _update_spectator_camera(spectator, ego)
+            if args.camera_view == "chase":
+                _update_spectator_camera(
+                    spectator,
+                    ego,
+                    controlled_target,
+                    args.camera_view,
+                )
             frame = world.tick()
             diagnostics = _wait_for_radar_frame(
                 radar,
