@@ -71,6 +71,11 @@ def parse_args():
         default=30.0,
         help="seconds to wait for each processed semantic-LiDAR radar frame",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="do not update the CARLA spectator chase camera",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--radar-config", help="optional geometry-profile overrides")
     return parser.parse_args()
@@ -167,6 +172,26 @@ def _set_weather(world, sequence_index):
     )
     world.set_weather(presets[sequence_index % len(presets)])
     return sequence_index % len(presets)
+
+
+def _update_spectator_camera(spectator, ego):
+    """Match the scenarios/ third-person chase-camera placement."""
+
+    if spectator is None or ego is None or not ego.is_alive:
+        return
+    carla = _carla_module()
+    ego_transform = ego.get_transform()
+    spectator.set_transform(
+        carla.Transform(
+            ego_transform.location
+            - ego_transform.get_forward_vector() * 15.0
+            + carla.Location(z=8.0),
+            carla.Rotation(
+                pitch=-20.0,
+                yaw=float(ego_transform.rotation.yaw),
+            ),
+        )
+    )
 
 
 def _spawn_vehicles(
@@ -626,6 +651,7 @@ def collect_sequence(client, args, sequence_index):
     ego = None
     controlled_target = None
     controlled_plan = None
+    spectator = None
     npc_ids = []
     walker_ids = []
     walker_controller_ids = []
@@ -657,6 +683,9 @@ def collect_sequence(client, args, sequence_index):
             sequence_seed,
             args.lead_distance,
         )
+        if not args.headless:
+            spectator = world.get_spectator()
+            _update_spectator_camera(spectator, ego)
         walker_ids, walker_controller_ids = _spawn_walkers(
             client,
             world,
@@ -675,11 +704,12 @@ def collect_sequence(client, args, sequence_index):
             seed=sequence_seed,
             capture_debug=True,
         )
-        # A newly spawned CARLA sensor is not guaranteed to emit on its first
-        # simulation tick. Advance two startup ticks and wait for the second,
-        # so reflector placement uses the latest complete semantic scan.
-        world.tick()
+        # A newly spawned CARLA sensor can skip its second spawn-time frame.
+        # Advance twice but wait for the first frame: this proves that one
+        # complete scan exists without deadlocking on a frame CARLA omitted.
         startup_frame = world.tick()
+        _update_spectator_camera(spectator, ego)
+        world.tick()
         _wait_for_radar_frame(
             radar,
             startup_frame,
@@ -706,6 +736,7 @@ def collect_sequence(client, args, sequence_index):
                 args.fps,
             )
             controlled_step += 1
+            _update_spectator_camera(spectator, ego)
             frame = world.tick()
             _wait_for_radar_frame(
                 radar,
@@ -719,6 +750,7 @@ def collect_sequence(client, args, sequence_index):
                 args.fps,
             )
             controlled_step += 1
+            _update_spectator_camera(spectator, ego)
             frame = world.tick()
             diagnostics = _wait_for_radar_frame(
                 radar,

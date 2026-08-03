@@ -183,6 +183,12 @@ python3 collect_carla_radar_ghosts.py \
   --radar-timeout 30
 ```
 
+By default, the CARLA spectator is placed 15 m behind and 8 m above the ego
+with a -20 degree pitch, matching the third-person chase camera in
+`scenarios/`. Launch CARLA normally (without `-RenderOffScreen`) to inspect the
+stationary ego, controlled target, and reflector in the CARLA window. Add
+`--headless` for unattended full-dataset collection.
+
 The semantic-LiDAR callback also fits reflectors and generates multipath, so
 it can be slower than simulation time. If a frame times out with no callback
 error, increase `--radar-timeout`; do not lower the radar density merely to
