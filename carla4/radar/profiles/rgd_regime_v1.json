@@ -1,0 +1,14 @@
+{
+  "profile_name": "rgd_regime_v1",
+  "multipath_mode": "geometry",
+  "ghost_start_probability": 0.0,
+  "ghost_survival_probability": 0.0,
+  "max_active_ghosts": 0,
+  "cycle_time_s": 0.1,
+  "horizontal_fov_deg": 140.0,
+  "range_resolution_m": 0.15,
+  "azimuth_resolution_boresight_deg": 1.8,
+  "azimuth_resolution_edge_deg": 1.8,
+  "doppler_resolution_mps": 0.087,
+  "max_unambiguous_doppler_mps": 44.3
+}

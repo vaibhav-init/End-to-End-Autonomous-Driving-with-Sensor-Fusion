@@ -213,6 +213,37 @@ collector exits rather than saving invalid ghost labels. This script is only a
 geometry smoke test; do not use repeated stationary captures as the main CARLA
 training dataset.
 
+### 6.1b RGD-regime collection
+
+The official Radar Ghost Dataset records a **stationary ego** with a
+**pedestrian or cyclist** main object walking away from and back toward the
+sensor near a reflective surface, at 10 Hz with a ±70° field of view. To
+reproduce that regime for sim-to-real pretraining, use the walker/motorcycle
+targets and the `rgd_regime_v1` profile (defaults: `--fps 10`, 38.5 s
+sequences):
+
+```bash
+python3 collect_carla_radar_ghosts.py \
+  --town Town04 \
+  --output artifacts/carla_ghost_rgd_pedestrian \
+  --split train \
+  --sequences 1 \
+  --duration 38.5 \
+  --vehicles 30 \
+  --walkers 15 \
+  --lead-distance 25 \
+  --target-type pedestrian \
+  --radar-timeout 30
+```
+
+Use `--target-type cyclist` for a two-wheel motorcycle proxy. After each
+sequence the script prints an `RGD REGIME COLLECTION VERIFICATION — COPY THIS
+BLOCK BACK` block with PASS/FAIL checks for stationary ego, 10 Hz cadence,
+±70° FOV, nonzero ghost labels, the expected RGD class, and live direct-target
+Doppler at the configured walking/cycling speed. Copy that block and the
+per-sequence JSON summary back to the remote session so the collection can be
+verified.
+
 ### 6.2 Moving multi-scenario pilot
 
 Use `collect_carla_radar_dataset.py` for research data. The ego and background

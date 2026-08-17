@@ -43,6 +43,14 @@ RADAR_DTYPE = np.dtype(
 )
 
 
+# Radar Ghost Dataset v1.1 records a stationary ego with a pedestrian/cyclist
+# main object moving near a reflective surface. These constants let the same
+# collector reproduce that regime (or keep the original vehicle smoke test).
+TARGET_TYPES = ("vehicle", "pedestrian", "cyclist")
+TARGET_SEMANTIC_TAGS = {"vehicle": 14, "pedestrian": 12, "cyclist": 18}
+TARGET_SPEEDS_MPS = {"vehicle": 3.0, "pedestrian": 1.4, "cyclist": 4.5}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -52,9 +60,9 @@ def parse_args():
     parser.add_argument("--output", required=True)
     parser.add_argument("--split", choices=("train", "val", "test"), default="train")
     parser.add_argument("--sequences", type=int, default=20)
-    parser.add_argument("--duration", type=float, default=45.0)
+    parser.add_argument("--duration", type=float, default=38.5)
     parser.add_argument("--warmup", type=float, default=3.0)
-    parser.add_argument("--fps", type=int, default=20)
+    parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--vehicles", type=int, default=45)
     parser.add_argument("--walkers", type=int, default=25)
     parser.add_argument(
@@ -62,6 +70,17 @@ def parse_args():
         type=float,
         default=25.0,
         help="initial spawn distance for the controlled dynamic radar target",
+    )
+    parser.add_argument(
+        "--target-type",
+        choices=TARGET_TYPES,
+        default="vehicle",
+        help=(
+            "main multipath object class: vehicle (CARLA car), pedestrian "
+            "(CARLA walker), or cyclist (CARLA two-wheel motorcycle). The "
+            "Radar Ghost Dataset recordings use pedestrian/cyclist main "
+            "objects walking away from and back toward the stationary ego."
+        ),
     )
     parser.add_argument("--range", dest="range_m", type=float, default=100.0)
     parser.add_argument("--points-per-second", type=int, default=240000)
@@ -231,6 +250,7 @@ def _spawn_vehicles(
     count,
     seed,
     lead_distance_m,
+    target_type="vehicle",
 ):
     carla = _carla_module()
     rng = random.Random(seed)
@@ -250,6 +270,19 @@ def _spawn_vehicles(
             continue
     if not road_vehicle_blueprints:
         road_vehicle_blueprints = blueprints
+    if target_type == "cyclist":
+        # There is no cyclist actor in CARLA; a two-wheel motorcycle is the
+        # closest proxy and is tagged Motorcycle (18) by the semantic LiDAR.
+        controlled_blueprints = [
+            blueprint
+            for blueprint in blueprints
+            if blueprint.has_attribute("number_of_wheels")
+            and blueprint.get_attribute("number_of_wheels").as_int() == 2
+        ]
+        if not controlled_blueprints:
+            controlled_blueprints = road_vehicle_blueprints
+    else:
+        controlled_blueprints = road_vehicle_blueprints
     spawn_points = list(world.get_map().get_spawn_points())
     rng.shuffle(spawn_points)
     if not blueprints or not spawn_points:
@@ -272,44 +305,66 @@ def _spawn_vehicles(
     ego.set_simulate_physics(False)
 
     actor_ids = []
-    ego_waypoint = world.get_map().get_waypoint(
-        ego.get_transform().location,
-        project_to_road=True,
-    )
-    lead = None
-    if ego_waypoint is not None:
-        candidate_distances = (
-            float(lead_distance_m),
-            float(lead_distance_m) + 5.0,
-            max(12.0, float(lead_distance_m) - 5.0),
+    controlled = None
+    if target_type == "pedestrian":
+        # The controlled main object is a walker, matching the Radar Ghost
+        # Dataset's pedestrian recordings. Physics is disabled so kinematic
+        # control keeps it exactly on the validated multipath path while
+        # CARLA still reports the velocity set below.
+        walker_blueprints = list(
+            world.get_blueprint_library().filter("walker.pedestrian.*")
         )
-        for distance in candidate_distances:
-            lead_waypoints = list(ego_waypoint.next(distance))
-            rng.shuffle(lead_waypoints)
-            for waypoint in lead_waypoints:
-                transform = waypoint.transform
-                transform.location.z += 0.35
-                blueprint = rng.choice(road_vehicle_blueprints)
-                if blueprint.has_attribute("role_name"):
-                    blueprint.set_attribute("role_name", "radar_target")
-                lead = world.try_spawn_actor(blueprint, transform)
-                if lead is not None:
+        location = world.get_random_location_from_navigation()
+        if not walker_blueprints or location is None:
+            raise RuntimeError(
+                "Town has no walker blueprints or navigation locations"
+            )
+        blueprint = rng.choice(walker_blueprints)
+        if blueprint.has_attribute("is_invincible"):
+            blueprint.set_attribute("is_invincible", "false")
+        controlled = world.try_spawn_actor(blueprint, carla.Transform(location))
+        if controlled is None:
+            raise RuntimeError("Unable to spawn the pedestrian radar target")
+        controlled.set_simulate_physics(False)
+        actor_ids.append(controlled.id)
+    else:
+        ego_waypoint = world.get_map().get_waypoint(
+            ego.get_transform().location,
+            project_to_road=True,
+        )
+        if ego_waypoint is not None:
+            candidate_distances = (
+                float(lead_distance_m),
+                float(lead_distance_m) + 5.0,
+                max(12.0, float(lead_distance_m) - 5.0),
+            )
+            for distance in candidate_distances:
+                lead_waypoints = list(ego_waypoint.next(distance))
+                rng.shuffle(lead_waypoints)
+                for waypoint in lead_waypoints:
+                    transform = waypoint.transform
+                    transform.location.z += 0.35
+                    blueprint = rng.choice(controlled_blueprints)
+                    if blueprint.has_attribute("role_name"):
+                        blueprint.set_attribute("role_name", "radar_target")
+                    controlled = world.try_spawn_actor(blueprint, transform)
+                    if controlled is not None:
+                        break
+                if controlled is not None:
                     break
-            if lead is not None:
-                break
-    if lead is None:
-        raise RuntimeError(
-            "Unable to spawn the guaranteed lead radar target ahead of ego"
-        )
-    lead.apply_control(carla.VehicleControl(hand_brake=True))
-    actor_ids.append(lead.id)
+        if controlled is None:
+            raise RuntimeError(
+                "Unable to spawn the guaranteed lead radar target ahead of ego"
+            )
+        controlled.apply_control(carla.VehicleControl(hand_brake=True))
+        actor_ids.append(controlled.id)
 
     batch = []
     available_spawn_points = [
         transform
         for index, transform in enumerate(spawn_points)
         if index != ego_spawn_index
-        and transform.location.distance(lead.get_transform().location) > 8.0
+        and transform.location.distance(controlled.get_transform().location) > 8.0
     ]
     for transform in available_spawn_points[: max(0, count - 1)]:
         blueprint = rng.choice(blueprints)
@@ -328,7 +383,7 @@ def _spawn_vehicles(
     actor_ids.extend(
         response.actor_id for response in responses if not response.error
     )
-    return ego, lead, actor_ids
+    return ego, controlled, actor_ids
 
 
 def _spawn_walkers(client, world, count, seed):
@@ -401,11 +456,11 @@ def _wait_for_radar_frame(radar, frame, timeout_s):
     )
 
 
-def _probe_target(actor_id, target_xy_m):
+def _probe_target(actor_id, target_xy_m, semantic_tag=14):
     distance = float(np.linalg.norm(target_xy_m))
     return IdealRadarTarget(
         object_id=int(actor_id),
-        semantic_tag=14,
+        semantic_tag=int(semantic_tag),
         distance_m=distance,
         azimuth_rad=math.atan2(float(target_xy_m[1]), float(target_xy_m[0])),
         relative_velocity_mps=0.0,
@@ -417,7 +472,12 @@ def _probe_target(actor_id, target_xy_m):
     )
 
 
-def _controlled_target_candidates(reflector, actor_id, config):
+def _controlled_target_candidates(
+    reflector,
+    actor_id,
+    config,
+    semantic_tag=14,
+):
     """Yield target positions whose path is accepted by the production solver."""
 
     point = np.asarray(reflector.point_xy_m, dtype=np.float64)
@@ -462,7 +522,7 @@ def _controlled_target_candidates(reflector, actor_id, config):
                 continue
 
             paths = generate_multipath_targets(
-                [_probe_target(actor_id, target_xy)],
+                [_probe_target(actor_id, target_xy, semantic_tag)],
                 [reflector],
                 config,
             )
@@ -481,7 +541,7 @@ def _controlled_target_candidates(reflector, actor_id, config):
             robust_count = 0
             for offset in robust_offsets:
                 nearby_paths = generate_multipath_targets(
-                    [_probe_target(actor_id, target_xy + offset)],
+                    [_probe_target(actor_id, target_xy + offset, semantic_tag)],
                     [reflector],
                     config,
                 )
@@ -494,6 +554,7 @@ def _controlled_target_candidates(reflector, actor_id, config):
                             _probe_target(
                                 actor_id,
                                 target_xy + sign * candidate_amplitude * tangent,
+                                semantic_tag,
                             )
                         ],
                         [reflector],
@@ -529,7 +590,13 @@ def _controlled_target_candidates(reflector, actor_id, config):
             }
 
 
-def _configure_controlled_target(radar, world, target_actor):
+def _configure_controlled_target(
+    radar,
+    world,
+    target_actor,
+    semantic_tag=14,
+    target_speed_mps=3.0,
+):
     """Put a CARLA actor into geometry known to produce physical paths."""
 
     snapshot = radar.debug_snapshot()
@@ -542,6 +609,7 @@ def _configure_controlled_target(radar, world, target_actor):
                 reflector,
                 target_actor.id,
                 radar.realistic_config,
+                semantic_tag,
             )
         )
     if not candidates:
@@ -613,10 +681,15 @@ def _configure_controlled_target(radar, world, target_actor):
         "world_z": world_z,
         "tangent_world": tangent_world,
         "yaw": target_yaw,
+        "semantic_tag": int(semantic_tag),
+        "target_speed_mps": float(target_speed_mps),
         "amplitude_m": float(candidate["motion_amplitude_m"]),
         "period_s": max(
             4.0,
-            2.0 * math.pi * float(candidate["motion_amplitude_m"]) / 3.0,
+            2.0
+            * math.pi
+            * float(candidate["motion_amplitude_m"])
+            / max(float(target_speed_mps), 0.5),
         ),
         "reflector_id": int(reflector.reflector_id),
         "reflector_tag": int(reflector.semantic_tag),
@@ -721,6 +794,8 @@ def collect_sequence(client, args, sequence_index):
         "sum_dynamic_ideal_targets": 0,
     }
     sequence_seed = args.seed + sequence_index * 1009
+    semantic_tag = TARGET_SEMANTIC_TAGS[args.target_type]
+    target_speed_mps = TARGET_SPEEDS_MPS[args.target_type]
     try:
         settings = world.get_settings()
         settings.synchronous_mode = True
@@ -737,6 +812,7 @@ def collect_sequence(client, args, sequence_index):
             args.vehicles,
             sequence_seed,
             args.lead_distance,
+            args.target_type,
         )
         if not args.headless:
             spectator = world.get_spectator()
@@ -759,7 +835,7 @@ def collect_sequence(client, args, sequence_index):
             backend="realistic",
             fps=args.fps,
             points_per_second=args.points_per_second,
-            profile_name="geometry_multipath_v1",
+            profile_name="rgd_regime_v1",
             config_path=args.radar_config,
             seed=sequence_seed,
             capture_debug=True,
@@ -784,6 +860,8 @@ def collect_sequence(client, args, sequence_index):
             radar,
             world,
             controlled_target,
+            semantic_tag,
+            target_speed_mps,
         )
         _update_spectator_camera(
             spectator,
@@ -793,7 +871,8 @@ def collect_sequence(client, args, sequence_index):
         )
         print(
             "  Controlled target "
-            f"{controlled_target.id} at "
+            f"{controlled_target.id} (type={args.target_type}, "
+            f"tag={semantic_tag}) at "
             f"{controlled_plan['base_target_range_m']:.1f} m; "
             f"reflector tag={controlled_plan['reflector_tag']}, "
             f"surface gap="
@@ -900,6 +979,25 @@ def collect_sequence(client, args, sequence_index):
                     "config_signature"
                 ),
                 "weather_index": weather_index,
+                "target_type": args.target_type,
+                "target_semantic_tag": int(semantic_tag),
+                "target_speed_mps_expected": float(target_speed_mps),
+                "radar_fps": int(args.fps),
+                "radar_fov_deg": float(
+                    radar.realistic_config.horizontal_fov_deg
+                ),
+                "radar_cycle_time_s": float(
+                    radar.realistic_config.cycle_time_s
+                ),
+                "ego_speed_mps": float(
+                    np.linalg.norm(
+                        (
+                            ego.get_velocity().x,
+                            ego.get_velocity().y,
+                            ego.get_velocity().z,
+                        )
+                    )
+                ),
                 "controlled_target_id": int(controlled_target.id),
                 "controlled_reflector_id": controlled_plan[
                     "reflector_id"
@@ -955,6 +1053,150 @@ def collect_sequence(client, args, sequence_index):
     return np.asarray(rows, dtype=RADAR_DTYPE), diagnostics_summary
 
 
+def _add_point_statistics(counts, radar_data, diagnostics):
+    """Augment a sequence summary with label-class and Doppler checks."""
+
+    labeled = radar_data["label_id"] > 0
+    classes, class_counts = np.unique(
+        (radar_data["label_id"][labeled] // 1000) % 10,
+        return_counts=True,
+    )
+    counts["label_class_histogram"] = {
+        int(cls): int(count) for cls, count in zip(classes, class_counts)
+    }
+
+    ghost_mask = (radar_data["label_id"] > 0) & (
+        radar_data["label_id"] % 10 != 1
+    )
+    families = {}
+    if np.any(ghost_mask):
+        ghost_rows = radar_data[ghost_mask]
+        for bounce_type, bounce_order in zip(
+            ghost_rows["bounce_type"],
+            ghost_rows["bounce_order"],
+        ):
+            key = f"{bounce_type.decode()}-order{int(bounce_order)}"
+            families[key] = families.get(key, 0) + 1
+    counts["ghost_family_histogram"] = families
+
+    target_id = int(diagnostics.get("controlled_target_id", -1))
+    direct_mask = (
+        (radar_data["instance_id"] == target_id)
+        & (radar_data["source"] == b"direct")
+    )
+    speeds = np.abs(radar_data["vr_sc"][direct_mask]).astype(np.float64)
+    counts["direct_target_detection_count"] = int(np.count_nonzero(direct_mask))
+    counts["direct_target_speed_mean_mps"] = float(
+        np.mean(speeds) if speeds.size else 0.0
+    )
+    counts["direct_target_speed_max_mps"] = float(
+        np.max(speeds) if speeds.size else 0.0
+    )
+
+
+def _verification_block(counts):
+    """Render a copyable PASS/FAIL block for RGD-regime verification."""
+
+    target_type = counts.get("target_type", "?")
+    expected_class = _class_id(TARGET_SEMANTIC_TAGS.get(target_type, 14))
+    issues = []
+    lines = []
+
+    def check(label, ok, detail=""):
+        status = "PASS" if ok else "FAIL"
+        if not ok:
+            issues.append(label)
+        lines.append(f"  [{status}] {label}: {detail}")
+
+    lines.append("=" * 74)
+    lines.append("RGD REGIME COLLECTION VERIFICATION — COPY THIS BLOCK BACK")
+    lines.append("=" * 74)
+    lines.append(f"file: {counts.get('path', '')}")
+    lines.append(
+        f"target_type: {target_type} "
+        f"(tag {counts.get('target_semantic_tag', '?')}, "
+        f"expected RGD class {expected_class})"
+    )
+    lines.append(
+        f"fps: {counts.get('radar_fps', '?')}  "
+        f"cycle: {counts.get('radar_cycle_time_s', '?')}s  "
+        f"fov: {counts.get('radar_fov_deg', '?')} deg  "
+        f"profile: {counts.get('radar_profile', '?')}"
+    )
+    lines.append(
+        f"reflector: id={counts.get('controlled_reflector_id', '?')} "
+        f"tag={counts.get('controlled_reflector_tag', '?')} "
+        f"length={counts.get('controlled_reflector_length_m', '?')}m"
+    )
+    lines.append(
+        "validated_path_families: "
+        f"{counts.get('controlled_validated_path_families', '?')}"
+    )
+    lines.append(
+        f"points: {counts.get('points', 0)}  "
+        f"real: {counts.get('real', 0)}  "
+        f"ghost: {counts.get('ghost', 0)}  "
+        f"classes: {counts.get('label_class_histogram', {})}"
+    )
+    lines.append(
+        f"direct target: "
+        f"{counts.get('direct_target_detection_count', 0)} detections, "
+        "mean |vr|="
+        f"{counts.get('direct_target_speed_mean_mps', 0.0):.3f} m/s "
+        "(expected ~"
+        f"{counts.get('target_speed_mps_expected', 0.0)} m/s), "
+        "max |vr|="
+        f"{counts.get('direct_target_speed_max_mps', 0.0):.3f} m/s"
+    )
+    lines.append(f"ghost_families: {counts.get('ghost_family_histogram', {})}")
+    lines.append("-" * 74)
+    check(
+        "ego stationary",
+        float(counts.get("ego_speed_mps", float("inf"))) < 0.5,
+        f"{counts.get('ego_speed_mps', float('nan')):.3f} m/s",
+    )
+    check("radar fps = 10", int(counts.get("radar_fps", 0)) == 10)
+    check(
+        "radar fov = 140 deg",
+        abs(float(counts.get("radar_fov_deg", 0.0)) - 140.0) < 1.0e-6,
+        f"{counts.get('radar_fov_deg', 0.0)} deg",
+    )
+    check("ghost points > 0", int(counts.get("ghost", 0)) > 0)
+    check("real points > 0", int(counts.get("real", 0)) > 0)
+    check(
+        "expected class present",
+        expected_class in counts.get("label_class_histogram", {}),
+        f"class {expected_class} in "
+        f"{counts.get('label_class_histogram', {})}",
+    )
+    check(
+        "direct target Doppler alive",
+        float(counts.get("direct_target_speed_mean_mps", 0.0)) > 0.05,
+    )
+    expected_speed = float(counts.get("target_speed_mps_expected", 0.0))
+    measured = float(counts.get("direct_target_speed_mean_mps", 0.0))
+    if expected_speed > 0.0:
+        check(
+            "direct target speed plausible",
+            0.4 * expected_speed <= measured <= 2.5 * expected_speed,
+            f"{measured:.3f} vs {expected_speed:.3f} m/s",
+        )
+    check(
+        "controlled reflector used",
+        counts.get("controlled_reflector_id") not in (None, ""),
+        str(counts.get("controlled_reflector_id")),
+    )
+    lines.append("-" * 74)
+    if issues:
+        lines.append(
+            f"RESULT: {len(issues)} check(s) failed: {', '.join(issues)}"
+        )
+    else:
+        lines.append("RESULT: ALL CHECKS PASSED")
+    lines.append("=" * 74)
+    return "\n".join(lines)
+
+
 def main():
     args = parse_args()
     if (
@@ -988,7 +1230,7 @@ def main():
                 compression="gzip",
                 shuffle=True,
             )
-            handle.attrs["generator"] = "CARLA 0.9.16 geometry_multipath_v1"
+            handle.attrs["generator"] = "CARLA 0.9.16 rgd_regime_v1"
             handle.attrs["town"] = args.town
             handle.attrs["seed"] = args.seed + sequence_index * 1009
             handle.attrs["arguments"] = json.dumps(
@@ -1020,8 +1262,10 @@ def main():
             ),
             **diagnostics,
         }
+        _add_point_statistics(counts, radar_data, diagnostics)
         collection_summary.append(counts)
         print(json.dumps(counts, sort_keys=True))
+        print(_verification_block(counts))
     with (
         Path(args.output)
         / f"collection_{args.town.lower()}_{args.split}.json"

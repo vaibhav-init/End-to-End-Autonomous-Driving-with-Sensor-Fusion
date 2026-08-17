@@ -80,6 +80,7 @@ independent AEB safety function.
 | `gaussian_baseline_v1` | Independent fixed Gaussian error and independent misses; deliberately simple ablation |
 | `generic_lrr_v1` | Full temporal model, tracking, path gating, clutter, interference, ghosts, latency, and weather priors |
 | `geometry_multipath_v1` | Planar type-1/type-2 second- and type-2 third-order multipath plus the temporal sensor/tracker model |
+| `rgd_regime_v1` | Radar Ghost Dataset v1.1 sensor envelope (10 Hz, ±70°, 1.8° azimuth, 0.087 m/s Doppler) with geometry multipath |
 
 The complete real-data training, synthetic pretraining, deployment, and
 closed-loop protocol is in [GHOST_DETECTION.md](GHOST_DETECTION.md).
