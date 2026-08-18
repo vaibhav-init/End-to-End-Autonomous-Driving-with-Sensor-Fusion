@@ -22,6 +22,7 @@ amplitude, and point age. The controller still receives only `distance`,
 | 4 | `evaluate_radar_ghost_detector.py` | Evaluate held-out real sequences |
 | 5 | `collect_carla_radar_ghosts.py` | Run a controlled multipath smoke test |
 | 6 | `collect_carla_radar_dataset.py` | Collect diverse moving CARLA radar data |
+| 6b | `densify_radar_ghost_dataset.py` | Measure the RGD train stencil and densify CARLA point clouds |
 | 7 | `validate_radar_accuracy.py` | Validate the CARLA target-list sensor |
 | 8 | `collect_throttle_brake_data.py` | Recollect final controller data |
 | 9 | `collect_scenario_data.py` | Add staged controller-training episodes |
@@ -321,11 +322,58 @@ Direct road users are labeled real, deterministic reflected paths receive CMTO
 bounce labels, and static returns remain unlabeled context. Random synthetic
 clutter is noise and is outside the multipath supervision objective.
 
+### 6.4 Statistical densification (point-cardinality bridge)
+
+RGD v1.1 records ~800 raw detections per frame while the CARLA target list
+emits tens of points per frame; a PointNet trained on sparse clouds transfers
+poorly to dense real clouds. `densify_radar_ghost_dataset.py` closes that gap
+by synthesizing point clouds whose spread statistics match the **RGD train
+split** (the val/test splits are never read):
+
+```bash
+# 1. Measure the stencil from the prepared RGD train split only.
+python3 densify_radar_ghost_dataset.py stencil \
+  --input artifacts/ghost_real_official \
+  --output artifacts/rgd_stencil.json \
+  --split train \
+  --class-ids 1 2
+
+# 2. Densify the CARLA collection up to ~800 points/frame.
+python3 densify_radar_ghost_dataset.py densify \
+  --carla-input artifacts/carla_ghost_rgd \
+  --stencil artifacts/rgd_stencil.json \
+  --output artifacts/carla_ghost_rgd_densified \
+  --points-per-frame 800 \
+  --seed 42
+
+# 3. Prepare the densified H5 exactly like raw CARLA output.
+python3 prepare_radar_ghost_dataset.py \
+  --input artifacts/carla_ghost_rgd_densified \
+  --output artifacts/ghost_carla_densified_prepared \
+  --split-mode official
+```
+
+Each labeled CARLA point (pedestrian/cyclist) is replaced by N synthetic
+points sampled from a multivariate Gaussian built from the per-class stencil
+(spatial covariance, Doppler variance), inheriting the parent's real/ghost
+label. Amplitude is drawn from the class's RGD log-normal distribution.
+Physics is preserved: the parent's radial velocity stays the sampled mean,
+Doppler is clamped to ±44.3 m/s, and range/azimuth are recomputed from the
+sampled (x, y) inside the RGD envelope (0.15-153 m, ±70°). Background and
+non-stencil classes pass through unmodified. Inspect
+`densification_summary.json` and the manifest before training.
+
 ## Step 7: Synthetic Pretraining and Real Fine-Tuning
+
+Pretrain on the **densified** CARLA data (see 6.4). Training applies
+per-batch class weighting (`pos_weight = real_count/ghost_count` from each
+batch), so the CARLA ghost-heavy prior (~3:1) cannot distort the deployment
+false-positive rate; the batch weight is logged per epoch as
+`train_pos_weight`.
 
 ```bash
 python3 train_radar_ghost_detector.py \
-  --data artifacts/ghost_carla_prepared \
+  --data artifacts/ghost_carla_densified_prepared \
   --output artifacts/ghost_temporal_carla_pretrain \
   --model temporal_pointnet \
   --window-frames 5 \

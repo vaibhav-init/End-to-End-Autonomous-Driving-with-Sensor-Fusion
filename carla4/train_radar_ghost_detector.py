@@ -10,6 +10,7 @@ import time
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from radar.ghost_detection.dataset import (
@@ -100,15 +101,27 @@ def run_epoch(
     model,
     loader,
     device,
-    criterion=None,
+    static_pos_weight=1.0,
     optimizer=None,
     max_real_fpr=0.01,
 ):
+    """Run one epoch over a loader.
+
+    Training batches apply class weighting computed from that batch's own
+    real/ghost frequencies (``pos_weight = real_count / ghost_count``,
+    clipped to 0.1-20), so a ghost-heavy synthetic prior (CARLA is ~3:1
+    ghost:real) cannot carry into real-data fine-tuning or inflate the
+    deployment false-positive rate. Validation uses the dataset-level static
+    weight so the reported loss stays comparable across epochs.
+    """
+
     training = optimizer is not None
     model.train(training)
     metrics = BinaryHistogramMetrics()
     total_loss = 0.0
     labeled_count = 0
+    weight_sum = 0.0
+    weight_count = 0
     for batch in loader:
         features = batch["features"].to(device, non_blocking=True)
         point_mask = batch["point_mask"].to(device, non_blocking=True)
@@ -116,20 +129,34 @@ def run_epoch(
         label_mask = batch["label_mask"].to(device, non_blocking=True)
         if not torch.any(label_mask):
             continue
-        if training:
-            optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(training):
             logits = model(features, point_mask)
             selected_logits = logits[label_mask]
             selected_targets = targets[label_mask]
-            loss = criterion(selected_logits, selected_targets)
             if training:
+                # Class frequencies measured from this training batch only.
+                real_count = int((selected_targets == 0).sum().item())
+                ghost_count = int((selected_targets == 1).sum().item())
+                pos_weight = float(
+                    np.clip(real_count / max(ghost_count, 1), 0.1, 20.0)
+                )
+            else:
+                pos_weight = float(static_pos_weight)
+            loss = F.binary_cross_entropy_with_logits(
+                selected_logits,
+                selected_targets,
+                pos_weight=torch.tensor(pos_weight, device=device),
+            )
+            if training:
+                optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 optimizer.step()
         count = int(label_mask.sum().item())
         total_loss += float(loss.item()) * count
         labeled_count += count
+        weight_sum += pos_weight
+        weight_count += 1
         metrics.update(
             torch.sigmoid(selected_logits).detach().cpu().numpy(),
             selected_targets.detach().cpu().numpy(),
@@ -137,6 +164,7 @@ def run_epoch(
     result = metrics.compute(max_false_positive_rate=max_real_fpr)
     result["loss"] = total_loss / max(labeled_count, 1)
     result["labeled_count"] = labeled_count
+    result["mean_pos_weight"] = weight_sum / max(weight_count, 1)
     return result
 
 
@@ -203,10 +231,11 @@ def main():
         raise ValueError(
             f"Training split needs both classes; real={real_count}, ghost={ghost_count}"
         )
+    # Static dataset-level weight: used for the validation loss and as the
+    # default when a training batch is degenerate. During training each batch
+    # re-derives pos_weight from its own class frequencies instead (see
+    # run_epoch), so the prior follows the data actually seen.
     positive_weight = float(np.clip(real_count / ghost_count, 0.1, 20.0))
-    criterion = nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor(positive_weight, device=args.device)
-    )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.learning_rate,
@@ -229,7 +258,7 @@ def main():
             model,
             train_loader,
             args.device,
-            criterion=criterion,
+            static_pos_weight=positive_weight,
             optimizer=optimizer,
             max_real_fpr=args.max_real_fpr,
         )
@@ -238,7 +267,7 @@ def main():
                 model,
                 val_loader,
                 args.device,
-                criterion=criterion,
+                static_pos_weight=positive_weight,
                 max_real_fpr=args.max_real_fpr,
             )
         scheduler.step(val_metrics["auprc"])
@@ -252,6 +281,7 @@ def main():
         print(
             f"epoch {epoch:03d} "
             f"train_loss={train_metrics['loss']:.5f} "
+            f"train_pos_weight={train_metrics['mean_pos_weight']:.3f} "
             f"val_loss={val_metrics['loss']:.5f} "
             f"val_auprc={val_metrics['auprc']:.5f} "
             f"val_f1={val_metrics['best_f1']:.5f}"
@@ -283,7 +313,8 @@ def main():
     summary = {
         "best_checkpoint": str(best_path),
         "best_validation_auprc": best_auprc,
-        "positive_weight": positive_weight,
+        "static_positive_weight": positive_weight,
+        "batch_class_weighting": True,
         "elapsed_seconds": time.time() - started,
         "arguments": vars(args),
     }

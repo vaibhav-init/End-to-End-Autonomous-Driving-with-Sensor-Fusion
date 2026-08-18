@@ -9,6 +9,13 @@ pipeline; this file is the focused runbook for the RGD-regime collection step.
 collected with `ALL CHECKS PASSED`. See
 [Verified Run](#verified-run-3-all-checks-passed) below.
 
+**Motion profile (current):** the controlled target walks **radially** —
+toward and away from the stationary ego, parallel to the radar line of sight
+— at constant speed (triangular position wave), matching how RGD records its
+main object. Mean |radial velocity| therefore equals the configured walking
+speed (≈1.4 m/s for a pedestrian), not the ~0.82 m/s radial component the old
+tangential motion produced.
+
 ---
 
 ## 1. Why this exists: the RGD vs CARLA setup gap
@@ -93,9 +100,13 @@ semantic-LiDAR reflector segments); probabilistic ghosts are disabled.
 - Defaults now `--fps 10` and `--duration 38.5` (~385 frames, matching RGD).
 - The controlled target is placed by the production image-method solver
   (`_configure_controlled_target`) and **teleported kinematically each tick**
-  (physics off) along the reflector tangent, with the oscillation period
-  derived from the target's speed (`TARGET_SPEEDS_MPS`:
-  vehicle 3.0, pedestrian 1.4, cyclist 4.5 m/s).
+  (physics off) along the **radial direction** (toward and away from the
+  ego, parallel to the radar line of sight). A constant-speed triangular
+  position wave moves the target between the two validated radial endpoints;
+  the period is `4*amplitude/speed` so the walking speed (`TARGET_SPEEDS_MPS`:
+  vehicle 3.0, pedestrian 1.4, cyclist 4.5 m/s) projects fully onto the
+  radial-velocity axis. The multipath placement, reflector-tangent yaw, and
+  endpoint validation all remain from the production solver.
 - Walkers are spawned with retries over ~24 navigation locations plus a
   fallback next to the ego (single-location spawns are flaky).
 - Per-sequence **verification block** is printed (see
@@ -147,9 +158,12 @@ radar_config_signature: fdc02b5821512e28
 reflector: id=-4332483265467969687, tag=28 (GuardRail), length=7.43 m
 validated_path_families: [type1-order2, type2-order2]
 ```
-The 0.82 m/s mean is correct physics: the walker moves **along the reflector
-tangent**, so the radar only sees the radial component of the 1.4 m/s walking
-speed; the 1.48 m/s max confirms full walking speed is present.
+The 0.82 m/s mean was correct physics **for the old tangential motion**: the
+walker moved along the reflector tangent, so the radar only saw the radial
+component of the 1.4 m/s walking speed. Since the radial-motion fix, the
+walker moves along the radar line of sight, so the mean |vr| should sit close
+to the configured 1.4 m/s (the `direct target speed plausible` check band is
+0.1x-1.6x of the configured speed).
 
 ---
 
@@ -166,7 +180,7 @@ After each sequence the script prints
 | `ghost points > 0` / `real points > 0` | both classes present |
 | `expected class present` | RGD class 1 (ped) / 5 (cyclist) / 3 (vehicle) appears in labels |
 | `direct target Doppler alive` | mean \|vr\| > 0.05 m/s |
-| `direct target speed plausible` | 0.1× ≤ mean \|vr\| ≤ 1.6× of configured speed (radial-component band) |
+| `direct target speed plausible` | 0.1× ≤ mean \|vr\| ≤ 1.6× of configured speed (motion is radial, so mean \|vr\| ≈ walking speed) |
 | `controlled reflector used` | a reflector id was chosen |
 
 If any check FAILs, copy the block back to the session and debug before
@@ -223,17 +237,37 @@ python3 collect_carla_radar_ghosts.py \
   sidecar.
 - Sanity-check a few verification blocks during the run.
 
-**5.3 Prepare H5 for training:**
+**5.3 Densify the CARLA point clouds (RGD-train stencil):**
+```bash
+# Measure the stencil from the prepared real RGD train split ONLY (never
+# val/test). If you only have the raw RGD H5 tree, point --input at it
+# instead; the script auto-detects and reads files under train/.
+python3 densify_radar_ghost_dataset.py stencil \
+  --input artifacts/ghost_real_official \
+  --output artifacts/rgd_stencil.json \
+  --split train \
+  --class-ids 1 2
+
+# Synthesize ~800 points/frame around labeled pedestrian/cyclist points.
+python3 densify_radar_ghost_dataset.py densify \
+  --carla-input artifacts/carla_ghost_rgd \
+  --stencil artifacts/rgd_stencil.json \
+  --output artifacts/carla_ghost_rgd_densified \
+  --points-per-frame 800 \
+  --seed 42
+```
+
+**5.4 Prepare H5 for training:**
 ```bash
 python3 prepare_radar_ghost_dataset.py \
-  --input artifacts/carla_ghost_rgd \
+  --input artifacts/carla_ghost_rgd_densified \
   --output artifacts/ghost_carla_prepared \
   --split-mode official
 ```
 Open `artifacts/ghost_carla_prepared/manifest.json` and confirm each split has
 both `real_points` and `ghost_points`.
 
-**5.4 Train the temporal PointNet on CARLA (needs torch/GPU):**
+**5.5 Train the temporal PointNet on CARLA (needs torch/GPU):**
 ```bash
 python3 train_radar_ghost_detector.py \
   --data artifacts/ghost_carla_prepared \
@@ -244,7 +278,7 @@ python3 train_radar_ghost_detector.py \
   --epochs 50 --batch-size 16
 ```
 
-**5.5 Rest of the pipeline** (from `GHOST_DETECTION.md` steps 7–9):
+**5.6 Rest of the pipeline** (from `GHOST_DETECTION.md` steps 7–9):
 evaluate zero-shot on real RGD test → fine-tune on RGD → evaluate → deploy
 `best_detector.pt` only if it beats real-only and synthetic-only baselines →
 recollect/retrain controller data with the filter → closed-loop scenario runs.
@@ -264,9 +298,11 @@ recollect/retrain controller data with the filter → closed-loop scenario runs.
   physics-off actor reports no velocity. This is fixed by the
   transform-derivative fallback in `front_radar.py`; do not "fix" it by
   re-enabling physics.
-- **Low mean |vr| is expected:** tangential motion → only the radial component
-  is measured (0.82 vs 1.4 m/s above). Use the max, not the mean, to confirm
-  the full speed.
+- **Mean |vr| should now equal the walking speed:** the target moves radially
+  (toward/away from the ego), so the full speed projects onto the radial
+  axis. Expect mean |vr| ≈ 1.4 m/s for a 1.4 m/s pedestrian; if you again see
+  ~0.82, the plan is still moving along `tangent_world` — check that
+  `_update_controlled_target` uses `motion_dir_world`.
 - **Ghost Doppler is inherited from the parent target** — a dead parent Doppler
   means dead ghost Doppler, so always check the direct-target checks first.
 - **`collect_carla_radar_dataset.py` is a different regime** (moving ego,
@@ -283,7 +319,9 @@ recollect/retrain controller data with the filter → closed-loop scenario runs.
 2. Confirm the code state: `rgd_regime_v1` profile exists and loads
    (`python3 -c "from radar import load_realistic_radar_config as l; print(l('rgd_regime_v1'))"`),
    `collect_carla_radar_ghosts.py` has `--target-type`, `front_radar.py` has
-   `_estimate_kinematic_velocity`.
+   `_estimate_kinematic_velocity`, and the controlled target moves **radially**
+   (`_update_controlled_target` uses `plan["motion_dir_world"]` and the
+   `_triangular_offset_speed` profile).
 3. Confirm artifacts: `artifacts/carla_ghost_rgd_v3/train/*.h5` (the verified
    single sequence) exists; decide whether to keep or rebuild it as part of
    the full train set.

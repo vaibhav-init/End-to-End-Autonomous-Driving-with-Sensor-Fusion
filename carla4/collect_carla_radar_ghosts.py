@@ -588,6 +588,15 @@ def _controlled_target_candidates(
                     config,
                 )
                 robust_count += int(bool(nearby_paths))
+            # The main object walks toward and away from the stationary ego
+            # (radial motion, parallel to the radar line of sight), so the
+            # motion robustness probe must stress the radial direction, not
+            # the reflector tangent. Radial motion is what changes the
+            # range-Doppler geometry the ghost inherits.
+            radial_unit = target_xy / max(
+                float(np.linalg.norm(target_xy)),
+                1.0e-9,
+            )
             motion_amplitude = 0.75
             for candidate_amplitude in (1.5, 2.5, 4.0):
                 endpoint_paths = [
@@ -595,7 +604,8 @@ def _controlled_target_candidates(
                         [
                             _probe_target(
                                 actor_id,
-                                target_xy + sign * candidate_amplitude * tangent,
+                                target_xy
+                                + sign * candidate_amplitude * radial_unit,
                                 semantic_tag,
                             )
                         ],
@@ -699,6 +709,20 @@ def _configure_controlled_target(
         else float(sensor_transform.location.z) - 0.65
     )
 
+    # Motion direction: the unit vector from the ego sensor toward the
+    # target in sensor coordinates, rotated into world coordinates. The
+    # target walks along this line (toward and away from the ego), so the
+    # whole walking speed projects onto the radial-velocity axis and the
+    # measured Doppler equals the configured walking speed.
+    target_range = max(float(np.linalg.norm(target_xy)), 1.0e-9)
+    radial_sensor = np.asarray(target_xy, dtype=np.float64) / target_range
+    motion_dir_world = np.array(
+        (
+            cosine * radial_sensor[0] - sine * radial_sensor[1],
+            sine * radial_sensor[0] + cosine * radial_sensor[1],
+        ),
+        dtype=np.float64,
+    )
     tangent = np.asarray(reflector.tangent_xy, dtype=np.float64)
     tangent_world = np.array(
         (
@@ -722,16 +746,19 @@ def _configure_controlled_target(
         "actor": target_actor,
         "base_world_xy": np.array((world_x, world_y), dtype=np.float64),
         "world_z": world_z,
+        "motion_dir_world": motion_dir_world,
         "tangent_world": tangent_world,
         "yaw": target_yaw,
         "semantic_tag": int(semantic_tag),
         "target_type": str(target_type),
         "target_speed_mps": float(target_speed_mps),
         "amplitude_m": float(candidate["motion_amplitude_m"]),
+        # Triangular (constant-speed) profile: with period = 4*amplitude/speed
+        # the target walks at exactly the configured speed between the two
+        # validated radial endpoints, so mean |radial velocity| ≈ speed.
         "period_s": max(
             4.0,
-            2.0
-            * math.pi
+            4.0
             * float(candidate["motion_amplitude_m"])
             / max(float(target_speed_mps), 0.5),
         ),
@@ -746,14 +773,41 @@ def _configure_controlled_target(
     }
 
 
+def _triangular_offset_speed(elapsed_s, amplitude_m, period_s):
+    """Constant-speed back-and-forth motion between -/+ amplitude.
+
+    A triangular position wave keeps |speed| = 4*amplitude/period at all
+    times except the instantaneous reversal, matching how the Radar Ghost
+    Dataset records its main object: a pedestrian/cyclist walking away from
+    and back toward the stationary ego at roughly constant speed. With the
+    period set to 4*amplitude/speed, the mean radial Doppler equals the
+    configured walking speed.
+    """
+
+    half_period = float(period_s) / 2.0
+    phase = float(elapsed_s) % float(period_s)
+    speed = 4.0 * float(amplitude_m) / max(float(period_s), 1.0e-9)
+    if phase < half_period:
+        offset = -float(amplitude_m) + speed * phase
+    else:
+        offset = float(amplitude_m) - speed * (phase - half_period)
+        speed = -speed
+    return offset, speed
+
+
 def _update_controlled_target(plan, step, fps):
     carla = _carla_module()
-    omega = 2.0 * math.pi / float(plan["period_s"])
     elapsed = float(step) / float(fps)
-    offset = float(plan["amplitude_m"]) * math.sin(omega * elapsed)
-    speed = float(plan["amplitude_m"]) * omega * math.cos(omega * elapsed)
-    location_xy = plan["base_world_xy"] + offset * plan["tangent_world"]
-    velocity_xy = speed * plan["tangent_world"]
+    offset, speed = _triangular_offset_speed(
+        elapsed,
+        float(plan["amplitude_m"]),
+        float(plan["period_s"]),
+    )
+    # Radial motion: the target walks toward and away from the ego along the
+    # radar line of sight, so the full walking speed projects onto the
+    # radial-velocity axis and the measured Doppler is v_r = v * cos(0) = v.
+    location_xy = plan["base_world_xy"] + offset * plan["motion_dir_world"]
+    velocity_xy = speed * plan["motion_dir_world"]
     # All target types are driven kinematically: the exact transform keeps
     # the multipath geometry valid, and the target velocity is reported to
     # the radar adapter (directly by CARLA for vehicles, or through the
@@ -1226,11 +1280,11 @@ def _verification_block(counts):
     measured = float(counts.get("direct_target_speed_mean_mps", 0.0))
     measured_max = float(counts.get("direct_target_speed_max_mps", 0.0))
     if expected_speed > 0.0:
-        # Motion runs along the reflector tangent, so the radar only sees the
-        # radial component of the walking speed; averaged over a full
-        # oscillation the mean |radial velocity| is a fraction of the true
-        # speed. The band just proves the Doppler dimension is alive and
-        # consistent with the configured speed, not equal to it.
+        # Motion runs along the radar line of sight (radial), so the full
+        # walking speed projects onto the radial-velocity axis. The
+        # triangular profile keeps |speed| at the configured value except at
+        # the instantaneous reversal, so the mean |vr| should sit close to
+        # the configured walking speed.
         check(
             "direct target speed plausible",
             0.1 * expected_speed <= measured <= 1.6 * expected_speed,
