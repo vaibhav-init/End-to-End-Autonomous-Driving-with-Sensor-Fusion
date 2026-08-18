@@ -326,10 +326,16 @@ def _iter_prepared_sequences(input_root, split):
 
 
 def _iter_raw_h5_sequences(input_root, split):
-    pattern = re.compile(rf"(?:^|[/_]){split}(?:[/_.]|$)", re.IGNORECASE)
-    paths = sorted(input_root.rglob("*.h5")) + sorted(input_root.rglob("*.hdf5"))
+    # Check the split name as an actual directory component in the path,
+    # which is far more robust than regex-matching the string form.
+    split_lower = split.lower()
+    paths = sorted(
+        set(
+            list(input_root.rglob("*.h5")) + list(input_root.rglob("*.hdf5"))
+        )
+    )
     for path in paths:
-        if not pattern.search(str(path)):
+        if not any(part.lower() == split_lower for part in path.parts):
             continue
         with h5py.File(path, "r") as handle:
             radar = np.copy(handle["radar"])
