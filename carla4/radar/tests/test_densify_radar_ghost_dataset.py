@@ -54,6 +54,7 @@ def _make_prepared_input(root, split_map):
     sequences = []
     for index, (path_text, split) in enumerate(split_map.items()):
         npz_path = root / path_text
+        npz_path.parent.mkdir(parents=True, exist_ok=True)
         record = _prepared_sequence([(1, 0)] * 5 + [(1, 1)] * 3)
         # Position class-1 points with a known spread around (10, 2).
         count = len(record["class_id"])
