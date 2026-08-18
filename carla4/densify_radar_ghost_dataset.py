@@ -213,10 +213,13 @@ def _sample_position_xy(sequence, class_id):
     mask = class_mask == class_id
     if not np.any(mask):
         return None
-    mask = class_mask == class_id
-    if not np.any(mask):
-        return None
-    if "x_cc" in sequence and len(sequence["x_cc"]):
+    # Structured numpy arrays use dtype.names; dicts use ``in`` directly.
+    names = getattr(getattr(sequence, "dtype", None), "names", None)
+    has_x = (
+        (isinstance(sequence, dict) and "x_cc" in sequence)
+        or (names is not None and "x_cc" in names)
+    )
+    if has_x:
         x = np.asarray(sequence["x_cc"], dtype=np.float64)[mask]
         y = np.asarray(sequence["y_cc"], dtype=np.float64)[mask]
     else:
