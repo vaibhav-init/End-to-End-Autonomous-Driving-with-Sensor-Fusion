@@ -351,9 +351,30 @@ def run_stencil(args):
         sequences = list(_iter_raw_h5_sequences(input_root, args.split))
         source = "raw h5"
     if not sequences:
+        details = []
+        manifest_path = input_root / "manifest.json"
+        if manifest_path.is_file():
+            try:
+                with manifest_path.open("r", encoding="utf-8") as handle:
+                    manifest = json.load(handle)
+                split_counts = {}
+                for record in manifest.get("sequences", ()):
+                    key = record.get("split")
+                    split_counts[key] = split_counts.get(key, 0) + 1
+                details.append(f"manifest.json present, sequences per split={split_counts}")
+            except Exception as exc:  # pragma: no cover
+                details.append(f"manifest.json unreadable: {exc}")
+        else:
+            details.append("no manifest.json found")
+        h5_count = len(list(input_root.rglob("*.h5"))) + len(
+            list(input_root.rglob("*.hdf5"))
+        )
+        details.append(f"h5 files found: {h5_count}")
         raise FileNotFoundError(
-            f"No {args.split} RGD sequences found under {input_root} "
-            "(prepared manifest or train/val/test H5 layout)"
+            f"No {args.split} RGD sequences found under {input_root}; "
+            + "; ".join(details)
+            + ". Point --input at the prepared dataset dir (manifest.json) or "
+            "the raw original/ H5 tree (train/val/test subdirectories)."
         )
     class_stats = _measure_stencil(sequences, args.class_ids, args.radius_m)
     stencil = {
