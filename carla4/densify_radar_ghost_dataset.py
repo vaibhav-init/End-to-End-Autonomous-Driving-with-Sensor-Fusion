@@ -312,17 +312,27 @@ def _measure_stencil(sequences, class_ids, radius_m):
 
 
 def _iter_prepared_sequences(input_root, split):
+    """Read prepared NPZ sequences matching *split* from a manifest.
+
+    Returns a **list** (or ``None`` when there is no manifest), not a
+    generator.  Calling a generator function always returns a truthy
+    generator object — even when ``return None`` appears inside — which
+    would silently steal the fallback to the raw-H5 path.
+    """
+
     manifest_path = input_root / "manifest.json"
     if not manifest_path.is_file():
         return None
     with manifest_path.open("r", encoding="utf-8") as handle:
         manifest = json.load(handle)
+    sequences = []
     for record in manifest.get("sequences", ()):
         if record.get("split") != split:
             continue
         path = input_root / record["path"]
         with np.load(path, allow_pickle=False) as archive:
-            yield {name: np.copy(archive[name]) for name in archive.files}
+            sequences.append({name: np.copy(archive[name]) for name in archive.files})
+    return sequences or None
 
 
 def _iter_raw_h5_sequences(input_root, split):
