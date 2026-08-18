@@ -83,7 +83,10 @@ independent AEB safety function.
 | `rgd_regime_v1` | Radar Ghost Dataset v1.1 sensor envelope (10 Hz, ±70°, 1.8° azimuth, 0.087 m/s Doppler) with geometry multipath |
 
 The complete real-data training, synthetic pretraining, deployment, and
-closed-loop protocol is in [GHOST_DETECTION.md](GHOST_DETECTION.md).
+closed-loop protocol is in [GHOST_DETECTION.md](GHOST_DETECTION.md). The
+Radar Ghost Dataset–matching CARLA collection (stationary ego, pedestrian/
+cyclist targets, 10 Hz, ±70°) is documented with verified outputs and a
+restart checklist in [RGD_REGIME_COLLECTION.md](RGD_REGIME_COLLECTION.md).
 
 The default `generic_lrr_v1` envelope follows the public RadarScenes setup
 where applicable: 100 m range, approximately ±60° field of view, 0.15 m range

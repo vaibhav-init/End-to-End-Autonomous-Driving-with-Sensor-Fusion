@@ -431,6 +431,7 @@ class CShenronFrontRadar:
         self._capture_debug = bool(capture_debug)
         self._last_error = None
         self._reported_error = False
+        self._kinematic_state = {}
         self.config = replace(
             config or CShenronConfig(),
             max_range_m=float(range_m),
@@ -499,7 +500,50 @@ class CShenronFrontRadar:
     def _vector_components(vector):
         return np.array((vector.x, vector.y, vector.z), dtype=np.float64)
 
-    def _target_closing_speed(self, target, ego_velocity=None, ego_yaw_rad=None):
+    def _estimate_kinematic_velocity(self, actor, timestamp_s=None):
+        """Derive true motion for physics-disabled kinematic actors.
+
+        Teleported actors (e.g., a collector driving a walker by setting its
+        transform each tick) report zero velocity from ``get_velocity`` even
+        though they move. Falling back to the transform derivative supplies
+        the latent truth the radar model needs without enabling the flaky
+        physics path.
+        """
+
+        location = actor.get_location()
+        state = (
+            float(location.x),
+            float(location.y),
+            float(location.z),
+            float(timestamp_s) if timestamp_s is not None else 0.0,
+        )
+        actor_id = int(actor.id)
+        previous = self._kinematic_state.get(actor_id)
+        self._kinematic_state[actor_id] = state
+        if len(self._kinematic_state) > 2048:
+            self._kinematic_state.clear()
+        if previous is None or timestamp_s is None:
+            return np.zeros(3, dtype=np.float64)
+        elapsed = state[3] - previous[3]
+        if not 0.0 < elapsed <= 1.0:
+            return np.zeros(3, dtype=np.float64)
+        delta = np.array(
+            (
+                state[0] - previous[0],
+                state[1] - previous[1],
+                state[2] - previous[2],
+            ),
+            dtype=np.float64,
+        )
+        return delta / elapsed
+
+    def _target_closing_speed(
+        self,
+        target,
+        ego_velocity=None,
+        ego_yaw_rad=None,
+        timestamp_s=None,
+    ):
         if ego_velocity is None:
             ego_velocity = self._vector_components(self.vehicle.get_velocity())
         obstacle_velocity = np.zeros(3, dtype=np.float64)
@@ -535,6 +579,14 @@ class CShenronFrontRadar:
                 obstacle_velocity = self._vector_components(actor.get_velocity())
             except RuntimeError:
                 actor = None
+            if (
+                actor is not None
+                and float(np.linalg.norm(obstacle_velocity)) < 1.0e-3
+            ):
+                obstacle_velocity = self._estimate_kinematic_velocity(
+                    actor,
+                    timestamp_s,
+                )
 
         radial_relative_velocity = float(
             np.dot(obstacle_velocity - ego_velocity, direction)
@@ -651,6 +703,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
         self._timestamp = None
         self._last_error = None
         self._reported_error = False
+        self._kinematic_state = {}
         self._ideal_target_count = 0
         self._reflector_count = 0
         self._state = _empty_state(range_m)
@@ -793,6 +846,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
                 self.vehicle.get_transform().rotation.yaw
             )
             path_curvature_per_m = self._update_path_curvature(ego_velocity)
+            timestamp = getattr(measurement, "timestamp", None)
             ideal_targets = []
             for target in targets:
                 ideal_targets.append(
@@ -808,6 +862,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
                             target,
                             ego_velocity=ego_velocity,
                             ego_yaw_rad=ego_yaw_rad,
+                            timestamp_s=timestamp,
                         ),
                         snr_db=target.snr_db,
                         point_count=target.point_count,
@@ -843,7 +898,6 @@ class RealisticFrontRadar(CShenronFrontRadar):
                 )
                 for path in multipath_paths
             ]
-            timestamp = getattr(measurement, "timestamp", None)
             selected = self.model.step(
                 ideal_targets,
                 timestamp_s=timestamp,

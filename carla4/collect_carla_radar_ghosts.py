@@ -6,6 +6,8 @@ import json
 import math
 from pathlib import Path
 import random
+import subprocess
+import sys
 import time
 import uuid
 
@@ -103,6 +105,22 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--radar-config", help="optional geometry-profile overrides")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="skip sequences that already have an H5 and summary sidecar",
+    )
+    parser.add_argument(
+        "--sequence-retries",
+        type=int,
+        default=1,
+        help="retries after a sequence worker exits or crashes",
+    )
+    parser.add_argument(
+        "--worker-index",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
@@ -314,17 +332,41 @@ def _spawn_vehicles(
         walker_blueprints = list(
             world.get_blueprint_library().filter("walker.pedestrian.*")
         )
-        location = world.get_random_location_from_navigation()
-        if not walker_blueprints or location is None:
-            raise RuntimeError(
-                "Town has no walker blueprints or navigation locations"
-            )
-        blueprint = rng.choice(walker_blueprints)
-        if blueprint.has_attribute("is_invincible"):
-            blueprint.set_attribute("is_invincible", "false")
-        controlled = world.try_spawn_actor(blueprint, carla.Transform(location))
+        if not walker_blueprints:
+            raise RuntimeError("Town has no walker blueprints")
+        rng.shuffle(walker_blueprints)
+        # try_spawn_actor at a single navigation point is unreliable, so try
+        # many candidate spots. The actor is immediately repositioned onto the
+        # validated multipath path, so the spawn location only needs to be
+        # collision-free.
+        locations = []
+        for _ in range(24):
+            location = world.get_random_location_from_navigation()
+            if location is not None:
+                locations.append(location)
+        locations.append(
+            ego.get_transform().location
+            + carla.Location(x=2.0, y=2.0, z=1.0)
+        )
+        controlled = None
+        for blueprint in walker_blueprints:
+            if blueprint.has_attribute("is_invincible"):
+                blueprint.set_attribute("is_invincible", "false")
+            for location in locations:
+                controlled = world.try_spawn_actor(
+                    blueprint,
+                    carla.Transform(location),
+                )
+                if controlled is not None:
+                    break
+            if controlled is not None:
+                break
         if controlled is None:
             raise RuntimeError("Unable to spawn the pedestrian radar target")
+        # Physics is disabled so kinematic teleports keep the walker exactly
+        # on the validated multipath path. CARLA reports zero velocity for
+        # such actors; the radar adapter falls back to the transform
+        # derivative, so pedestrian Doppler is still correct.
         controlled.set_simulate_physics(False)
         actor_ids.append(controlled.id)
     else:
@@ -596,6 +638,7 @@ def _configure_controlled_target(
     target_actor,
     semantic_tag=14,
     target_speed_mps=3.0,
+    target_type="vehicle",
 ):
     """Put a CARLA actor into geometry known to produce physical paths."""
 
@@ -682,6 +725,7 @@ def _configure_controlled_target(
         "tangent_world": tangent_world,
         "yaw": target_yaw,
         "semantic_tag": int(semantic_tag),
+        "target_type": str(target_type),
         "target_speed_mps": float(target_speed_mps),
         "amplitude_m": float(candidate["motion_amplitude_m"]),
         "period_s": max(
@@ -710,6 +754,10 @@ def _update_controlled_target(plan, step, fps):
     speed = float(plan["amplitude_m"]) * omega * math.cos(omega * elapsed)
     location_xy = plan["base_world_xy"] + offset * plan["tangent_world"]
     velocity_xy = speed * plan["tangent_world"]
+    # All target types are driven kinematically: the exact transform keeps
+    # the multipath geometry valid, and the target velocity is reported to
+    # the radar adapter (directly by CARLA for vehicles, or through the
+    # transform-derivative fallback for walkers).
     plan["actor"].set_transform(
         carla.Transform(
             carla.Location(
@@ -862,6 +910,7 @@ def collect_sequence(client, args, sequence_index):
             controlled_target,
             semantic_tag,
             target_speed_mps,
+            args.target_type,
         )
         _update_spectator_camera(
             spectator,
@@ -1175,11 +1224,18 @@ def _verification_block(counts):
     )
     expected_speed = float(counts.get("target_speed_mps_expected", 0.0))
     measured = float(counts.get("direct_target_speed_mean_mps", 0.0))
+    measured_max = float(counts.get("direct_target_speed_max_mps", 0.0))
     if expected_speed > 0.0:
+        # Motion runs along the reflector tangent, so the radar only sees the
+        # radial component of the walking speed; averaged over a full
+        # oscillation the mean |radial velocity| is a fraction of the true
+        # speed. The band just proves the Doppler dimension is alive and
+        # consistent with the configured speed, not equal to it.
         check(
             "direct target speed plausible",
-            0.4 * expected_speed <= measured <= 2.5 * expected_speed,
-            f"{measured:.3f} vs {expected_speed:.3f} m/s",
+            0.1 * expected_speed <= measured <= 1.6 * expected_speed,
+            f"mean |vr|={measured:.3f} vs {expected_speed:.3f} m/s "
+            f"(max {measured_max:.3f})",
         )
     check(
         "controlled reflector used",
@@ -1197,6 +1253,167 @@ def _verification_block(counts):
     return "\n".join(lines)
 
 
+def _sequence_path(args, sequence_index):
+    return (
+        Path(args.output)
+        / args.split
+        / (
+            f"scenario-{args.town.lower()}-synthetic-{sequence_index:03d}_sequence-01_"
+            f"car_{args.split}.h5"
+        )
+    )
+
+
+def _write_sequence(path, radar_data, diagnostics, args, sequence_index):
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset(
+            "radar",
+            data=radar_data,
+            compression="gzip",
+            shuffle=True,
+        )
+        handle.attrs["generator"] = "CARLA 0.9.16 rgd_regime_v1"
+        handle.attrs["town"] = args.town
+        handle.attrs["seed"] = args.seed + sequence_index * 1009
+        handle.attrs["arguments"] = json.dumps(vars(args), sort_keys=True)
+        handle.attrs["radar_config_signature"] = diagnostics.get(
+            "radar_config_signature",
+            "",
+        )
+        controlled_metadata = {
+            key: value
+            for key, value in diagnostics.items()
+            if key.startswith("controlled_")
+        }
+        handle.attrs["controlled_target"] = json.dumps(
+            controlled_metadata,
+            sort_keys=True,
+        )
+
+
+def _sequence_counts(path, radar_data, diagnostics, args):
+    counts = {
+        "path": str(path),
+        "points": int(len(radar_data)),
+        "real": int(np.count_nonzero(radar_data["label_id"] % 10 == 1)),
+        "ghost": int(
+            np.count_nonzero(
+                (radar_data["label_id"] > 0)
+                & (radar_data["label_id"] % 10 != 1)
+            )
+        ),
+        **diagnostics,
+    }
+    _add_point_statistics(counts, radar_data, diagnostics)
+    return counts
+
+
+def _run_sequence_worker(args, sequence_index):
+    """Collect one sequence in a fresh process.
+
+    A fresh process per sequence prevents native CARLA state from
+    accumulating across world reloads (which segfaults after ~7 sequences
+    when running everything in one process).
+    """
+
+    carla = _carla_module()
+    client = carla.Client(args.host, args.port)
+    client.set_timeout(30.0)
+    path = _sequence_path(args, sequence_index)
+    summary_path = path.with_suffix(".summary.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Collecting sequence {sequence_index + 1}/{args.sequences}")
+    radar_data, diagnostics = collect_sequence(client, args, sequence_index)
+    _write_sequence(path, radar_data, diagnostics, args, sequence_index)
+    counts = _sequence_counts(path, radar_data, diagnostics, args)
+    with summary_path.open("w", encoding="utf-8") as handle:
+        json.dump(counts, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    print(json.dumps(counts, sort_keys=True))
+    print(_verification_block(counts))
+    return counts
+
+
+def _run_supervisor(args):
+    """Run each sequence in its own worker subprocess, with resume/retry."""
+
+    output = Path(args.output) / args.split
+    output.mkdir(parents=True, exist_ok=True)
+    worker_arguments = list(sys.argv[1:])
+    summaries = []
+    failures = []
+    completed_indices = set()
+    for sequence_index in range(args.sequences):
+        path = _sequence_path(args, sequence_index)
+        summary_path = path.with_suffix(".summary.json")
+        if (
+            args.resume
+            and path.is_file()
+            and summary_path.is_file()
+        ):
+            print(
+                f"Skipping completed sequence {sequence_index + 1}/"
+                f"{args.sequences}: {summary_path}"
+            )
+            completed_indices.add(sequence_index)
+            continue
+
+        return_code = None
+        for attempt in range(args.sequence_retries + 1):
+            if attempt:
+                print(
+                    f"Retrying sequence {sequence_index + 1}/"
+                    f"{args.sequences} after worker exit {return_code}"
+                )
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                *worker_arguments,
+                "--worker-index",
+                str(sequence_index),
+            ]
+            result = subprocess.run(command)
+            return_code = int(result.returncode)
+            if return_code == 0 and summary_path.is_file():
+                completed_indices.add(sequence_index)
+                break
+        if return_code != 0 or not summary_path.is_file():
+            failures.append(
+                {
+                    "sequence_index": sequence_index,
+                    "town": args.town,
+                    "worker_return_code": return_code,
+                }
+            )
+
+    for sequence_index in range(args.sequences):
+        if sequence_index not in completed_indices:
+            continue
+        summary_path = _sequence_path(args, sequence_index).with_suffix(
+            ".summary.json"
+        )
+        with summary_path.open("r", encoding="utf-8") as handle:
+            summaries.append(json.load(handle))
+    summary_path = Path(args.output) / f"collection_{args.town.lower()}_{args.split}.json"
+    with summary_path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {"sequences": summaries, "failed_sequences": failures},
+            handle,
+            indent=2,
+            sort_keys=True,
+        )
+        handle.write("\n")
+    print(
+        f"Ready: {len(summaries)} sequences, {len(failures)} failures, "
+        f"summary={summary_path}"
+    )
+    if failures:
+        raise RuntimeError(
+            "Some CARLA sequence workers failed; rerun the same command with "
+            "--resume after checking that the CARLA server is alive"
+        )
+
+
 def main():
     args = parse_args()
     if (
@@ -1205,76 +1422,18 @@ def main():
         or args.fps < 1
         or args.radar_timeout <= 0.0
         or args.lead_distance <= 0.0
+        or args.sequence_retries < 0
     ):
         raise ValueError(
-            "sequences, duration, fps, radar-timeout, and lead-distance "
-            "must be positive"
+            "sequences, duration, fps, radar-timeout, lead-distance, and "
+            "sequence-retries must be valid"
         )
-    carla = _carla_module()
-    client = carla.Client(args.host, args.port)
-    client.set_timeout(30.0)
-    output = Path(args.output) / args.split
-    output.mkdir(parents=True, exist_ok=True)
-    collection_summary = []
-    for sequence_index in range(args.sequences):
-        print(f"Collecting sequence {sequence_index + 1}/{args.sequences}")
-        radar_data, diagnostics = collect_sequence(client, args, sequence_index)
-        path = output / (
-            f"scenario-{args.town.lower()}-synthetic-{sequence_index:03d}_sequence-01_"
-            f"car_{args.split}.h5"
-        )
-        with h5py.File(path, "w") as handle:
-            handle.create_dataset(
-                "radar",
-                data=radar_data,
-                compression="gzip",
-                shuffle=True,
-            )
-            handle.attrs["generator"] = "CARLA 0.9.16 rgd_regime_v1"
-            handle.attrs["town"] = args.town
-            handle.attrs["seed"] = args.seed + sequence_index * 1009
-            handle.attrs["arguments"] = json.dumps(
-                vars(args),
-                sort_keys=True,
-            )
-            handle.attrs["radar_config_signature"] = diagnostics.get(
-                "radar_config_signature",
-                "",
-            )
-            controlled_metadata = {
-                key: value
-                for key, value in diagnostics.items()
-                if key.startswith("controlled_")
-            }
-            handle.attrs["controlled_target"] = json.dumps(
-                controlled_metadata,
-                sort_keys=True,
-            )
-        counts = {
-            "path": str(path),
-            "points": int(len(radar_data)),
-            "real": int(np.count_nonzero(radar_data["label_id"] % 10 == 1)),
-            "ghost": int(
-                np.count_nonzero(
-                    (radar_data["label_id"] > 0)
-                    & (radar_data["label_id"] % 10 != 1)
-                )
-            ),
-            **diagnostics,
-        }
-        _add_point_statistics(counts, radar_data, diagnostics)
-        collection_summary.append(counts)
-        print(json.dumps(counts, sort_keys=True))
-        print(_verification_block(counts))
-    with (
-        Path(args.output)
-        / f"collection_{args.town.lower()}_{args.split}.json"
-    ).open(
-        "w",
-        encoding="utf-8",
-    ) as handle:
-        json.dump(collection_summary, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    if args.worker_index is None:
+        _run_supervisor(args)
+        return
+    if not 0 <= args.worker_index < args.sequences:
+        raise ValueError("worker-index is outside the requested sequence range")
+    _run_sequence_worker(args, args.worker_index)
 
 
 if __name__ == "__main__":
