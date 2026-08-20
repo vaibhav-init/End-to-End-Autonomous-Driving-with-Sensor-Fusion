@@ -212,6 +212,98 @@ produces dead pedestrian Doppler and no crash recovery.
 
 ---
 
+## 4.5 Zero-Shot Evaluation Results (CARLA pretrained → real RGD test)
+
+**Date:** August 18, 2026
+**Checkpoint:** `artifacts/ghost_temporal_carla_pretrain/best_detector.pt`
+**Data:** `artifacts/ghost_real_official` (111 sequences, official split)
+**Training:** CARLA densified data, 50 epochs, temporal_pointnet, lr=1e-3
+**Training time:** ~2 hours on GPU
+
+### Overall Metrics
+
+| Metric | Value |
+|---|---|
+| AUPRC | 0.159 |
+| AUROC | 0.606 |
+| Best F1 | 0.254 |
+| Best F1 threshold | 0.486 |
+| Operating threshold (≤1% real FPR) | 0.901 |
+| Ghost recall (at operating threshold) | 0.30% |
+| Real false-positive rate | 1.45% |
+| Precision | 5.75% |
+| True positives | 148 |
+| False negatives | 22,250 |
+| False positives | 2,426 |
+| True negatives | 165,148 |
+
+### Ghost Recall by Bounce Family
+
+| Family | Count | Recall |
+|---|---|---|
+| type1_second | 7,984 | 0.89% |
+| type2_second | 6,729 | 0.64% |
+| type2_third | 6,354 | 0.09% |
+| generic_multipath | 1,135 | 0.79% |
+| ambiguous_order | 161 | 9.32% |
+| other_multipath | 35 | 11.43% |
+
+### Real False-Positive Rate by Class
+
+| Class | Count | FPR |
+|---|---|---|
+| 1 (pedestrian) | 99,576 | 0.41% |
+| 2 (cyclist) | 54,206 | 1.20% |
+| 3 (car) | 13,658 | 9.99% |
+| 5 (motorcycle) | 134 | 0.00% |
+
+### Assessment
+
+**Zero-shot transfer is poor.** The CARLA-pretrained model achieves near-random recall (~0.7%)
+with low precision (~5.7%). The domain gap between CARLA synthetic multipath geometry and
+real RF multipath signatures is too large for direct zero-shot transfer. Car-class real points
+have the highest FPR (~10%), suggesting the model confuses car returns with ghosts.
+
+The next step is training directly on real data to establish the real-only baseline, then
+deciding whether synthetic pretraining adds any value.
+
+### Densification Finding (August 18, 2026)
+
+Statistical densification (Step 6.4) was applied to the CARLA data to bridge the point-count
+gap (~800 pts/frame matching RGD). The densified data was used for the CARLA pretraining
+above. Despite matching point-count statistics, zero-shot transfer remained near-random.
+
+**Conclusion:** Densification only fixes point density. The core domain gap is in the
+*physics* of how ghosts look — ghost geometry (planar image-method paths vs. real RF
+multipath), ghost Doppler/amplitude signatures (simulator physics model vs. real radar
+measurements). Densifying synthetic points around wrong geometry just produces more
+wrong-signature points.
+
+**Implication:** The domain gap is in the feature distribution, not point count.
+Densification is necessary for architectural compatibility (PointNet expects similar point
+counts) but insufficient for transfer.
+
+### Fine-tuning Decision (August 18, 2026)
+
+Fine-tuning with `--pretrained` was considered but deemed unnecessary. Given the near-random
+zero-shot results (AUPRC 0.159), the CARLA checkpoint provides almost no useful
+initialization — fine-tuning would essentially relearn everything from real data. Training
+directly on real data is more straightforward and produces the same result.
+
+### Next Steps (revised)
+
+1. **Train directly on real data** — `temporal_pointnet` on `ghost_real_official` train split,
+   60 epochs, same hyperparameters. This is the real-only baseline.
+2. **Evaluate on real test split** — compare against zero-shot results.
+3. **If real-only is strong:** the contribution is the measured domain gap and the real-data
+ghost detector itself.
+4. **If real-only is also weak:** the issue may be the feature schema, label noise, or
+dataset size — investigate augmentation and feature engineering.
+5. **Optional:** profile calibration to match RGD statistics before any future synthetic
+pretraining attempt.
+
+---
+
 ## 5. Planned Next Steps (current plan)
 
 1. Commit/push the uncommitted RGD fixes; verify remote checkout (grep for
@@ -227,10 +319,8 @@ produces dead pedestrian Doppler and no crash recovery.
 5. Full collection: train 20 / val 4 / test 4 pedestrian sequences (Town04, seeds
    100/2000/4000, `--headless`), `--resume` on crash; optionally `--target-type cyclist` and
    `--town Town03` for diversity (filenames include town, outputs merge).
-6. Prepare CARLA H5s (`prepare_radar_ghost_dataset.py --split-mode official`).
-7. **Zero-shot:** train `temporal_pointnet` on CARLA data, evaluate on real RGD test split.
-8. **Optional fine-tune:** `--pretrained` CARLA checkpoint, low LR (0.0003), 30 epochs, on
-   real train; evaluate on real test. Deploy only if it beats baselines.
+6. Prepare CARLA H5s (`prepare_radar_ghost_dataset.py --split-mode official`).7. **Zero-shot (DONE):** Trained `temporal_pointnet` on CARLA densified data (50 epochs, ~2 hrs), evaluated on real RGD test split. Result: AUPRC 0.159, AUROC 0.606, ghost recall 0.30% at 1% real FPR — **near-random, poor transfer.** See §4.5 for full results.
+8. **Fine-tune (SKIPPED):** Near-random zero-shot means CARLA checkpoint provides no useful initialization. Fine-tuning ≡ training from scratch on real data. Instead, train directly on real data (see revised plan in §4.5).
 
 ---
 
@@ -308,9 +398,14 @@ possible, concrete implementation guidance):
     supportable: (a) physics-guided synthetic ghosts transfer to real radar; (b) synthetic
     pretraining accelerates/improves real fine-tuning; (c) the measured gap quantifies
     simulator fidelity. Which claims should be explicitly avoided?
-11. **What to do if zero-shot is weak:** If zero-shot AUPRC is near random, is the correct
+11. **What to do if zero-shot is weak:** ~~If zero-shot AUPRC is near random, is the correct
     conclusion "target-list simulation insufficient for this task," or is there a cheaper fix
-    (calibration, density matching, feature changes) worth trying before concluding?
+    (calibration, density matching, feature changes) worth trying before concluding?~~
+    **ANSWERED (Aug 18):** Zero-shot AUPRC is 0.159 (near random). Densification did not
+    help. The gap is in physics-level feature distributions, not point density. Remaining
+    options: (a) profile calibration to match RGD amplitude/Doppler/error distributions,
+    (b) feature engineering to bridge the distribution gap, (c) accept the gap as a
+    quantified contribution and focus on real-only training.
 12. **Point-count/label imbalance:** CARLA collections produce ~3× more ghost than real
     points (1623 vs 486 in the verified sequence), while RGD has ~6× more real than ghost
     (~600k real vs ~100k ghost). How should class balance be handled per domain so the
