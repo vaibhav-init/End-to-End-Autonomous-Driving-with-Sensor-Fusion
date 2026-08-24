@@ -671,11 +671,11 @@ def main():
                 "total_points": sum(r.get("points", 0) for r in recs),
                 "real_points": sum(r.get("real_points", 0) for r in recs),
                 "ghost_points": sum(r.get("ghost_points", 0) for r in recs),
-                "scenarios": list(set(r.get("scenario", "?") for r in recs)),
+                "scenarios": sorted(set(r.get("scenario", "?") for r in recs)),
             }
             for sp, recs in splits.items()
         },
-        "leaked_scenarios": dict(leaked_scenarios),
+        "leaked_scenarios": {k: sorted(v) for k, v in leaked_scenarios.items()},
         "feature_stats": all_stats,
     }
     with (output_dir / "dataset_analysis.json").open("w") as f:
