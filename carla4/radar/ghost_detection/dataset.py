@@ -95,24 +95,36 @@ class PreparedGhostDataset(Dataset):
                 )
                 frame_index[key] = (int(start), int(end))
         value["_frame_index"] = frame_index
-        # Precompute the v2 frame-relative statistics once per (sensor, frame)
-        # over the complete scan, exactly like an online sensor would.
-        context = {
-            "_rel_log_amp": np.zeros(len(value["frame"]), dtype=np.float32),
-            "_doppler_residual": np.zeros(len(value["frame"]), dtype=np.float32),
-            "_density_ratio": np.zeros(len(value["frame"]), dtype=np.float32),
-        }
-        for (frame_sensor, _), (start, end) in frame_index.items():
-            stats = frame_context_statistics(
-                value["r_sc"][start:end],
-                value["phi_sc"][start:end],
-                value["vr_sc"][start:end],
-                value["amp"][start:end],
-            )
-            context["_rel_log_amp"][start:end] = stats[0]
-            context["_doppler_residual"][start:end] = stats[1]
-            context["_density_ratio"][start:end] = stats[2]
-        value.update(context)
+        # v2 frame-relative statistics: use the values precomputed at
+        # preparation time when present (the normal path); otherwise compute
+        # them here once per sequence load (older prepared sets).
+        if (
+            "rel_log_amplitude" in value
+            and "doppler_cluster_residual" in value
+            and "local_density_ratio" in value
+        ):
+            value["_rel_log_amp"] = value["rel_log_amplitude"]
+            value["_doppler_residual"] = value["doppler_cluster_residual"]
+            value["_density_ratio"] = value["local_density_ratio"]
+        else:
+            context = {
+                "_rel_log_amp": np.zeros(len(value["frame"]), dtype=np.float32),
+                "_doppler_residual": np.zeros(
+                    len(value["frame"]), dtype=np.float32
+                ),
+                "_density_ratio": np.zeros(len(value["frame"]), dtype=np.float32),
+            }
+            for (frame_sensor, _), (start, end) in frame_index.items():
+                stats = frame_context_statistics(
+                    value["r_sc"][start:end],
+                    value["phi_sc"][start:end],
+                    value["vr_sc"][start:end],
+                    value["amp"][start:end],
+                )
+                context["_rel_log_amp"][start:end] = stats[0]
+                context["_doppler_residual"][start:end] = stats[1]
+                context["_density_ratio"][start:end] = stats[2]
+            value.update(context)
         self._cache[sequence_index] = value
         while len(self._cache) > self.cache_sequences:
             self._cache.popitem(last=False)

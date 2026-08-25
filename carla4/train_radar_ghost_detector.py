@@ -248,6 +248,17 @@ def main():
 
     model_kwargs = _model_kwargs(args)
     model = create_ghost_model(args.model, **model_kwargs).to(args.device)
+    device_label = str(args.device)
+    if device_label.startswith("cuda"):
+        device_label = (
+            f"{args.device} ({torch.cuda.get_device_name(0)})"
+        )
+    print(
+        f"training on: {device_label} | "
+        f"model: {args.model} (input_dim={len(FEATURE_NAMES)}) | "
+        f"train samples/epoch: {len(train_dataset)} | "
+        f"label smoothing: {args.label_smoothing}"
+    )
     if args.pretrained:
         try:
             pretrained = torch.load(

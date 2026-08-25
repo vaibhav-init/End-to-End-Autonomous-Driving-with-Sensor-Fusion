@@ -113,14 +113,10 @@ def frame_context_statistics(range_m, azimuth_rad, radial_velocity_mps, amplitud
     ) / 5.0
 
     # Local density: neighbour count within a fixed range/azimuth gate,
-    # normalised by (4 x) the frame-mean neighbour count.
-    dr = ranges[:, None] - ranges[None, :]
-    da = azimuth[:, None] - azimuth[None, :]
-    near = (np.abs(dr) <= _DENSITY_RANGE_GATE_M) & (
-        np.abs(da) <= _DENSITY_AZIMUTH_GATE_RAD
-    )
-    np.fill_diagonal(near, False)
-    neighbour_counts = near.sum(axis=1).astype(np.float64)
+    # normalised by (4 x) the frame-mean neighbour count. Exact counting via
+    # a range-sorted sliding window instead of an O(n^2) pairwise matrix, so
+    # dense RGD-scale frames (thousands of points) stay cheap.
+    neighbour_counts = _gate_neighbour_counts(ranges, azimuth)
     mean_neighbours = float(neighbour_counts.mean())
     if mean_neighbours <= 0.0:
         density_ratio = np.zeros(count, dtype=np.float64)
@@ -136,6 +132,48 @@ def frame_context_statistics(range_m, azimuth_rad, radial_velocity_mps, amplitud
         doppler_residual.astype(np.float32),
         density_ratio.astype(np.float32),
     )
+
+
+def _gate_neighbour_counts(ranges, azimuth):
+    """Exact neighbour counts inside the fixed range/azimuth gate.
+
+    Sorts by range once, then for each point only examines the slice of
+    points whose range lies within +-``_DENSITY_RANGE_GATE_M`` and checks
+    the azimuth gate on those candidates. Worst case remains O(n*k) with k
+    the in-gate population, which is orders of magnitude below the pairwise
+    matrix for real frame sizes.
+    """
+
+    count = ranges.size
+    if count < 2:
+        return np.zeros(count, dtype=np.float64)
+
+    order = np.argsort(ranges, kind="stable")
+    sorted_ranges = ranges[order]
+    sorted_azimuth = azimuth[order]
+
+    half_gate = _DENSITY_RANGE_GATE_M
+    counts_sorted = np.empty(count, dtype=np.int64)
+    left = 0
+    for position in range(count):
+        center = sorted_ranges[position]
+        while center - sorted_ranges[left] > half_gate:
+            left += 1
+        right = np.searchsorted(
+            sorted_ranges,
+            center + half_gate,
+            side="right",
+        )
+        if right - left <= 1:
+            counts_sorted[position] = 0
+            continue
+        deltas = np.abs(sorted_azimuth[left:right] - sorted_azimuth[position])
+        # Subtract one to exclude the point itself.
+        counts_sorted[position] = int((deltas <= _DENSITY_AZIMUTH_GATE_RAD).sum()) - 1
+
+    result = np.empty(count, dtype=np.int64)
+    result[order] = counts_sorted
+    return result.astype(np.float64)
 
 
 def physical_features(

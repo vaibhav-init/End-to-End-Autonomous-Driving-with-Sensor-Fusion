@@ -13,6 +13,7 @@ import numpy as np
 from radar.ghost_detection.features import (
     FEATURE_NAMES,
     FEATURE_SCHEMA_VERSION,
+    frame_context_statistics,
 )
 from radar.ghost_detection.labels import decode_label_arrays
 
@@ -226,6 +227,39 @@ def prepare_file(path, input_root, output_root, args, scenario_splits=None):
     for optional in ("x_cc", "y_cc", "instance_id", "group"):
         if optional in radar.dtype.names:
             arrays[optional] = np.asarray(radar[optional])[finite][order]
+
+    # Precompute the v2 frame-relative statistics once, per (sensor, frame),
+    # so training/evaluation never repeat the work. The dataset loader falls
+    # back to computing them for npz files that lack these fields (older
+    # prepared sets). Rows are already sorted by (sensor, frame), so group
+    # boundaries come straight from unique.
+    stats_rel = np.zeros(len(arrays["frame"]), dtype=np.float32)
+    stats_resid = np.zeros(len(arrays["frame"]), dtype=np.float32)
+    stats_density = np.zeros(len(arrays["frame"]), dtype=np.float32)
+    if len(arrays["frame"]):
+        group_keys = (
+            arrays["sensor"].astype(np.int64) * (int(arrays["frame"].max()) + 1)
+            + arrays["frame"]
+        )
+        _, group_starts, group_counts = np.unique(
+            group_keys,
+            return_index=True,
+            return_counts=True,
+        )
+        for start, length in zip(group_starts.tolist(), group_counts.tolist()):
+            end = start + length
+            rel, resid, density = frame_context_statistics(
+                arrays["r_sc"][start:end],
+                arrays["phi_sc"][start:end],
+                arrays["vr_sc"][start:end],
+                arrays["amp"][start:end],
+            )
+            stats_rel[start:end] = rel
+            stats_resid[start:end] = resid
+            stats_density[start:end] = density
+    arrays["rel_log_amplitude"] = stats_rel
+    arrays["doppler_cluster_residual"] = stats_resid
+    arrays["local_density_ratio"] = stats_density
 
     output_name = _safe_output_name(path, input_root)
     output_relative = Path("sequences") / output_name
