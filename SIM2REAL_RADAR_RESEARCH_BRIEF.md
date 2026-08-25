@@ -10,7 +10,7 @@ prompt, with or without access to the repository it describes.
 
 ## 1. Executive Summary
 
-**Goal:** Build a *realistic automotive radar* inside the CARLA 0.9.16 simulator, **collect
+**Goal:** Build a _realistic automotive radar_ inside the CARLA 0.9.16 simulator, **collectbad." AUROC 0.819 means
 training data in it**, and **evaluate a ghost (multipath false-alarm) detector trained on that
 synthetic data against the real-life Radar Ghost Dataset (RGD) v1.1** — i.e., a sim-to-real
 transfer study for radar multipath-ghost detection.
@@ -31,7 +31,7 @@ profile calibration)?
 
 ## 2. The Goal in Detail
 
-1. **Create a realistic radar in CARLA** — a *target-list* automotive radar model: it outputs
+1. **Create a realistic radar in CARLA** — a _target-list_ automotive radar model: it outputs
    per-scan detections with range, azimuth, radial velocity (Doppler), amplitude/SNR, and
    tracks. It is deliberately **not** a raw-signal (FMCW/ADC/CFAR) simulator (see §7).
 2. **Collect data in CARLA** — reproduce the RGD recording regime: stationary ego, pedestrian
@@ -43,6 +43,7 @@ profile calibration)?
    then optionally fine-tune on real training data and evaluate again.
 
 **Success criteria (decided with the user):**
+
 - A clean, quantified measurement of the CARLA → RGD domain gap and which ghost families
   transfer (a defensible contribution on its own).
 - Zero-shot performance meaningfully better than random.
@@ -58,6 +59,7 @@ profile calibration)?
 References cited throughout the repository's documentation:
 
 ### 3.1 Real benchmark: Radar Ghost Dataset (RGD)
+
 - **Paper:** Kraus et al., "Multipath Ghosts in Radar Point Clouds: An Automotive Case Study,"
   arXiv:2404.01437. **Repo:** https://github.com/flkraus/ghosts
 - **v1.1 setup:** two 77 GHz chirp-sequence radar sensors in the front bumper (`left`/`right`;
@@ -76,10 +78,11 @@ References cited throughout the repository's documentation:
 - **v1.0 is broken** (radar/LiDAR time sync); only v1.1 is used.
 
 ### 3.2 Radar simulation in CARLA / synthetic radar
+
 - **C-Shenron** (UCSD WCSNG, https://ucsdwcsng.github.io/c-shenron/): CARLA-native
   material/scattering front end that synthesizes radar ADC cubes from the simulator. Its full
-  raw-signal pipeline is NOT copied into this repo; only the *material-class + incidence-based
-  scattering* front end is ported to a target-list model.
+  raw-signal pipeline is NOT copied into this repo; only the _material-class + incidence-based
+  scattering_ front end is ported to a target-list model.
 - **RadaRays** (A. Mock et al., RAL 2025, https://kbs.informatik.uos.de/files/pdfs/ral2025_amock_radarays.pdf):
   ray-tracing-based multi-bounce radar simulation — motivates explicit multi-bounce geometry
   (rather than random ghost offsets) for ghost generation.
@@ -93,18 +96,20 @@ References cited throughout the repository's documentation:
   res) and its labeling limitations (background/negative handling).
 
 ### 3.3 Sim-to-real methodology
+
 - **Perception error models for virtual testing** (arXiv:2302.11919): fit a simulator's sensor
   error model to real data statistics, then generate unlimited training data in the simulator.
-  This is the *proven* recipe this project should follow to close the gap (calibrate the
+  This is the _proven_ recipe this project should follow to close the gap (calibrate the
   profile to RGD statistics).
 - **General sim-to-real findings relevant here:** synthetic radar pretraining typically
-  transfers *better when combined with a small amount of real data* (fine-tuning) than pure
+  transfers _better when combined with a small amount of real data_ (fine-tuning) than pure
   zero-shot; naive fine-tuning across a large domain gap can fail (catastrophic forgetting,
   overfitting a small real set, poor initialization). Mitigations: physical (non-fitted)
   feature normalization, low fine-tuning LR, early stopping, threshold selection on validation
   only.
 
 ### 3.4 Known sim-to-real gaps for this specific project (ranked)
+
 1. **Point cardinality:** RGD ~800 raw points/frame vs. CARLA's sparse target list (tens of
    points). Biggest gap; monitor or export denser points.
 2. **Ego motion:** RGD stationary; old CARLA collectors drove the ego. **Fixed** by the
@@ -124,24 +129,25 @@ References cited throughout the repository's documentation:
 
 Repository layout (all paths relative to repo root; main code under `carla4/`):
 
-| Path | Purpose |
-|---|---|
-| `carla4/radar/front_radar.py` | Three backends: `native` (CARLA sensor), `cshenron` (C-Shenron-derived adapter), `realistic` (temporal target-list model). Includes kinematic velocity fallback for physics-off actors. |
-| `carla4/radar/realistic_core.py` | `RealisticRadarConfig` + `RealisticRadarModel`: SNR-conditioned detection/errors, correlated dropout/noise, clutter/interference, probabilistic or geometry ghosts, quantization/latency, NN tracking (M-of-N), path-gated scalar selection. Profile registry `REALISTIC_RADAR_PROFILES`. |
-| `carla4/radar/multipath.py` | `extract_reflector_segments` (semantic-LiDAR planar fitting) + `generate_multipath_targets` (image-method type-1/type-2 2nd- and type-2 3rd-order paths). |
-| `carla4/radar/cshenron_core.py` | CARLA 0.9.16 material/scattering port (24-byte semantic-LiDAR records, post-0.9.14 tag table 0–28). |
-| `carla4/radar/profiles/*.json` | `ideal_target_list_v1`, `gaussian_baseline_v1`, `generic_lrr_v1`, `geometry_multipath_v1`, `rgd_regime_v1` (RGD envelope: 10 Hz, 140° FOV, 0.15 m / 1.8° / 0.087 m/s resolutions, ±44.3 m/s unambiguous Doppler; `multipath_mode=geometry`, probabilistic ghosts disabled). |
-| `carla4/radar/ghost_detection/` | `features.py` (physical feature schema `radar_ghost_physical_v1`), `labels.py` (CMTO decode → binary), `dataset.py` (windowed point-set `PreparedGhostDataset`), `model.py` (`PointMLP`, `TemporalPointNet`), `metrics.py`, `runtime.py` (deployment filter). |
-| `carla4/download_radar_ghost_dataset.py` | Downloads RGD v1.1 `original.zip` (Zenodo record 6676246, 5,818,814,597 bytes, MD5 `3873152766839286469b4b7e63ceba12`), resumes, verifies, safe-extracts. |
-| `carla4/prepare_radar_ghost_dataset.py` | Converts real or CARLA H5 → per-sequence `.npz` with `manifest.json`; split modes `official`, `scenario_grouped`, `all_train`. |
-| `carla4/train_radar_ghost_detector.py` | Trains `point_mlp` / `temporal_pointnet`; BCE with positive-weight; validation threshold at ≤1% real FPR (`--max-real-fpr`); saves `best_detector.pt` with schema/feature checks; `--pretrained` for fine-tuning. |
-| `carla4/evaluate_radar_ghost_detector.py` | Held-out split eval: AUPRC, AUROC, real FPR, ghost recall, recall by bounce family, per-scenario metrics. |
-| `carla4/collect_carla_radar_ghosts.py` | **RGD-regime collector** (see below). |
-| `carla4/collect_carla_radar_dataset.py` | Older moving-ego/vehicle-event collector (different regime — do NOT use for RGD pretraining). |
-| `carla4/validate_radar_accuracy.py` / `analyze_radar_validation.py` | CARLA 0.9.16 accuracy validator + forensic analyzer. |
-| `carla4/radar/GHOST_DETECTION.md`, `README.md`, `RGD_REGIME_COLLECTION.md` | Full pipeline docs, sensor docs, and the RGD-regime collection runbook. |
+| Path                                                                       | Purpose                                                                                                                                                                                                                                                                                   |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `carla4/radar/front_radar.py`                                              | Three backends: `native` (CARLA sensor), `cshenron` (C-Shenron-derived adapter), `realistic` (temporal target-list model). Includes kinematic velocity fallback for physics-off actors.                                                                                                   |
+| `carla4/radar/realistic_core.py`                                           | `RealisticRadarConfig` + `RealisticRadarModel`: SNR-conditioned detection/errors, correlated dropout/noise, clutter/interference, probabilistic or geometry ghosts, quantization/latency, NN tracking (M-of-N), path-gated scalar selection. Profile registry `REALISTIC_RADAR_PROFILES`. |
+| `carla4/radar/multipath.py`                                                | `extract_reflector_segments` (semantic-LiDAR planar fitting) + `generate_multipath_targets` (image-method type-1/type-2 2nd- and type-2 3rd-order paths).                                                                                                                                 |
+| `carla4/radar/cshenron_core.py`                                            | CARLA 0.9.16 material/scattering port (24-byte semantic-LiDAR records, post-0.9.14 tag table 0–28).                                                                                                                                                                                       |
+| `carla4/radar/profiles/*.json`                                             | `ideal_target_list_v1`, `gaussian_baseline_v1`, `generic_lrr_v1`, `geometry_multipath_v1`, `rgd_regime_v1` (RGD envelope: 10 Hz, 140° FOV, 0.15 m / 1.8° / 0.087 m/s resolutions, ±44.3 m/s unambiguous Doppler; `multipath_mode=geometry`, probabilistic ghosts disabled).               |
+| `carla4/radar/ghost_detection/`                                            | `features.py` (physical feature schema `radar_ghost_physical_v1`), `labels.py` (CMTO decode → binary), `dataset.py` (windowed point-set `PreparedGhostDataset`), `model.py` (`PointMLP`, `TemporalPointNet`), `metrics.py`, `runtime.py` (deployment filter).                             |
+| `carla4/download_radar_ghost_dataset.py`                                   | Downloads RGD v1.1 `original.zip` (Zenodo record 6676246, 5,818,814,597 bytes, MD5 `3873152766839286469b4b7e63ceba12`), resumes, verifies, safe-extracts.                                                                                                                                 |
+| `carla4/prepare_radar_ghost_dataset.py`                                    | Converts real or CARLA H5 → per-sequence `.npz` with `manifest.json`; split modes `official`, `scenario_grouped`, `all_train`.                                                                                                                                                            |
+| `carla4/train_radar_ghost_detector.py`                                     | Trains `point_mlp` / `temporal_pointnet`; BCE with positive-weight; validation threshold at ≤1% real FPR (`--max-real-fpr`); saves `best_detector.pt` with schema/feature checks; `--pretrained` for fine-tuning.                                                                         |
+| `carla4/evaluate_radar_ghost_detector.py`                                  | Held-out split eval: AUPRC, AUROC, real FPR, ghost recall, recall by bounce family, per-scenario metrics.                                                                                                                                                                                 |
+| `carla4/collect_carla_radar_ghosts.py`                                     | **RGD-regime collector** (see below).                                                                                                                                                                                                                                                     |
+| `carla4/collect_carla_radar_dataset.py`                                    | Older moving-ego/vehicle-event collector (different regime — do NOT use for RGD pretraining).                                                                                                                                                                                             |
+| `carla4/validate_radar_accuracy.py` / `analyze_radar_validation.py`        | CARLA 0.9.16 accuracy validator + forensic analyzer.                                                                                                                                                                                                                                      |
+| `carla4/radar/GHOST_DETECTION.md`, `README.md`, `RGD_REGIME_COLLECTION.md` | Full pipeline docs, sensor docs, and the RGD-regime collection runbook.                                                                                                                                                                                                                   |
 
 ### 4.1 The RGD-regime collector (`collect_carla_radar_ghosts.py`)
+
 - `--target-type {vehicle, pedestrian, cyclist}`: pedestrian spawns a CARLA **walker**
   (tag 12 → RGD class 1); cyclist spawns a two-wheel **motorcycle** (tag 18 → RGD class 5
   "motorbike" — documented mismatch, CARLA has no cyclist actor); vehicle is the original
@@ -168,6 +174,7 @@ Repository layout (all paths relative to repo root; main code under `carla4/`):
   1.4 m/s walker is correct), controlled reflector used.
 
 ### 4.2 Feature and label bridge (verified consistent)
+
 - **Features** (`features.py`): `x_sensor/100`, `y_sensor/100`, `range/100`, `sin(az)`,
   `cos(az)`, `radial_velocity/40`, `signed_log_amplitude/10`, `age/0.5` (clipped).
   **No dataset-fitted normalization** — physical constants only. This is the key design
@@ -177,6 +184,7 @@ Repository layout (all paths relative to repo root; main code under `carla4/`):
   targets** (0=real, 1=multipath, -1=ignore) as official RGD labels. Verified statically.
 
 ### 4.3 Verified results (single sequence, Run 3 — the only full verification so far)
+
 ```
 capture_frames: 385
 target_type: pedestrian (tag 12)
@@ -191,6 +199,7 @@ reflector: id=..., tag=28 (GuardRail), length=7.43 m
 validated_path_families: [type1-order2, type2-order2]
 RESULT: ALL CHECKS PASSED
 ```
+
 - **Run 1 failure (informative):** teleport + physics off WITHOUT the velocity fallback →
   dead Doppler (`mean |vr|=0.055`, max 0.348 vs expected 1.4). Fixed by
   `_estimate_kinematic_velocity`.
@@ -199,8 +208,10 @@ RESULT: ALL CHECKS PASSED
   teleport; never re-enable walker physics.
 
 ### 4.4 Repository git state (IMPORTANT)
+
 The RGD-regime work has **uncommitted changes** in the working tree that a remote `git pull`
 will NOT carry:
+
 - `carla4/collect_carla_radar_ghosts.py` (worker supervisor, `--resume`,
   `--sequence-retries`, walker spawn retries, `target_type` plumbing)
 - `carla4/radar/front_radar.py` (`_estimate_kinematic_velocity` fallback)
@@ -222,40 +233,40 @@ produces dead pedestrian Doppler and no crash recovery.
 
 ### Overall Metrics
 
-| Metric | Value |
-|---|---|
-| AUPRC | 0.159 |
-| AUROC | 0.606 |
-| Best F1 | 0.254 |
-| Best F1 threshold | 0.486 |
-| Operating threshold (≤1% real FPR) | 0.901 |
-| Ghost recall (at operating threshold) | 0.30% |
-| Real false-positive rate | 1.45% |
-| Precision | 5.75% |
-| True positives | 148 |
-| False negatives | 22,250 |
-| False positives | 2,426 |
-| True negatives | 165,148 |
+| Metric                                | Value   |
+| ------------------------------------- | ------- |
+| AUPRC                                 | 0.159   |
+| AUROC                                 | 0.606   |
+| Best F1                               | 0.254   |
+| Best F1 threshold                     | 0.486   |
+| Operating threshold (≤1% real FPR)    | 0.901   |
+| Ghost recall (at operating threshold) | 0.30%   |
+| Real false-positive rate              | 1.45%   |
+| Precision                             | 5.75%   |
+| True positives                        | 148     |
+| False negatives                       | 22,250  |
+| False positives                       | 2,426   |
+| True negatives                        | 165,148 |
 
 ### Ghost Recall by Bounce Family
 
-| Family | Count | Recall |
-|---|---|---|
-| type1_second | 7,984 | 0.89% |
-| type2_second | 6,729 | 0.64% |
-| type2_third | 6,354 | 0.09% |
-| generic_multipath | 1,135 | 0.79% |
-| ambiguous_order | 161 | 9.32% |
-| other_multipath | 35 | 11.43% |
+| Family            | Count | Recall |
+| ----------------- | ----- | ------ |
+| type1_second      | 7,984 | 0.89%  |
+| type2_second      | 6,729 | 0.64%  |
+| type2_third       | 6,354 | 0.09%  |
+| generic_multipath | 1,135 | 0.79%  |
+| ambiguous_order   | 161   | 9.32%  |
+| other_multipath   | 35    | 11.43% |
 
 ### Real False-Positive Rate by Class
 
-| Class | Count | FPR |
-|---|---|---|
+| Class          | Count  | FPR   |
+| -------------- | ------ | ----- |
 | 1 (pedestrian) | 99,576 | 0.41% |
-| 2 (cyclist) | 54,206 | 1.20% |
-| 3 (car) | 13,658 | 9.99% |
-| 5 (motorcycle) | 134 | 0.00% |
+| 2 (cyclist)    | 54,206 | 1.20% |
+| 3 (car)        | 13,658 | 9.99% |
+| 5 (motorcycle) | 134    | 0.00% |
 
 ### Assessment
 
@@ -274,7 +285,7 @@ gap (~800 pts/frame matching RGD). The densified data was used for the CARLA pre
 above. Despite matching point-count statistics, zero-shot transfer remained near-random.
 
 **Conclusion:** Densification only fixes point density. The core domain gap is in the
-*physics* of how ghosts look — ghost geometry (planar image-method paths vs. real RF
+_physics_ of how ghosts look — ghost geometry (planar image-method paths vs. real RF
 multipath), ghost Doppler/amplitude signatures (simulator physics model vs. real radar
 measurements). Densifying synthetic points around wrong geometry just produces more
 wrong-signature points.
@@ -296,11 +307,79 @@ directly on real data is more straightforward and produces the same result.
    60 epochs, same hyperparameters. This is the real-only baseline.
 2. **Evaluate on real test split** — compare against zero-shot results.
 3. **If real-only is strong:** the contribution is the measured domain gap and the real-data
-ghost detector itself.
+   ghost detector itself.
 4. **If real-only is also weak:** the issue may be the feature schema, label noise, or
-dataset size — investigate augmentation and feature engineering.
+   dataset size — investigate augmentation and feature engineering.
 5. **Optional:** profile calibration to match RGD statistics before any future synthetic
-pretraining attempt.
+   pretraining attempt.
+
+### 4.6 Real-Only Baseline Results (temporal_pointnet trained on real RGD)
+
+**Date:** August 24, 2026
+**Checkpoint:** `artifacts/ghost_temporal_official/best_detector.pt`
+**Data:** `artifacts/ghost_real_official` (official split, real RGD v1.1)
+**Training:** temporal_pointnet, 60 epochs, ~15 h GPU, batch 16, lr 1e-3,
+window 5 × 1024 points, hidden 128 / context 192, dropout 0.15, seed 42
+
+#### Headline comparison vs zero-shot (both on the same official test split)
+
+| Metric                       | Zero-shot (CARLA pretrain) | Real-only baseline    |
+| ---------------------------- | -------------------------- | --------------------- |
+| Validation AUPRC             | —                          | 0.9539                |
+| Test AUPRC                   | 0.159                      | **0.329**             |
+| Test AUROC                   | 0.606                      | **0.819**             |
+| Best F1                      | 0.254                      | **0.424** (thr 0.993) |
+| Ghost recall @ operating thr | 0.30 %                     | 26.6 %                |
+| Real FPR @ operating thr     | 1.45 %                     | 5.09 %                |
+
+Synthetic pretraining is confirmed useless as an initializer (real-only beats
+zero-shot by every metric), consistent with the fine-tune skip decision.
+
+#### Finding 1 — severe validation-to-test collapse
+
+Validation AUPRC 0.954 collapses to test AUPRC 0.329. The model generalizes to
+held-out _sequences_ but not to held-out _scenario families_. Per-scenario test
+AUPRC spans 0.14 (scenario-17 ped) to 0.79 (scenario-11 cycl). Cross-scenario
+generalization — not architecture or data volume — is the current bottleneck.
+The split-composition/leakage analysis (`analyze_ghost_dataset.py`, commit
+`a850b3e`) should be checked against these numbers before any realism claim.
+
+#### Finding 2 — probability calibration is broken
+
+The operating threshold saturates at 0.9995 and still misses the ≤1 % real-FPR
+target (achieved 5.09 %). At the validation-selected fixed threshold (0.782)
+recall is 68 % but real FPR is 25.8 % — unusable for a safety filter. Scores
+are overconfident; temperature scaling or val-quantile threshold selection is
+required before deployment-style metrics are meaningful. Class-level FPR at
+the fixed threshold: pedestrian 30 %, cyclist 19 %, car 22 %, motorbike 77 %
+(n=134, not significant).
+
+#### Defensible claims after this run
+
+1. Physics-guided synthetic ghosts do NOT transfer zero-shot (§4.5).
+2. A real-data temporal PointNet detects ghosts well within seen scenario
+   families but degrades sharply on unseen families (this section).
+3. Both findings are measured, reproducible, and threshold-protocol-clean.
+
+Not yet supportable: any deployment-grade false-alarm filter claim at ≤1 % FPR.
+
+#### Revised next steps (supersedes §4.5 list)
+
+1. Confirm train/val/test scenario composition; if train/val share scenario
+   families, re-report with the stricter scenario-disjoint split as primary.
+2. Prepare + evaluate the scenario-disjoint split
+   (`prepare_radar_ghost_dataset.py --split-mode scenario_disjoint`) with this
+   same checkpoint — this number is the paper's main honest result.
+3. Fix calibration (temperature scaling on val, or threshold = 1 % quantile of
+   val real scores); re-evaluate before quoting any ≤1 % FPR figure.
+4. Time-boxed rescue attempts for cross-scenario transfer: stronger
+   regularization/augmentation (azimuth mirroring, point dropout bursts),
+   amplitude/Doppler normalization per sequence, and one calibrated-synthetic
+   pretraining retry (§4.5 option a) judged only on the disjoint split.
+
+---
+
+## 5. Planned Next Steps (current plan)
 
 ---
 
@@ -312,15 +391,25 @@ pretraining attempt.
    (`python3 -m unittest discover -s radar/tests -p 'test_*.py'`, mock CARLA, no server
    needed) + confirm `rgd_regime_v1` profile loads.
 3. Real RGD v1.1 is downloaded AND prepared (`artifacts/ghost_real_official`,
-   `artifacts/ghost_real_scenario`); verify manifest (schema `radar_ghost_physical_v1`, both
+   `artifacts/ghost_real_scenario`); verify manifest (schema aus et al. 2020 (arXiv 2007.05280) — machine-learning ghost detection on real Mercedes radar data, using an established radar classifier with object`radar_ghost_physical_v1`, both
    classes per split).
 4. Start CARLA 0.9.16 (`./CarlaUE4.sh -quality-level=Epic`, add `-RenderOffScreen` when
    headless). Smoke collect 1 pedestrian sequence → must print `ALL CHECKS PASSED`.
 5. Full collection: train 20 / val 4 / test 4 pedestrian sequences (Town04, seeds
    100/2000/4000, `--headless`), `--resume` on crash; optionally `--target-type cyclist` and
    `--town Town03` for diversity (filenames include town, outputs merge).
-6. Prepare CARLA H5s (`prepare_radar_ghost_dataset.py --split-mode official`).7. **Zero-shot (DONE):** Trained `temporal_pointnet` on CARLA densified data (50 epochs, ~2 hrs), evaluated on real RGD test split. Result: AUPRC 0.159, AUROC 0.606, ghost recall 0.30% at 1% real FPR — **near-random, poor transfer.** See §4.5 for full results.
-8. **Fine-tune (SKIPPED):** Near-random zero-shot means CARLA checkpoint provides no useful initialization. Fine-tuning ≡ training from scratch on real data. Instead, train directly on real data (see revised plan in §4.5).
+6. Prepare CARLA H5s (`prepare_radar_ghost_dataset.py --split-mode official`).
+7. **Zero-shot (DONE):** Trained `temporal_pointnet` on CARLA densified data
+   (50 epochs, ~2 hrs), evaluated on real RGD test split. Result: AUPRC 0.159,
+   AUROC 0.606, ghost recall 0.30% at 1% real FPR — **near-random, poor
+   transfer.** See §4.5 for full results.
+8. **Fine-tune (SKIPPED):** Near-random zero-shot means CARLA checkpoint
+   provides no useful initialization. Fine-tuning ≡ training from scratch on
+   real data. Instead, train directly on real data (see §4.5).
+9. **Real-only baseline (DONE Aug 24):** temporal_pointnet on real official
+   split, 60 epochs (~15 h GPU). Val AUPRC 0.954 → test AUPRC 0.329, AUROC
+   0.819, recall 26.6% @ 5.1% FPR. See §4.6 — the val→test collapse and
+   calibration failure are now the primary open problems.
 
 ---
 
@@ -350,7 +439,7 @@ pretraining attempt.
   object-list firmware.
 - Physically simulated spray/snow/water films/sensor contamination.
 - Calibration against a specific production radar (the default profiles are visible, versioned
-  *research priors*, not calibrated results).
+  _research priors_, not calibrated results).
 
 ---
 
@@ -375,7 +464,7 @@ possible, concrete implementation guidance):
 4. **Fine-tuning recipe:** Given the domain gap, what is the optimal fine-tuning strategy —
    full fine-tune at 0.0003 LR, frozen-backbone + new head, layer-wise LR decay, or
    discriminative rates? How many epochs / what early-stopping criterion? Does freezing hurt
-   when the gap is in *input statistics* rather than task semantics?
+   when the gap is in _input statistics_ rather than task semantics?
 5. **Temporal model value:** Does a 5-frame temporal PointNet add transferable value over a
    point-wise MLP, given that RGD ghost lifetimes and CARLA ghost persistence differ? Should
    `window_frames`/`max_points` differ between synthetic and real training?
