@@ -175,7 +175,7 @@ def _expand_detection_points(detection, rng, mean_points):
         detection,
         rng,
         mean_points,
-        snr_db_to_amplitude=snr_db_to_amplitude,
+        snr_to_amplitude=snr_db_to_amplitude,
     )
 
 
