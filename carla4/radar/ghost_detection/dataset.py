@@ -8,7 +8,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .features import FEATURE_SCHEMA_VERSION, physical_features
+from .features import (
+    FEATURE_SCHEMA_VERSION,
+    frame_context_statistics,
+    physical_features,
+)
 
 
 class PreparedGhostDataset(Dataset):
@@ -91,6 +95,24 @@ class PreparedGhostDataset(Dataset):
                 )
                 frame_index[key] = (int(start), int(end))
         value["_frame_index"] = frame_index
+        # Precompute the v2 frame-relative statistics once per (sensor, frame)
+        # over the complete scan, exactly like an online sensor would.
+        context = {
+            "_rel_log_amp": np.zeros(len(value["frame"]), dtype=np.float32),
+            "_doppler_residual": np.zeros(len(value["frame"]), dtype=np.float32),
+            "_density_ratio": np.zeros(len(value["frame"]), dtype=np.float32),
+        }
+        for (frame_sensor, _), (start, end) in frame_index.items():
+            stats = frame_context_statistics(
+                value["r_sc"][start:end],
+                value["phi_sc"][start:end],
+                value["vr_sc"][start:end],
+                value["amp"][start:end],
+            )
+            context["_rel_log_amp"][start:end] = stats[0]
+            context["_doppler_residual"][start:end] = stats[1]
+            context["_density_ratio"][start:end] = stats[2]
+        value.update(context)
         self._cache[sequence_index] = value
         while len(self._cache) > self.cache_sequences:
             self._cache.popitem(last=False)
@@ -176,6 +198,9 @@ class PreparedGhostDataset(Dataset):
             velocity,
             amplitude,
             age_s,
+            relative_log_amplitude=data["_rel_log_amp"][indices],
+            doppler_cluster_residual=data["_doppler_residual"][indices],
+            local_density_ratio=data["_density_ratio"][indices],
         )
         count = len(indices)
         feature_dim = features.shape[-1]

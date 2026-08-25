@@ -23,6 +23,7 @@ from densify_radar_ghost_dataset import (  # noqa: E402
     run_densify,
     run_stencil,
 )
+from radar.ghost_detection.features import FEATURE_SCHEMA_VERSION  # noqa: E402
 
 
 def _prepared_sequence(point_specs):
@@ -85,7 +86,7 @@ def _make_prepared_input(root, split_map):
             }
         )
     with (root / "manifest.json").open("w", encoding="utf-8") as handle:
-        json.dump({"sequences": sequences, "feature_schema": "radar_ghost_physical_v1"}, handle)
+        json.dump({"sequences": sequences, "feature_schema": FEATURE_SCHEMA_VERSION}, handle)
 
 
 def _make_carla_h5(path, frames=3, points_per_frame=2):
@@ -216,7 +217,7 @@ class StencilTests(unittest.TestCase):
                 }
             )
         with (prepared / "manifest.json").open("w", encoding="utf-8") as handle:
-            json.dump({"sequences": sequences, "feature_schema": "radar_ghost_physical_v1"}, handle)
+            json.dump({"sequences": sequences, "feature_schema": FEATURE_SCHEMA_VERSION}, handle)
         output = self.tempdir / "stencil.json"
         args = argparse.Namespace(
             input=str(prepared),

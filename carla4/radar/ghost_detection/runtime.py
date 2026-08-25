@@ -10,6 +10,7 @@ import numpy as np
 from .features import (
     FEATURE_NAMES,
     FEATURE_SCHEMA_VERSION,
+    frame_context_statistics,
     physical_features,
     snr_db_to_amplitude,
 )
@@ -147,12 +148,21 @@ class RuntimeGhostFilter:
             return detections, []
 
         values = np.asarray(records, dtype=np.float32)
+        rel_log_amp, doppler_residual, density_ratio = frame_context_statistics(
+            values[:, 0],
+            values[:, 1],
+            values[:, 2],
+            values[:, 3],
+        )
         features = physical_features(
             values[:, 0],
             values[:, 1],
             values[:, 2],
             values[:, 3],
             values[:, 4],
+            relative_log_amplitude=rel_log_amp,
+            doppler_cluster_residual=doppler_residual,
+            local_density_ratio=density_ratio,
         )
         padded = np.zeros(
             (1, self.max_points, len(FEATURE_NAMES)),

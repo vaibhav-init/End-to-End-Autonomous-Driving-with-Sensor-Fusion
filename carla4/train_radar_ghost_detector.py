@@ -48,6 +48,16 @@ def parse_args():
         default=0.01,
         help="maximum validation false-rejection rate for deployment threshold",
     )
+    parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=0.02,
+        help=(
+            "training-target smoothing in [0, 0.49]; prevents probabilities "
+            "from saturating at 1.0, which sets a hard floor on the "
+            "achievable false-positive rate (0 disables)"
+        ),
+    )
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -104,6 +114,7 @@ def run_epoch(
     static_pos_weight=1.0,
     optimizer=None,
     max_real_fpr=0.01,
+    label_smoothing=0.0,
 ):
     """Run one epoch over a loader.
 
@@ -113,6 +124,13 @@ def run_epoch(
     ghost:real) cannot carry into real-data fine-tuning or inflate the
     deployment false-positive rate. Validation uses the dataset-level static
     weight so the reported loss stays comparable across epochs.
+
+    ``label_smoothing`` maps targets from {0, 1} to {smoothing, 1-smoothing}
+    during training. Without it the network can drive probabilities to
+    exactly 1.0 on confident mistakes; every such point sits in the top
+    histogram bin and sets a hard floor on the achievable false-positive
+    rate, which is what saturated the v1 run's operating threshold at 0.9995.
+    Metrics are always computed against the *unsmoothed* targets.
     """
 
     training = optimizer is not None
@@ -122,6 +140,7 @@ def run_epoch(
     labeled_count = 0
     weight_sum = 0.0
     weight_count = 0
+    smoothing = float(np.clip(label_smoothing, 0.0, 0.49))
     for batch in loader:
         features = batch["features"].to(device, non_blocking=True)
         point_mask = batch["point_mask"].to(device, non_blocking=True)
@@ -142,9 +161,14 @@ def run_epoch(
                 )
             else:
                 pos_weight = float(static_pos_weight)
+            loss_targets = selected_targets
+            if training and smoothing > 0.0:
+                loss_targets = selected_targets * (1.0 - smoothing) + (
+                    1.0 - selected_targets
+                ) * smoothing
             loss = F.binary_cross_entropy_with_logits(
                 selected_logits,
-                selected_targets,
+                loss_targets,
                 pos_weight=torch.tensor(pos_weight, device=device),
             )
             if training:
@@ -174,6 +198,8 @@ def main():
         raise ValueError("epochs and batch-size must be positive")
     if not 0.0 <= args.max_real_fpr <= 1.0:
         raise ValueError("--max-real-fpr must be in [0, 1]")
+    if not 0.0 <= args.label_smoothing <= 0.49:
+        raise ValueError("--label-smoothing must be in [0, 0.49]")
     seed_everything(args.seed)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -261,6 +287,7 @@ def main():
             static_pos_weight=positive_weight,
             optimizer=optimizer,
             max_real_fpr=args.max_real_fpr,
+            label_smoothing=args.label_smoothing,
         )
         with torch.no_grad():
             val_metrics = run_epoch(

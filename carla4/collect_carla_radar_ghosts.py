@@ -15,6 +15,7 @@ import h5py
 import numpy as np
 
 from radar import create_front_radar
+from radar.ghost_detection.export_expansion import expand_detection_points
 from radar.ghost_detection.features import snr_db_to_amplitude
 from radar.multipath import ReflectorSegment, generate_multipath_targets
 from radar.realistic_core import IdealRadarTarget
@@ -111,6 +112,29 @@ def parse_args():
         help="skip sequences that already have an H5 and summary sidecar",
     )
     parser.add_argument(
+        "--expand-points",
+        dest="expand_points",
+        action="store_true",
+        default=True,
+        help=(
+            "expand each grouped detection into CFAR-like surface points "
+            "with per-point amplitude/Doppler statistics (default on; this "
+            "is what makes the export distribution match real RGD frames)"
+        ),
+    )
+    parser.add_argument(
+        "--no-expand-points",
+        dest="expand_points",
+        action="store_false",
+        help="write one row per grouped detection (legacy behaviour)",
+    )
+    parser.add_argument(
+        "--points-per-detection",
+        type=float,
+        default=12.0,
+        help="mean expanded sub-points per detection when --expand-points",
+    )
+    parser.add_argument(
         "--sequence-retries",
         type=int,
         default=1,
@@ -142,6 +166,17 @@ def _class_id(semantic_tag):
         17: 4,
         18: 5,
     }.get(int(semantic_tag), 3)
+
+
+def _expand_detection_points(detection, rng, mean_points):
+    """Delegate to the shared CFAR-emulating expansion (see export_expansion)."""
+
+    return expand_detection_points(
+        detection,
+        rng,
+        mean_points,
+        snr_db_to_amplitude=snr_db_to_amplitude,
+    )
 
 
 def _cmto_label(detection):
@@ -1059,16 +1094,30 @@ def collect_sequence(client, args, sequence_index):
             aggregate["sum_reflector_count"] += reflector_count
             aggregate["sum_multipath_count"] += multipath_count
             aggregate["sum_dynamic_ideal_targets"] += dynamic_ideal_count
+            frame_rng = np.random.default_rng(
+                args.seed * 1_000_003
+                + sequence_index * 10_007
+                + radar_frame
+            )
             for detection_index, detection in enumerate(detections):
-                rows.append(
-                    _detection_row(
-                        sequence_index,
-                        radar_frame,
-                        timestamp,
-                        detection_index,
+                if args.expand_points:
+                    expanded = _expand_detection_points(
                         detection,
+                        frame_rng,
+                        args.points_per_detection,
                     )
-                )
+                else:
+                    expanded = [detection]
+                for point_index, point in enumerate(expanded):
+                    rows.append(
+                        _detection_row(
+                            sequence_index,
+                            radar_frame,
+                            timestamp,
+                            (detection_index << 8) + point_index,
+                            point,
+                        )
+                    )
             diagnostics_summary = {
                 "last_frame": radar_frame,
                 "last_reflector_count": int(
