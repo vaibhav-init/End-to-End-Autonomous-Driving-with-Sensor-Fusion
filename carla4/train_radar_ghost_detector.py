@@ -59,6 +59,18 @@ def parse_args():
         ),
     )
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--cache-sequences",
+        type=int,
+        default=64,
+        help=(
+            "sequences kept in each dataloader worker's memory cache. Must "
+            "exceed the split's sequence count: v2 frame statistics are "
+            "recomputed on every cache miss, so a cache smaller than the "
+            "shuffled sequence count thrashes and slows epochs by orders of "
+            "magnitude. Roughly 100-200 MB RAM per cached sequence."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--device",
@@ -210,6 +222,7 @@ def main():
         max_points=args.max_points,
         augment=True,
         seed=args.seed,
+        cache_sequences=args.cache_sequences,
     )
     val_dataset = PreparedGhostDataset(
         args.data,
@@ -218,6 +231,7 @@ def main():
         max_points=args.max_points,
         augment=False,
         seed=args.seed,
+        cache_sequences=args.cache_sequences,
     )
     train_loader = _loader(
         train_dataset,
