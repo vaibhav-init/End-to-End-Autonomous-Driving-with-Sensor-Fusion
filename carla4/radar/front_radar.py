@@ -512,14 +512,17 @@ class CShenronFrontRadar:
         physics path.
         """
 
-        location = actor.get_location()
+        try:
+            location = actor.get_location()
+            actor_id = int(actor.id)
+        except Exception:
+            return np.zeros(3, dtype=np.float64)
         state = (
             float(location.x),
             float(location.y),
             float(location.z),
             float(timestamp_s) if timestamp_s is not None else 0.0,
         )
-        actor_id = int(actor.id)
         previous = self._kinematic_state.get(actor_id)
         self._kinematic_state[actor_id] = state
         if len(self._kinematic_state) > 2048:
@@ -576,19 +579,25 @@ class CShenronFrontRadar:
             except RuntimeError:
                 actor = None
 
-        if actor is not None and actor.is_alive:
+        if actor is not None:
+            # An actor can be destroyed between the lookup and these calls:
+            # the traffic manager respawns vehicles and collisions remove
+            # them, routinely, during a long collection. Every access here is
+            # guarded because this runs on the sensor callback thread, where
+            # an escaping error takes the whole process down rather than
+            # failing one frame. A vanished target simply reads as stationary.
             try:
-                obstacle_velocity = self._vector_components(actor.get_velocity())
-            except RuntimeError:
-                actor = None
-            if (
-                actor is not None
-                and float(np.linalg.norm(obstacle_velocity)) < 1.0e-3
-            ):
-                obstacle_velocity = self._estimate_kinematic_velocity(
-                    actor,
-                    timestamp_s,
-                )
+                if actor.is_alive:
+                    obstacle_velocity = self._vector_components(
+                        actor.get_velocity()
+                    )
+                    if float(np.linalg.norm(obstacle_velocity)) < 1.0e-3:
+                        obstacle_velocity = self._estimate_kinematic_velocity(
+                            actor,
+                            timestamp_s,
+                        )
+            except Exception:
+                obstacle_velocity = np.zeros(3, dtype=np.float64)
 
         relative_world = obstacle_velocity - ego_velocity
         radial_relative_velocity = float(np.dot(relative_world, direction))

@@ -107,6 +107,9 @@ def main():
         doppler_deltas = []
         ghost_frames = 0
         observed = 0
+        reflector_counts = []
+        dynamic_counts = []
+        multipath_candidate_counts = []
 
         for frame_index in range(args.frames):
             world.tick()
@@ -115,6 +118,15 @@ def main():
                       f"{ghost_frames} with ghosts, "
                       f"{len(per_path_snr)} paths", flush=True)
             snapshot = radar.debug_snapshot() or {}
+            reflector_counts.append(len(snapshot.get("reflectors") or []))
+            ideal = snapshot.get("ideal_targets") or []
+            dynamic_counts.append(
+                sum(1 for t in ideal if int(t.get("semantic_tag", 0)) in
+                    (12, 13, 14, 15, 16, 17, 18, 19, 21))
+            )
+            multipath_candidate_counts.append(
+                len(snapshot.get("multipath_ideal_targets") or [])
+            )
             detections = snapshot.get("generated_detections") or []
             if not detections:
                 continue
@@ -155,6 +167,14 @@ def main():
         print(f"frames ticked:  {args.frames}   with radar output: {observed}")
         print(f"frames w/ghost: {ghost_frames}")
         print(f"distinct paths: {len(per_path_snr)}")
+        if reflector_counts:
+            print(f"reflectors/frame: mean {statistics.mean(reflector_counts):.1f} "
+                  f"max {max(reflector_counts)}")
+            print(f"dynamic targets/frame: mean {statistics.mean(dynamic_counts):.1f} "
+                  f"max {max(dynamic_counts)}")
+            print(f"multipath candidates/frame: mean "
+                  f"{statistics.mean(multipath_candidate_counts):.2f} "
+                  f"max {max(multipath_candidate_counts)}")
         print(f"families:       {dict(families)}")
         print()
 
