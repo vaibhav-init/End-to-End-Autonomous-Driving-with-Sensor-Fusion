@@ -118,7 +118,12 @@ def main():
         multipath_candidate_counts = []
 
         for frame_index in range(args.frames):
-            world.tick()
+            try:
+                world.tick()
+            except Exception as exc:
+                print(f"  tick failed at frame {frame_index}: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+                break
             if frame_index and frame_index % 10 == 0:
                 print(f"  ... {frame_index}/{args.frames} frames, "
                       f"{ghost_frames} with ghosts, "
@@ -231,6 +236,17 @@ def main():
               else "SOME CHECKS FAILED")
         print("=" * 72)
     finally:
+        # Teardown order matters and is not obvious. The traffic manager holds
+        # references to every autopilot vehicle; destroying one while it is
+        # still registered and then letting the manager resume makes it operate
+        # on a destroyed actor, which aborts the process rather than raising.
+        # Unregister first, then sensors, then actors, then settings -- the
+        # order validate_radar_accuracy.py uses.
+        for actor in spawned:
+            try:
+                actor.set_autopilot(False, traffic_manager.get_port())
+            except Exception:
+                pass
         if radar is not None:
             try:
                 radar.cleanup()
@@ -248,8 +264,11 @@ def main():
             traffic_manager.set_synchronous_mode(False)
         except Exception:
             pass
-        world.apply_settings(original_settings)
-        print("world settings restored, spawned actors destroyed")
+        try:
+            world.apply_settings(original_settings)
+        except Exception:
+            pass
+        print("world settings restored, spawned actors destroyed", flush=True)
 
 
 if __name__ == "__main__":
