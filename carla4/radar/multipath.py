@@ -36,14 +36,25 @@ _CONDUCTOR_LOSS_DB = 0.5
 # surfaces scatter the coherent specular component away, and they do so most
 # strongly near normal incidence -- at grazing angles even a rough wall looks
 # smooth to the wave.
+#
+# These must be read against the wavelength, not against everyday intuition
+# about rough-looking surfaces: at 77 GHz the smooth-surface criterion is
+# sigma < lambda/8 = 0.49 mm, so millimetre-scale values drive the coherent
+# term to hundreds of dB and delete the specular path entirely. The surfaces
+# that actually produce observable multipath ghosts are the smooth ones --
+# plastered and marble walls, metal guard rails, glass -- which is exactly
+# what the Radar Ghost Dataset recordings used.
 _SURFACE_ROUGHNESS_M = {
-    5: 0.0002,
-    28: 0.0002,
-    4: 0.0015,
-    3: 0.0020,
-    20: 0.0025,
-    26: 0.0020,
+    5: 0.00005,   # metal fence
+    28: 0.00005,  # guard rail
+    4: 0.00030,   # plastered wall
+    3: 0.00040,   # building facade
+    20: 0.00050,  # generic static object
+    26: 0.00040,  # bridge
 }
+# Beyond this the coherent component is negligible and the model has no
+# business claiming precision about how negligible.
+_MAX_ROUGHNESS_LOSS_DB = 20.0
 
 
 @dataclass(frozen=True)
@@ -133,8 +144,9 @@ def incidence_reflection_loss_db(semantic_tag, incidence_cosine, fallback_db):
     rayleigh = (
         4.0 * math.pi * roughness_m * cosine / RADAR_WAVELENGTH_M
     ) ** 2
-    # exp(-rayleigh) attenuation expressed in dB.
-    loss_db += 4.342944819 * rayleigh
+    # exp(-rayleigh) attenuation expressed in dB, capped so a rough surface
+    # degrades the path instead of annihilating it.
+    loss_db += min(4.342944819 * rayleigh, _MAX_ROUGHNESS_LOSS_DB)
     return float(loss_db)
 
 

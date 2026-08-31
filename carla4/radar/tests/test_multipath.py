@@ -267,3 +267,18 @@ class MultipathPhysicsTest(unittest.TestCase):
         model = RealisticRadarModel(config, seed=7)
         samples = [model._update_ghost_fading(-99) for _ in range(20)]
         self.assertTrue(all(value == 0.0 for value in samples))
+
+    def test_reflection_loss_stays_physically_plausible(self):
+        # Roughness is measured against a 3.9 mm wavelength: millimetre-scale
+        # RMS heights drive the coherent term to hundreds of dB and delete the
+        # specular path. Every material must stay within a usable budget at
+        # every incidence angle.
+        for tag in (3, 4, 5, 20, 26, 28):
+            for cosine in (1.0, 0.7, 0.3, 0.05, 0.001):
+                loss = incidence_reflection_loss_db(tag, cosine, 3.0)
+                self.assertGreaterEqual(loss, 0.0)
+                self.assertLess(
+                    loss,
+                    35.0,
+                    f"tag {tag} at cos={cosine} lost {loss:.1f} dB per bounce",
+                )
