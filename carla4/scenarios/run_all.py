@@ -69,7 +69,15 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--town", default="Town04")
-    parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
+    parser.add_argument(
+        "--safety-rules",
+        action="store_true",
+        help=(
+            "re-enable the hardcoded emergency-brake overrides in the mlp "
+            "driver (ablation arm). Off by default so the model decides."
+        ),
+    )
+    parser.add_argument("--driver", choices=["pcla", "mlp", "idm"], default="mlp",
                         help="Longitudinal control source for every run")
     parser.add_argument("--model-dir", default="../model_throttle_brake",
                         help="MLP model directory (for --driver mlp)")
@@ -190,6 +198,8 @@ def main():
                         "--pcla-agent", args.pcla_agent,
                         "--radar-backend", args.radar_backend,
                     ]
+                    if args.safety_rules:
+                        cmd.append("--safety-rules")
                     if args.radar_profile:
                         cmd.extend(["--radar-profile", args.radar_profile])
                     if args.radar_config:

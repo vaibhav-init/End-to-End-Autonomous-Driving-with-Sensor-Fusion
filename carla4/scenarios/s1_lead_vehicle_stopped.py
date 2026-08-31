@@ -92,7 +92,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  obstacle_distance_m=S1_OBSTACLE_DISTANCE,
                  stage_stable_s=STAGE_STABLE_S,
                  stage_speed_tolerance_kmh=STAGE_SPEED_TOLERANCE_KMH,
-                 scenario_id=1):
+                 scenario_id=1, safety_rules=False):
     """Run S1: Lead Vehicle Stopped at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -158,6 +158,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         radar_ghost_detector=radar_ghost_detector,
         radar_ghost_threshold=radar_ghost_threshold,
         radar_ghost_device=radar_ghost_device,
+        safety_rules=safety_rules,
     )
     driver.setup(world, ego, carla_map, client)
 
@@ -361,7 +362,15 @@ def main():
     parser.add_argument("--seeds", type=int, nargs="+", default=RANDOM_SEEDS,
                         help="Random seeds")
     parser.add_argument("--output", default="results_s1")
-    parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
+    parser.add_argument(
+        "--safety-rules",
+        action="store_true",
+        help=(
+            "re-enable the hardcoded emergency-brake overrides in the mlp "
+            "driver (ablation arm). Off by default so the model decides."
+        ),
+    )
+    parser.add_argument("--driver", choices=["pcla", "mlp", "idm"], default="mlp",
                         help="Longitudinal control source")
     parser.add_argument("--model-dir", default="../model_throttle_brake",
                         help="MLP model directory (for --driver mlp)")
@@ -454,6 +463,7 @@ def main():
                                       radar_ghost_detector=args.radar_ghost_detector,
                                       radar_ghost_threshold=args.radar_ghost_threshold,
                                       radar_ghost_device=args.radar_ghost_device,
+                                      safety_rules=args.safety_rules,
                                       target_speed_kmh=args.target_speed_kmh,
                                       obstacle_distance_m=args.obstacle_distance_m,
                                       stage_stable_s=args.stage_stable_s,

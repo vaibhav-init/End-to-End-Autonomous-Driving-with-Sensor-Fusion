@@ -158,7 +158,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  radar_ghost_device="cpu",
                  stage_approach=True, stage_gap=8.0,
                  cutin_stop=True,
-                 scenario_id=4):
+                 scenario_id=4, safety_rules=False):
     """Run S4: Cut-In from Adjacent Lane at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -228,6 +228,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         radar_ghost_detector=radar_ghost_detector,
         radar_ghost_threshold=radar_ghost_threshold,
         radar_ghost_device=radar_ghost_device,
+        safety_rules=safety_rules,
     )
     driver.setup(world, ego, carla_map, client)
 
@@ -520,7 +521,15 @@ def main():
     parser.add_argument("--fog", type=int, nargs="+", default=FOG_LADDER)
     parser.add_argument("--seeds", type=int, nargs="+", default=RANDOM_SEEDS)
     parser.add_argument("--output", default="results_s4")
-    parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
+    parser.add_argument(
+        "--safety-rules",
+        action="store_true",
+        help=(
+            "re-enable the hardcoded emergency-brake overrides in the mlp "
+            "driver (ablation arm). Off by default so the model decides."
+        ),
+    )
+    parser.add_argument("--driver", choices=["pcla", "mlp", "idm"], default="mlp",
                         help="Longitudinal control source")
     parser.add_argument("--model-dir", default="../model_throttle_brake",
                         help="MLP model directory (for --driver mlp)")
@@ -593,6 +602,7 @@ def main():
                                       radar_ghost_detector=args.radar_ghost_detector,
                                       radar_ghost_threshold=args.radar_ghost_threshold,
                                       radar_ghost_device=args.radar_ghost_device,
+                                      safety_rules=args.safety_rules,
                                       stage_approach=args.stage_approach,
                                       stage_gap=args.stage_gap,
                                       cutin_stop=args.cutin_stop, scenario_id=4)

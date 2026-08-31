@@ -25,6 +25,7 @@ import numpy as np
 import torch
 
 from .base import Driver
+from .longitudinal import HybridStateMachineController, PIDSpeedController
 from .steering import BasicAgentSteering
 
 # carla4/ (two levels up) holds the shared perception + model modules
@@ -68,51 +69,6 @@ LAUNCH_CLEAR_DISTANCE_M = 15.0
 LAUNCH_ASSIST_FRAMES = FPS * 5
 
 
-class PIDSpeedController:
-    """Convert desired speed into throttle/brake (same gains as live test)."""
-
-    def __init__(self, dt, kp=0.75, ki=0.08, kd=0.12):
-        self.dt = dt
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.integral = 0.0
-        self.prev_error = 0.0
-
-    def run_step(self, target_speed, current_speed):
-        error = target_speed - current_speed
-        self.integral += error * self.dt
-        self.integral = max(-5.0, min(5.0, self.integral))
-        derivative = (error - self.prev_error) / max(self.dt, 1e-6)
-        self.prev_error = error
-        accel_cmd = self.kp * error + self.ki * self.integral + self.kd * derivative
-        accel_cmd = max(-1.0, min(1.0, accel_cmd))
-        if accel_cmd >= 0.0:
-            return accel_cmd, 0.0
-        return 0.0, -accel_cmd
-
-
-class HybridStateMachineController:
-    """PID for dynamics + a brake-hold state at very low speed (live test)."""
-
-    def __init__(self, pid_controller, hold_speed_threshold=0.3,
-                 stop_current_speed_threshold=0.8, hold_brake_force=0.35):
-        self.pid = pid_controller
-        self.hold_speed_threshold = hold_speed_threshold
-        self.stop_current_speed_threshold = stop_current_speed_threshold
-        self.hold_brake_force = hold_brake_force
-        self.state = "CONTINUOUS"
-
-    def run_step(self, target_speed, current_speed):
-        throttle, brake = self.pid.run_step(target_speed, current_speed)
-        if (target_speed < self.hold_speed_threshold
-                and current_speed < self.stop_current_speed_threshold):
-            self.state = "HOLD"
-            return 0.0, max(brake, self.hold_brake_force)
-        self.state = "CONTINUOUS"
-        return throttle, brake
-
-
 class MLPDriver(Driver):
     name = "mlp"
 
@@ -128,9 +84,20 @@ class MLPDriver(Driver):
         radar_ghost_detector=None,
         radar_ghost_threshold=None,
         radar_ghost_device="cpu",
+        safety_rules=False,
+        cruise_floor=True,
         **_ignored,
     ):
         self.model_dir = model_dir
+        # The hardcoded emergency-brake overrides are OFF by default: they
+        # fire on <30 m closing or TTC<3 s, which is every hazard in S1/S2/S4,
+        # so with them on the rules drive and the model does not. Enable them
+        # only as an explicit ablation arm.
+        self.safety_rules = bool(safety_rules)
+        # The cruise floor only applies when nothing is detected, so it cannot
+        # mask a reaction to a ghost; it stops the model under-driving on an
+        # empty road. Separately switchable all the same.
+        self.cruise_floor = bool(cruise_floor)
         self.fps = fps
         self.debug_every = debug_every
         self.radar_backend = normalize_radar_backend(radar_backend)
@@ -161,6 +128,7 @@ class MLPDriver(Driver):
         self._frame = 0
         self._prev_speed = 0.0
         self._last_distance_state = None
+        self._rule_fired = None
 
     def setup(self, world, ego, carla_map, client):
         model_path = os.path.join(self.model_dir, "target_speed_mlp.pt")
@@ -400,8 +368,11 @@ class MLPDriver(Driver):
             target_speed_pred = BOOTSTRAP_TARGET_SPEED_MPS
 
         # Hybrid override (same as deployment): cruise on open road, but never
-        # override a red light.
-        if obstacle_detected < 0.5 and int(visual["traffic_light_state"]) != TL_RED:
+        # override a red light. Only fires with nothing detected, so a ghost
+        # still reaches the model unmodified.
+        if (self.cruise_floor
+                and obstacle_detected < 0.5
+                and int(visual["traffic_light_state"]) != TL_RED):
             target_speed_pred = max(target_speed_pred, CRUISE_SPEED_MPS)
 
         # Launch assist: help the car pull away from a standstill on clear road.
@@ -414,25 +385,27 @@ class MLPDriver(Driver):
             self.max_target_speed_mps,
         )
 
-        # ── Hardcoded safety overrides ──────────────────────────────────
-        # Rule 1: Model predicts < 1 km/h → full emergency brake.
-        if target_speed_pred < (1.0 / 3.6):
+        # ── Optional hardcoded overrides (ablation arm; OFF by default) ──
+        # These three rules fire on <30 m closing or TTC<3 s, which describes
+        # every hazard in S1/S2/S4. With them enabled the rules brake before
+        # the model has any influence, so a measurement of the model -- or of
+        # anything upstream of it, such as a ghost filter -- means nothing.
+        # The model's target speed drives by default.
+        self._rule_fired = None
+        if self.safety_rules and target_speed_pred < (1.0 / 3.6):
+            self._rule_fired = "model_stop"
             throttle, brake = 0.0, 1.0
-
-        # Rule 2: Obstacle within 30m AND actively closing → full brake.
-        #         (requires relv > 0.5 so it doesn't fire during stable
-        #          following — fixes over-conservative S2 behavior)
-        elif (obstacle_detected > 0.5
+        elif (self.safety_rules
+              and obstacle_detected > 0.5
               and dist_state["distance"] < 30.0
               and dist_state["relative_velocity"] > 0.5):
+            self._rule_fired = "close_and_closing"
             throttle, brake = 0.0, 1.0
-
-        # Rule 3: TTC < 3.0s → full emergency brake.
-        #         Catches fast-closing scenarios like cut-ins where distance
-        #         alone doesn't trigger in time.
-        elif obstacle_detected > 0.5 and ttc < 3.0:
+        elif (self.safety_rules
+              and obstacle_detected > 0.5
+              and ttc < 3.0):
+            self._rule_fired = "low_ttc"
             throttle, brake = 0.0, 1.0
-
         else:
             throttle, brake = self.controller.run_step(target_speed_pred, speed)
         # ────────────────────────────────────────────────────────────────
@@ -450,7 +423,10 @@ class MLPDriver(Driver):
         return carla.VehicleControl(throttle=throttle, steer=steer, brake=brake)
 
     def diagnostics(self):
-        diagnostics = {}
+        diagnostics = {
+            "safety_rules_enabled": int(self.safety_rules),
+            "safety_rule_fired": getattr(self, "_rule_fired", None) or "",
+        }
         if self.radar is not None:
             diagnostics.update(self.radar.diagnostics())
         if self._last_distance_state is not None:
