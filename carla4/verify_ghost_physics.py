@@ -33,11 +33,11 @@ def parse_args():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--town", default=None, help="default: keep current map")
-    parser.add_argument("--frames", type=int, default=200)
+    parser.add_argument("--frames", type=int, default=150)
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--range", dest="range_m", type=float, default=100.0)
     parser.add_argument("--profile", default="geometry_multipath_v1")
-    parser.add_argument("--vehicles", type=int, default=6)
+    parser.add_argument("--vehicles", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--timeout-s",
@@ -96,16 +96,29 @@ def main():
                 other.set_autopilot(True, traffic_manager.get_port())
                 spawned.append(other)
 
+        # NOTE: RealisticFrontRadar.__init__ ends in **_ignored, so a wrong
+        # keyword name is silently dropped rather than raising. The parameters
+        # are profile_name/seed; passing radar_profile= here produced a run on
+        # the default probabilistic profile that still looked plausible.
         radar = create_front_radar(
             ego,
             world,
             range_m=args.range_m,
             backend="realistic",
             fps=args.fps,
-            radar_profile=args.profile,
-            radar_seed=args.seed,
+            profile_name=args.profile,
+            seed=args.seed,
             capture_debug=True,
         )
+        active = radar.realistic_config
+        print(f"radar profile in use: {active.profile_name} | "
+              f"multipath_mode={active.multipath_mode} | "
+              f"max_active_ghosts={active.max_active_ghosts}", flush=True)
+        if active.multipath_mode != "geometry":
+            raise RuntimeError(
+                f"expected geometry multipath, got {active.multipath_mode!r} "
+                "-- the profile did not take effect"
+            )
 
         per_path_snr = collections.defaultdict(list)
         per_path_frames = collections.Counter()
