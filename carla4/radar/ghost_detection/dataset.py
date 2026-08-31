@@ -67,7 +67,25 @@ class PreparedGhostDataset(Dataset):
         if not self.samples:
             raise ValueError(f"Split {split!r} contains no radar frames")
         self._cache = OrderedDict()
+        self._visit_count = 0
         self._report_density(split)
+
+    def _visit_entropy(self):
+        """Fresh randomness per visit that survives persistent workers.
+
+        DataLoader workers hold their own copy of this dataset, so a
+        set_epoch() call on the parent never reaches them and self.epoch stays
+        0 for the whole run -- augmentation would replay identically every
+        epoch. Counting visits inside the worker restores per-epoch variety
+        while keeping the warm sequence cache that persistent workers exist
+        for; dropping persistence instead costs a full reload of every
+        sequence per epoch. Validation (augment=False) stays bit-exact.
+        """
+
+        if not self.augment:
+            return 0
+        self._visit_count += 1
+        return self._visit_count * 7_919
 
     def _report_density(self, split):
         """Warn when scans are dense enough to squeeze out temporal context.
@@ -174,7 +192,7 @@ class PreparedGhostDataset(Dataset):
         positions = np.linspace(0, len(indices) - 1, count, dtype=np.int64)
         return indices[positions]
 
-    def _sample_indices(self, indices, current_mask, sample_index):
+    def _sample_indices(self, indices, current_mask, sample_index, entropy=0):
         """Budget points across the window without starving temporal context.
 
         Only the current scan is scored, so context points are the first to be
@@ -203,6 +221,7 @@ class PreparedGhostDataset(Dataset):
             rng = np.random.default_rng(
                 self.seed
                 + self.epoch * 1_000_003
+                + int(entropy)
                 + int(sample_index) * 9_176
             )
             context = np.sort(rng.choice(context, remaining, replace=False))
@@ -230,7 +249,10 @@ class PreparedGhostDataset(Dataset):
                 f"Prepared sample has no points: {record['path']} frame {current_frame}"
             )
         current_mask = data["frame"][indices] == current_frame
-        indices = self._sample_indices(indices, current_mask, sample_index)
+        entropy = self._visit_entropy()
+        indices = self._sample_indices(
+            indices, current_mask, sample_index, entropy
+        )
         current_mask = data["frame"][indices] == current_frame
 
         current_start, current_end = data["_frame_index"][
@@ -251,6 +273,7 @@ class PreparedGhostDataset(Dataset):
             rng = np.random.default_rng(
                 self.seed
                 + self.epoch * 2_000_003
+                + int(entropy)
                 + int(sample_index) * 37
             )
             if rng.random() < 0.5:

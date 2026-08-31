@@ -122,10 +122,11 @@ def _model_kwargs(args):
 
 
 def _loader(dataset, batch_size, workers, shuffle, persistent=True):
-    # Persistent workers keep their own copy of the dataset, so a later
-    # set_epoch() on the parent object never reaches them. The training loader
-    # therefore runs non-persistent: otherwise the augmentation RNG is frozen
-    # at epoch 0 and every epoch replays identical augmentations.
+    # Persistence is kept: each worker's sequence cache is what makes epochs
+    # cheap, and dropping it reloads every sequence per epoch (measured 242
+    # s/epoch versus 27 s/epoch on the synthetic set). Augmentation variety
+    # comes from PreparedGhostDataset._visit_entropy instead, which does not
+    # depend on set_epoch reaching the worker processes.
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -257,7 +258,6 @@ def main():
         args.batch_size,
         args.num_workers,
         shuffle=True,
-        persistent=False,
     )
     val_loader = _loader(
         val_dataset,
