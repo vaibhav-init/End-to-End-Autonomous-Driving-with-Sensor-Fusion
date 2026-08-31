@@ -31,12 +31,22 @@ def parse_args():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--town", default=None, help="default: keep current map")
-    parser.add_argument("--frames", type=int, default=400)
+    parser.add_argument("--frames", type=int, default=200)
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--range", dest="range_m", type=float, default=100.0)
     parser.add_argument("--profile", default="geometry_multipath_v1")
-    parser.add_argument("--vehicles", type=int, default=25)
+    parser.add_argument("--vehicles", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=180.0,
+        help=(
+            "client timeout. Each dynamic target is solved against every "
+            "fitted reflector, so a crowded scene makes a synchronous tick "
+            "expensive; keep --vehicles small rather than raising this."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -45,7 +55,7 @@ def main():
     import carla
 
     client = carla.Client(args.host, args.port)
-    client.set_timeout(30.0)
+    client.set_timeout(float(args.timeout_s))
     world = client.load_world(args.town) if args.town else client.get_world()
     original_settings = world.get_settings()
     traffic_manager = client.get_trafficmanager()
@@ -98,8 +108,12 @@ def main():
         ghost_frames = 0
         observed = 0
 
-        for _ in range(args.frames):
+        for frame_index in range(args.frames):
             world.tick()
+            if frame_index and frame_index % 50 == 0:
+                print(f"  ... {frame_index}/{args.frames} frames, "
+                      f"{ghost_frames} with ghosts, "
+                      f"{len(per_path_snr)} paths", flush=True)
             snapshot = radar.debug_snapshot() or {}
             detections = snapshot.get("generated_detections") or []
             if not detections:
