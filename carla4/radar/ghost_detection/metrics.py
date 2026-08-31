@@ -1,5 +1,7 @@
 """Dependency-light streaming binary metrics and threshold selection."""
 
+import math
+
 import numpy as np
 
 
@@ -83,7 +85,51 @@ class BinaryHistogramMetrics:
         fp = int(false_positive[fixed_index])
         fn = int(total_positive - tp)
         tn = int(total_negative - fp)
+
+        def confusion_at(index):
+            """Full 2x2 confusion plus imbalance-robust derived scores."""
+
+            c_tp = int(true_positive[index])
+            c_fp = int(false_positive[index])
+            c_fn = int(total_positive - c_tp)
+            c_tn = int(total_negative - c_fp)
+            recall = c_tp / max(c_tp + c_fn, 1)
+            specificity = c_tn / max(c_tn + c_fp, 1)
+            denominator = float(
+                (c_tp + c_fp) * (c_tp + c_fn) * (c_tn + c_fp) * (c_tn + c_fn)
+            )
+            mcc = (
+                (c_tp * c_tn - c_fp * c_fn) / math.sqrt(denominator)
+                if denominator > 0.0
+                else 0.0
+            )
+            return {
+                "threshold": float(thresholds[index]),
+                "true_positive": c_tp,
+                "false_positive": c_fp,
+                "true_negative": c_tn,
+                "false_negative": c_fn,
+                "precision": c_tp / max(c_tp + c_fp, 1),
+                "recall": recall,
+                "specificity": specificity,
+                "false_positive_rate": c_fp / max(c_fp + c_tn, 1),
+                "f1": 2.0 * c_tp / max(2 * c_tp + c_fp + c_fn, 1),
+                "accuracy": (c_tp + c_tn) / max(c_tp + c_tn + c_fp + c_fn, 1),
+                "balanced_accuracy": 0.5 * (recall + specificity),
+                "matthews_corrcoef": float(mcc),
+            }
+
         return {
+            # Full confusion matrices at the three thresholds that matter:
+            # the deployment operating point, the best-F1 point, and whatever
+            # fixed threshold the caller asked about. Reported always, because
+            # scalar summaries hide failure structure such as an inverted
+            # ranking.
+            "confusion_matrix": {
+                "operating": confusion_at(operating_index),
+                "best_f1": confusion_at(best_index),
+                "fixed": confusion_at(fixed_index),
+            },
             "real_count": total_negative,
             "ghost_count": total_positive,
             "auprc": auprc,
@@ -106,3 +152,45 @@ class BinaryHistogramMetrics:
             "recall": float(tp / max(tp + fn, 1)),
             "false_positive_rate": float(fp / max(fp + tn, 1)),
         }
+
+
+def format_confusion_matrix(block, title="confusion matrix"):
+    """Render one confusion-matrix block as a readable ASCII table."""
+
+    tp = block["true_positive"]
+    fp = block["false_positive"]
+    tn = block["true_negative"]
+    fn = block["false_negative"]
+    width = max(9, max(len(f"{value:,d}") for value in (tp, fp, tn, fn)))
+    lines = [
+        f"{title} @ threshold {block['threshold']:.4f}",
+        f"{'':>14}{'pred real':>{width + 2}}{'pred ghost':>{width + 2}}",
+        f"{'actual real':>14}{tn:>{width + 2},d}{fp:>{width + 2},d}"
+        f"    <- {block['false_positive_rate'] * 100:.2f}% false rejection",
+        f"{'actual ghost':>14}{fn:>{width + 2},d}{tp:>{width + 2},d}"
+        f"    <- {block['recall'] * 100:.2f}% ghost recall",
+        "",
+        f"  precision {block['precision']:.4f}   recall {block['recall']:.4f}   "
+        f"f1 {block['f1']:.4f}",
+        f"  specificity {block['specificity']:.4f}   "
+        f"balanced_acc {block['balanced_accuracy']:.4f}   "
+        f"mcc {block['matthews_corrcoef']:+.4f}",
+    ]
+    return "\n".join(lines)
+
+
+def format_all_confusion_matrices(result):
+    """Render the operating / best-F1 / fixed matrices from a compute() dict."""
+
+    matrices = result.get("confusion_matrix") or {}
+    titles = {
+        "operating": "operating point (<= max real FPR)",
+        "best_f1": "best-F1 point",
+        "fixed": "fixed threshold",
+    }
+    sections = [
+        format_confusion_matrix(matrices[key], titles[key])
+        for key in ("operating", "best_f1", "fixed")
+        if key in matrices
+    ]
+    return "\n\n".join(sections)

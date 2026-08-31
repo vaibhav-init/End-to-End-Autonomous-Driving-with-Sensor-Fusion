@@ -18,7 +18,10 @@ from radar.ghost_detection.dataset import (
     split_label_counts,
 )
 from radar.ghost_detection.features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
-from radar.ghost_detection.metrics import BinaryHistogramMetrics
+from radar.ghost_detection.metrics import (
+    BinaryHistogramMetrics,
+    format_all_confusion_matrices,
+)
 from radar.ghost_detection.model import create_ghost_model
 
 
@@ -71,6 +74,16 @@ def parse_args():
             "magnitude. Roughly 100-200 MB RAM per cached sequence."
         ),
     )
+    parser.add_argument(
+        "--context-reserve",
+        type=float,
+        default=0.25,
+        help=(
+            "share of --max-points held for older scans so the age feature "
+            "stays informative on dense exports (0 restores the old "
+            "current-scan-only behaviour)"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--device",
@@ -108,14 +121,18 @@ def _model_kwargs(args):
     return common
 
 
-def _loader(dataset, batch_size, workers, shuffle):
+def _loader(dataset, batch_size, workers, shuffle, persistent=True):
+    # Persistent workers keep their own copy of the dataset, so a later
+    # set_epoch() on the parent object never reaches them. The training loader
+    # therefore runs non-persistent: otherwise the augmentation RNG is frozen
+    # at epoch 0 and every epoch replays identical augmentations.
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=workers,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=workers > 0,
+        persistent_workers=persistent and workers > 0,
     )
 
 
@@ -223,6 +240,7 @@ def main():
         augment=True,
         seed=args.seed,
         cache_sequences=args.cache_sequences,
+        context_reserve_fraction=args.context_reserve,
     )
     val_dataset = PreparedGhostDataset(
         args.data,
@@ -232,12 +250,14 @@ def main():
         augment=False,
         seed=args.seed,
         cache_sequences=args.cache_sequences,
+        context_reserve_fraction=args.context_reserve,
     )
     train_loader = _loader(
         train_dataset,
         args.batch_size,
         args.num_workers,
         shuffle=True,
+        persistent=False,
     )
     val_loader = _loader(
         val_dataset,
@@ -301,6 +321,7 @@ def main():
 
     history = []
     best_auprc = -1.0
+    best_val_metrics = {}
     best_path = output / "best_detector.pt"
     started = time.time()
     for epoch in range(1, args.epochs + 1):
@@ -340,6 +361,7 @@ def main():
         )
         if val_metrics["auprc"] > best_auprc:
             best_auprc = val_metrics["auprc"]
+            best_val_metrics = val_metrics
             checkpoint = {
                 "schema_version": 1,
                 "model_name": args.model,
@@ -362,9 +384,17 @@ def main():
             json.dump(history, handle, indent=2)
             handle.write("\n")
 
+    print()
+    print("=== best validation confusion matrices ===")
+    print(format_all_confusion_matrices(best_val_metrics))
+    print()
+
     summary = {
         "best_checkpoint": str(best_path),
         "best_validation_auprc": best_auprc,
+        "best_validation_confusion_matrix": best_val_metrics.get(
+            "confusion_matrix"
+        ),
         "static_positive_weight": positive_weight,
         "batch_class_weighting": True,
         "elapsed_seconds": time.time() - started,

@@ -35,7 +35,10 @@ from radar.ghost_detection.features import (
     frame_context_statistics,
     physical_features,
 )
-from radar.ghost_detection.metrics import BinaryHistogramMetrics
+from radar.ghost_detection.metrics import (
+    BinaryHistogramMetrics,
+    format_all_confusion_matrices,
+)
 from radar.ghost_detection.model import create_ghost_model
 
 
@@ -89,6 +92,12 @@ def parse_args():
         type=int,
         default=64,
         help="archives kept per worker; keep above the split's count",
+    )
+    parser.add_argument(
+        "--context-reserve",
+        type=float,
+        default=0.25,
+        help="share of --max-points held for older scans (match training)",
     )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
@@ -163,7 +172,7 @@ class CrossDomainDataset(Dataset):
     """Windows from a prepared npz set, tolerant of v1/v2 manifests."""
 
     def __init__(self, root, split, window_frames, max_points,
-                 cache_sequences=64):
+                 cache_sequences=64, context_reserve_fraction=0.25):
         self.root = Path(root)
         with (self.root / "manifest.json").open("r", encoding="utf-8") as fh:
             self.manifest = json.load(fh)
@@ -175,6 +184,7 @@ class CrossDomainDataset(Dataset):
             )
         self.window_frames = int(window_frames)
         self.max_points = int(max_points)
+        self.context_reserve_fraction = float(context_reserve_fraction)
         self.sequences = [
             record
             for record in self.manifest.get("sequences", ())
@@ -264,11 +274,23 @@ class CrossDomainDataset(Dataset):
             )
         current_mask = data["frame"][indices] == current_frame
 
+        # Mirrors PreparedGhostDataset._sample_indices: hold part of the
+        # budget for older scans. Without it one dense scan fills the budget
+        # alone, `age` collapses to 0 everywhere, and the window stops
+        # matching what the checkpoint was trained on.
         current_indices = indices[current_mask]
         context_indices = indices[~current_mask]
-        if len(current_indices) > self.max_points:
+        if len(context_indices):
+            reserve = min(
+                len(context_indices),
+                int(round(self.max_points * self.context_reserve_fraction)),
+            )
+            current_budget = max(1, self.max_points - reserve)
+        else:
+            current_budget = self.max_points
+        if len(current_indices) > current_budget:
             sel = np.linspace(
-                0, len(current_indices) - 1, self.max_points, dtype=np.int64
+                0, len(current_indices) - 1, current_budget, dtype=np.int64
             )
             current_indices = current_indices[sel]
         budget = max(self.max_points - len(current_indices), 0)
@@ -319,6 +341,7 @@ def evaluate_dataset(checkpoint, data_root, args):
         window_frames=args.window_frames or checkpoint["window_frames"],
         max_points=args.max_points or checkpoint["max_points"],
         cache_sequences=args.cache_sequences,
+        context_reserve_fraction=args.context_reserve,
     )
     dataset.checkpoint_schema = checkpoint["schema"]
     loader = DataLoader(
@@ -392,6 +415,10 @@ def main():
         with (output_dir / out_name).open("w", encoding="utf-8") as handle:
             json.dump(result, handle, indent=2, sort_keys=True)
             handle.write("\n")
+        print()
+        print(f"--- {Path(data_root).name} ---")
+        print(format_all_confusion_matrices(result))
+        print()
         print(
             f"{Path(data_root).name}: AUPRC={result['auprc']:.4f} "
             f"AUROC={result['auroc']:.4f} "

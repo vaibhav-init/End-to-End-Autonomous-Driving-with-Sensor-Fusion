@@ -27,6 +27,7 @@ class PreparedGhostDataset(Dataset):
         augment=False,
         seed=42,
         cache_sequences=4,
+        context_reserve_fraction=0.25,
     ):
         self.root = Path(root)
         with (self.root / "manifest.json").open("r", encoding="utf-8") as handle:
@@ -42,8 +43,11 @@ class PreparedGhostDataset(Dataset):
         self.seed = int(seed)
         self.epoch = 0
         self.cache_sequences = max(1, int(cache_sequences))
+        self.context_reserve_fraction = float(context_reserve_fraction)
         if self.window_frames < 1 or self.max_points < 1:
             raise ValueError("window_frames and max_points must be positive")
+        if not 0.0 <= self.context_reserve_fraction < 1.0:
+            raise ValueError("context_reserve_fraction must be in [0, 1)")
 
         self.sequences = [
             record
@@ -63,6 +67,39 @@ class PreparedGhostDataset(Dataset):
         if not self.samples:
             raise ValueError(f"Split {split!r} contains no radar frames")
         self._cache = OrderedDict()
+        self._report_density(split)
+
+    def _report_density(self, split):
+        """Warn when scans are dense enough to squeeze out temporal context.
+
+        Cheap manifest-only estimate. It exists because an over-dense export
+        silently disabling the age feature is invisible in the loss curve --
+        training simply reports a healthy in-domain score while the model
+        learns a window it will never see again at evaluation time.
+        """
+
+        total_points = 0
+        total_frames = 0
+        for record in self.sequences:
+            frames = sum(
+                len(values) for values in record.get("sensor_frames", {}).values()
+            )
+            total_points += int(record.get("points", 0))
+            total_frames += frames
+        if not total_frames:
+            return
+        per_frame = total_points / total_frames
+        budget = self.max_points * (1.0 - self.context_reserve_fraction)
+        if per_frame > budget:
+            print(
+                f"[dataset:{split}] WARNING mean {per_frame:.0f} points/scan "
+                f"exceeds the {budget:.0f}-point current-scan budget "
+                f"(max_points={self.max_points}, "
+                f"context_reserve={self.context_reserve_fraction:.2f}). "
+                "Current scans are being subsampled; reduce export density or "
+                "raise --max-points so the window stays comparable to the "
+                "evaluation domain."
+            )
 
     def set_epoch(self, epoch):
         self.epoch = int(epoch)
@@ -138,10 +175,29 @@ class PreparedGhostDataset(Dataset):
         return indices[positions]
 
     def _sample_indices(self, indices, current_mask, sample_index):
+        """Budget points across the window without starving temporal context.
+
+        Only the current scan is scored, so context points are the first to be
+        dropped -- accumulation-aware downsampling in the sense of Kopp et al.
+        The context share is never driven to zero, however. A model trained on
+        windows where every point has age 0 cannot use the age feature it is
+        handed at evaluation time, and dense frames used to hit exactly that
+        case: the whole temporal channel collapsed silently whenever one scan
+        filled the point budget on its own.
+        """
+
         current = indices[current_mask]
         context = indices[~current_mask]
-        if len(current) >= self.max_points:
+        if len(context) == 0:
             return self._evenly_select(current, self.max_points)
+
+        reserve = min(
+            len(context),
+            int(round(self.max_points * self.context_reserve_fraction)),
+        )
+        current_budget = max(1, self.max_points - reserve)
+        if len(current) > current_budget:
+            current = self._evenly_select(current, current_budget)
         remaining = self.max_points - len(current)
         if len(context) > remaining:
             rng = np.random.default_rng(

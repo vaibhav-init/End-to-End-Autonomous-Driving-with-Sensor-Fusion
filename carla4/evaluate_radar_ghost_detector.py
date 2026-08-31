@@ -10,7 +10,10 @@ from torch.utils.data import DataLoader
 
 from radar.ghost_detection.dataset import PreparedGhostDataset
 from radar.ghost_detection.features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
-from radar.ghost_detection.metrics import BinaryHistogramMetrics
+from radar.ghost_detection.metrics import (
+    BinaryHistogramMetrics,
+    format_all_confusion_matrices,
+)
 from radar.ghost_detection.model import create_ghost_model
 
 
@@ -162,6 +165,8 @@ def main():
             },
         }
     )
+    print(format_all_confusion_matrices(result))
+    print()
     print(json.dumps(result, indent=2, sort_keys=True))
     if args.output:
         output = Path(args.output)
