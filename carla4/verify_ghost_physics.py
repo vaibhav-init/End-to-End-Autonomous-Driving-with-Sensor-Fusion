@@ -22,6 +22,7 @@ import argparse
 import collections
 import math
 import statistics
+import time
 
 from radar import create_front_radar
 
@@ -230,6 +231,9 @@ def main():
                 radar.cleanup()
             except Exception:
                 pass
+            # Let any sweep already dispatched finish before the vehicle it
+            # points at is destroyed.
+            time.sleep(0.5)
         for actor in reversed(spawned):
             try:
                 actor.destroy()

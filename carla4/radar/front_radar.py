@@ -549,13 +549,21 @@ class CShenronFrontRadar:
         ego_yaw_rad=None,
         timestamp_s=None,
     ):
-        if ego_velocity is None:
-            ego_velocity = self._vector_components(self.vehicle.get_velocity())
+        try:
+            if ego_velocity is None:
+                ego_velocity = self._vector_components(
+                    self.vehicle.get_velocity()
+                )
+            if ego_yaw_rad is None:
+                ego_yaw_rad = math.radians(
+                    self.vehicle.get_transform().rotation.yaw
+                )
+        except Exception:
+            # Parent vehicle gone mid-sweep; report no relative motion rather
+            # than letting the callback thread abort the process.
+            self._last_relative_velocity_xy = (0.0, 0.0)
+            return 0.0
         obstacle_velocity = np.zeros(3, dtype=np.float64)
-        if ego_yaw_rad is None:
-            ego_yaw_rad = math.radians(
-                self.vehicle.get_transform().rotation.yaw
-            )
         local_x, local_y, local_z = target.direction
         direction = np.array(
             (
@@ -676,12 +684,20 @@ class CShenronFrontRadar:
 
     def cleanup(self):
         sensor = self.sensor
-        self.sensor = None
-        if sensor and sensor.is_alive:
+        # Stop dispatching before clearing the reference so an in-flight
+        # callback sees self.sensor is None and returns instead of touching a
+        # vehicle the caller is about to destroy.
+        if sensor is not None:
             try:
                 sensor.stop()
-                sensor.destroy()
-            except RuntimeError:
+            except Exception:
+                pass
+        self.sensor = None
+        if sensor is not None:
+            try:
+                if sensor.is_alive:
+                    sensor.destroy()
+            except Exception:
                 pass
 
 
@@ -858,12 +874,21 @@ class RealisticFrontRadar(CShenronFrontRadar):
                     int(tag): int(count)
                     for tag, count in zip(tags, counts)
                 }
-            ego_velocity = self._vector_components(
-                self.vehicle.get_velocity()
-            )
-            ego_yaw_rad = math.radians(
-                self.vehicle.get_transform().rotation.yaw
-            )
+            if self.sensor is None:
+                # cleanup() has begun; the parent vehicle may already be gone.
+                return
+            try:
+                ego_velocity = self._vector_components(
+                    self.vehicle.get_velocity()
+                )
+                ego_yaw_rad = math.radians(
+                    self.vehicle.get_transform().rotation.yaw
+                )
+            except Exception:
+                # This runs on the sensor callback thread. A vehicle destroyed
+                # between dispatch and here would otherwise raise out of the
+                # thread and abort the process instead of dropping one sweep.
+                return
             path_curvature_per_m = self._update_path_curvature(ego_velocity)
             timestamp = getattr(measurement, "timestamp", None)
             ideal_targets = []
