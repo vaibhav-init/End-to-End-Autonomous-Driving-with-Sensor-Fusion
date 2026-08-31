@@ -5,6 +5,7 @@ import unittest
 from radar.multipath import (
     ReflectorSegment,
     generate_multipath_targets,
+    incidence_reflection_loss_db,
 )
 from radar.realistic_core import (
     IdealRadarTarget,
@@ -183,3 +184,86 @@ class MultipathGeometryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultipathPhysicsTest(unittest.TestCase):
+    """Phase 1 realism fixes: Fresnel loss, true-velocity Doppler, fading."""
+
+    def test_reflection_loss_falls_towards_grazing_incidence(self):
+        # A dielectric reflects weakly head-on and almost perfectly at
+        # grazing, so loss must decrease as the incidence cosine shrinks.
+        normal_incidence = incidence_reflection_loss_db(4, 1.0, 3.0)
+        oblique = incidence_reflection_loss_db(4, 0.5, 3.0)
+        grazing = incidence_reflection_loss_db(4, 0.05, 3.0)
+        self.assertGreater(normal_incidence, oblique)
+        self.assertGreater(oblique, grazing)
+        self.assertGreaterEqual(grazing, 0.0)
+
+    def test_conductor_reflects_better_than_concrete(self):
+        guard_rail = incidence_reflection_loss_db(28, 0.5, 3.0)
+        concrete = incidence_reflection_loss_db(4, 0.5, 3.0)
+        self.assertLess(guard_rail, concrete)
+
+    def test_unknown_material_falls_back_to_stored_loss(self):
+        self.assertAlmostEqual(
+            incidence_reflection_loss_db(99, 0.5, 7.25),
+            7.25,
+        )
+
+    def test_tangential_velocity_changes_ghost_doppler(self):
+        # A target moving along the wall is almost purely tangential: its
+        # radial component is near zero, so a radial-only reconstruction
+        # cannot recover the mirrored path's Doppler.
+        config = geometry_config()
+        along_wall = replace(
+            target(),
+            relative_velocity_mps=0.1,
+            velocity_xy_mps=(6.0, 0.0),
+        )
+        radial_only = replace(along_wall, velocity_xy_mps=(0.0, 0.0))
+        with_vector = generate_multipath_targets([along_wall], [wall()], config)
+        without_vector = generate_multipath_targets(
+            [radial_only], [wall()], config
+        )
+        self.assertTrue(with_vector and without_vector)
+        paired = {
+            (path.bounce_type, path.bounce_order): path.relative_velocity_mps
+            for path in with_vector
+        }
+        baseline = {
+            (path.bounce_type, path.bounce_order): path.relative_velocity_mps
+            for path in without_vector
+        }
+        shared = set(paired) & set(baseline)
+        self.assertTrue(shared)
+        self.assertTrue(
+            any(
+                abs(paired[key] - baseline[key]) > 0.5
+                for key in shared
+            ),
+            "tangential motion must change the mirrored-path Doppler",
+        )
+
+    def test_ghost_fading_is_stochastic_and_correlated(self):
+        config = replace(
+            geometry_config(),
+            multipath_fading_std_db=4.0,
+            multipath_fading_correlation=0.85,
+        )
+        model = RealisticRadarModel(config, seed=7)
+        samples = [model._update_ghost_fading(-1234) for _ in range(400)]
+        self.assertGreater(max(samples) - min(samples), 1.0)
+        mean = sum(samples) / len(samples)
+        variance = sum((value - mean) ** 2 for value in samples) / len(samples)
+        self.assertGreater(variance, 0.5)
+        # Correlated, not white: successive draws should track each other.
+        lagged = sum(
+            (a - mean) * (b - mean) for a, b in zip(samples, samples[1:])
+        ) / (len(samples) - 1)
+        self.assertGreater(lagged / max(variance, 1e-9), 0.4)
+
+    def test_fading_is_disabled_when_std_is_zero(self):
+        config = replace(geometry_config(), multipath_fading_std_db=0.0)
+        model = RealisticRadarModel(config, seed=7)
+        samples = [model._update_ghost_fading(-99) for _ in range(20)]
+        self.assertTrue(all(value == 0.0 for value in samples))

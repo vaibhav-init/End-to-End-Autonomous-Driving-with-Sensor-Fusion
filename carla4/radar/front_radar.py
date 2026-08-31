@@ -432,6 +432,8 @@ class CShenronFrontRadar:
         self._last_error = None
         self._reported_error = False
         self._kinematic_state = {}
+        # Latched by _target_closing_speed; sensor-frame (x forward, y right).
+        self._last_relative_velocity_xy = (0.0, 0.0)
         self.config = replace(
             config or CShenronConfig(),
             max_range_m=float(range_m),
@@ -588,8 +590,16 @@ class CShenronFrontRadar:
                     timestamp_s,
                 )
 
-        radial_relative_velocity = float(
-            np.dot(obstacle_velocity - ego_velocity, direction)
+        relative_world = obstacle_velocity - ego_velocity
+        radial_relative_velocity = float(np.dot(relative_world, direction))
+        # Rotate the world-frame relative velocity back into sensor
+        # coordinates so the multipath solver can use the full vector rather
+        # than a radial-only reconstruction.
+        cos_yaw = math.cos(ego_yaw_rad)
+        sin_yaw = math.sin(ego_yaw_rad)
+        self._last_relative_velocity_xy = (
+            float(cos_yaw * relative_world[0] + sin_yaw * relative_world[1]),
+            float(-sin_yaw * relative_world[0] + cos_yaw * relative_world[1]),
         )
         return -radial_relative_velocity
 
@@ -849,6 +859,15 @@ class RealisticFrontRadar(CShenronFrontRadar):
             timestamp = getattr(measurement, "timestamp", None)
             ideal_targets = []
             for target in targets:
+                # Closing speed first: it also latches the sensor-frame
+                # relative velocity vector that the multipath solver needs,
+                # so read the vector only after this call.
+                closing_speed = self._target_closing_speed(
+                    target,
+                    ego_velocity=ego_velocity,
+                    ego_yaw_rad=ego_yaw_rad,
+                    timestamp_s=timestamp,
+                )
                 ideal_targets.append(
                     IdealRadarTarget(
                         object_id=target.object_id,
@@ -858,17 +877,13 @@ class RealisticFrontRadar(CShenronFrontRadar):
                             target.direction[1],
                             target.direction[0],
                         ),
-                        relative_velocity_mps=self._target_closing_speed(
-                            target,
-                            ego_velocity=ego_velocity,
-                            ego_yaw_rad=ego_yaw_rad,
-                            timestamp_s=timestamp,
-                        ),
+                        relative_velocity_mps=closing_speed,
                         snr_db=target.snr_db,
                         point_count=target.point_count,
                         lateral_extent_m=target.lateral_extent_m,
                         parent_object_id=target.object_id,
                         path_length_m=2.0 * target.distance_m,
+                        velocity_xy_mps=self._last_relative_velocity_xy,
                     )
                 )
             reflectors = extract_reflector_segments(

@@ -16,6 +16,35 @@ import numpy as np
 REFLECTOR_TAGS = frozenset((3, 4, 5, 20, 26, 28))
 DYNAMIC_TARGET_TAGS = frozenset((12, 13, 14, 15, 16, 17, 18, 19, 21))
 
+# 77 GHz automotive band.
+RADAR_WAVELENGTH_M = 3.896e-3
+
+# Relative permittivity per reflector class, following the ITU-R P.2040
+# building-material tables. ``None`` marks a conductor, which reflects almost
+# perfectly and is limited by ohmic loss rather than by Fresnel transmission.
+_RELATIVE_PERMITTIVITY = {
+    5: None,    # metal fence
+    28: None,   # guard rail
+    4: 5.24,    # wall (concrete)
+    3: 5.24,    # building facade
+    20: 5.0,    # generic static object
+    26: 5.24,   # bridge
+}
+_CONDUCTOR_LOSS_DB = 0.5
+
+# RMS surface height, used for the Rayleigh roughness criterion. Rough
+# surfaces scatter the coherent specular component away, and they do so most
+# strongly near normal incidence -- at grazing angles even a rough wall looks
+# smooth to the wave.
+_SURFACE_ROUGHNESS_M = {
+    5: 0.0002,
+    28: 0.0002,
+    4: 0.0015,
+    3: 0.0020,
+    20: 0.0025,
+    26: 0.0020,
+}
+
 
 @dataclass(frozen=True)
 class ReflectorSegment:
@@ -74,6 +103,39 @@ def _reflection_loss_db(semantic_tag):
         20: 4.5,  # generic static object
         26: 3.5,  # bridge
     }.get(int(semantic_tag), 5.0)
+
+
+def incidence_reflection_loss_db(semantic_tag, incidence_cosine, fallback_db):
+    """Fresnel reflection loss at a given incidence angle.
+
+    The previous model charged a fixed per-material loss regardless of
+    geometry, which is wrong in the direction that matters: for a dielectric
+    the reflection coefficient is weakest at normal incidence and rises
+    towards unity at grazing, so a wall seen edge-on returns far more energy
+    than the flat table implied. ``incidence_cosine`` is measured from the
+    surface normal, so grazing corresponds to values near zero.
+    """
+
+    tag = int(semantic_tag)
+    if tag not in _RELATIVE_PERMITTIVITY:
+        return float(fallback_db)
+    cosine = min(max(abs(float(incidence_cosine)), 1.0e-4), 1.0)
+    permittivity = _RELATIVE_PERMITTIVITY[tag]
+    if permittivity is None:
+        loss_db = _CONDUCTOR_LOSS_DB
+    else:
+        sine_squared = max(0.0, 1.0 - cosine * cosine)
+        root = math.sqrt(max(permittivity - sine_squared, 1.0e-9))
+        coefficient = (cosine - root) / (cosine + root)
+        reflectance = max(coefficient * coefficient, 1.0e-6)
+        loss_db = -10.0 * math.log10(reflectance)
+    roughness_m = _SURFACE_ROUGHNESS_M.get(tag, 0.0015)
+    rayleigh = (
+        4.0 * math.pi * roughness_m * cosine / RADAR_WAVELENGTH_M
+    ) ** 2
+    # exp(-rayleigh) attenuation expressed in dB.
+    loss_db += 4.342944819 * rayleigh
+    return float(loss_db)
 
 
 def extract_reflector_segments(returns, config):
@@ -222,17 +284,34 @@ def _specular_point(target_xy, reflector, config):
     return point, target_mirror, incidence_cosine
 
 
-def _path_snr_db(target, effective_range_m, reflector, bounce_order, config):
+def _path_snr_db(
+    target,
+    effective_range_m,
+    reflector,
+    bounce_order,
+    config,
+    incidence_cosine=None,
+):
     direct_range = max(float(target.distance_m), 1.0)
     spreading_loss = 40.0 * math.log10(
         max(float(effective_range_m), 1.0) / direct_range
     )
+    per_bounce_loss = (
+        reflector.reflection_loss_db
+        if incidence_cosine is None
+        else incidence_reflection_loss_db(
+            reflector.semantic_tag,
+            incidence_cosine,
+            reflector.reflection_loss_db,
+        )
+    )
     if bounce_order == 2:
         bounce_loss = float(config.multipath_second_order_loss_db)
-        reflection_loss = reflector.reflection_loss_db
+        reflection_loss = per_bounce_loss
     else:
         bounce_loss = float(config.multipath_third_order_loss_db)
-        reflection_loss = 2.0 * reflector.reflection_loss_db
+        # A third-order path strikes the surface twice.
+        reflection_loss = 2.0 * per_bounce_loss
     return float(target.snr_db) - spreading_loss - bounce_loss - reflection_loss
 
 
@@ -241,10 +320,22 @@ def _path_closing_speeds(target, target_xy, target_mirror, normal):
     mirror_unit = target_mirror / max(
         float(np.linalg.norm(target_mirror)), 1.0e-12
     )
-    # The source target exposes radial motion only.  Treating its unobserved
-    # tangential velocity as zero is explicit and keeps the approximation
-    # radar-observable rather than querying privileged CARLA actor velocity.
-    target_velocity = -float(target.relative_velocity_mps) * target_unit
+    # Prefer the true relative velocity vector when the sensor front end
+    # supplies one. Reconstructing it from the radial component alone assumes
+    # the target moves straight at the radar, which is worst exactly where
+    # multipath matters most: a road user travelling *along* a wall is almost
+    # entirely tangential, so a radial-only reconstruction throws away the
+    # component that determines the mirrored path's Doppler.
+    velocity_xy = getattr(target, "velocity_xy_mps", None)
+    if velocity_xy is not None and (
+        abs(float(velocity_xy[0])) > 1.0e-9 or abs(float(velocity_xy[1])) > 1.0e-9
+    ):
+        target_velocity = np.array(
+            (float(velocity_xy[0]), float(velocity_xy[1])),
+            dtype=np.float64,
+        )
+    else:
+        target_velocity = -float(target.relative_velocity_mps) * target_unit
     mirror_velocity = target_velocity - 2.0 * normal * float(
         np.dot(target_velocity, normal)
     )
@@ -276,7 +367,7 @@ def generate_multipath_targets(targets, reflectors, config):
             result = _specular_point(target_xy, reflector, config)
             if result is None:
                 continue
-            reflection_point, target_mirror, _ = result
+            reflection_point, target_mirror, incidence_cosine = result
             mirror_distance = float(np.linalg.norm(target_mirror))
             direct_distance = float(np.linalg.norm(target_xy))
             second_range = 0.5 * (direct_distance + mirror_distance)
@@ -336,6 +427,7 @@ def generate_multipath_targets(targets, reflectors, config):
                     reflector,
                     order,
                     config,
+                    incidence_cosine=incidence_cosine,
                 )
                 ghost_id = _stable_negative_id(
                     "ghost",

@@ -116,6 +116,13 @@ class RealisticRadarConfig:
     multipath_third_order_loss_db: float = 9.0
     multipath_enable_third_order: bool = True
     multipath_max_ghosts_per_target: int = 6
+    # Specular multipath fades: surface roughness, aspect changes and
+    # polarisation make a real ghost come and go between scans. Modelling the
+    # path as always present makes every ghost confirm through the tracker,
+    # which is both unphysical and the reason a persistence test cannot tell
+    # ghosts from real returns.
+    multipath_fading_std_db: float = 4.0
+    multipath_fading_correlation: float = 0.85
 
     # Weather is deliberately modest at 77 GHz.  Values represent additional
     # dB loss over 100 m at a normalized CARLA weather setting of 1.0.
@@ -183,6 +190,11 @@ class IdealRadarTarget:
     bounce_type: str = "direct"
     bounce_order: int = 1
     path_length_m: float = 0.0
+    # Relative velocity in sensor coordinates (x forward, y right). The
+    # multipath solver needs the full vector: reconstructing it from the
+    # radial component alone assumes purely head-on motion, which is exactly
+    # wrong for a road user travelling along a reflecting surface.
+    velocity_xy_mps: tuple = (0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -555,6 +567,7 @@ class RealisticRadarModel:
         self._last_timestamp_s = None
         self._dropout_bad = {}
         self._error_state = {}
+        self._ghost_fading = {}
         self._interference_active = False
         self._latency_queue = deque()
         self._tracks = {}
@@ -645,6 +658,23 @@ class RealisticRadarModel:
         self._dropout_bad[object_id] = bad
         return bad
 
+    def _update_ghost_fading(self, object_id):
+        """Temporally correlated fading on one multipath path, in dB.
+
+        AR(1) so a path fades over several scans rather than flickering
+        independently every frame; stable path ids keep each ghost's history
+        separate.
+        """
+
+        rho = float(np.clip(self.config.multipath_fading_correlation, 0.0, 0.999))
+        previous = self._ghost_fading.get(object_id, 0.0)
+        innovation_scale = math.sqrt(max(0.0, 1.0 - rho * rho))
+        updated = rho * previous + innovation_scale * float(self._rng.normal())
+        self._ghost_fading[object_id] = updated
+        if len(self._ghost_fading) > 4096:
+            self._ghost_fading.clear()
+        return updated * float(self.config.multipath_fading_std_db)
+
     def _measure_target(self, target, environment, source="direct"):
         error = self._update_correlated_error(target.object_id)
         snr_db = (
@@ -652,6 +682,8 @@ class RealisticRadarModel:
             - self._attenuation_db(target.distance_m, environment)
             + error[3] * self.config.snr_fluctuation_std_db
         )
+        if source == "ghost":
+            snr_db += self._update_ghost_fading(target.object_id)
         probability = self._detection_probability(snr_db)
         if source == "direct" and self._update_dropout_state(target.object_id):
             probability *= self.config.dropout_detection_scale
