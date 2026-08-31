@@ -48,8 +48,46 @@ have to be recollected.
   fading term in dB, which also makes a persistence test meaningful.
 
 **Done when:** ghosts flicker, Doppler follows the true path geometry, and
-amplitude varies with incidence angle. Covered by six new tests in
+amplitude varies with incidence angle. Covered by seven tests in
 `radar/tests/test_multipath.py`.
+
+**Verified against live CARLA** (Town04, `geometry_multipath_v1`, 84 frames,
+`verify_ghost_physics.py`):
+
+| | measured |
+|---|---|
+| reflectors fitted / frame | 8.2 (max 9) |
+| multipath candidates / frame | 24.7 (max 33) |
+| path families | type1-2nd 625, type2-2nd 594, type2-3rd 332 |
+| per-path SNR spread (fading) | median 10.9 dB, max 20.3 dB |
+| paths present in <95% of frames | 52 / 52 |
+| ghost SNR across paths | 0.2 .. 40.8 dB |
+| ghost vs parent radial velocity | median 0.31 m/s, max 3.92 m/s |
+
+Per-bounce reflection loss after the Fresnel change — strong at grazing, weak
+head-on, which is the point:
+
+| material | normal | 60 deg | grazing |
+|---|---|---|---|
+| guard rail (metal) | 0.61 dB | 0.53 | 0.50 |
+| plastered wall | 12.20 | 5.19 | 0.43 |
+| building facade | 15.36 | 5.99 | 0.44 |
+
+Two caveats on the above. The Doppler check confirms ghost velocity is
+path-dependent but does not isolate the tangential contribution on its own --
+`test_tangential_velocity_changes_ghost_doppler` is what pins that down. And
+the run reached 84 of 150 frames before a tick exceeded a 300 s timeout; see
+the open issue below.
+
+### Open issue: geometry multipath is too slow for closed loop
+
+Geometry mode refits reflector planes from the full semantic LiDAR sweep every
+scan and then solves the image method for every dynamic target against every
+plane. Measured at roughly 5.6 s per frame with 3 vehicles, and a tick
+eventually exceeds even a 300 s timeout. Offline collection (Phase 3) tolerates
+this; **Phase 5 cannot** -- the closed loop needs 20 Hz. Likely fixes: cache
+reflector fits across scans, cap reflectors per sweep, or precompute static
+scene planes once per map. Revisit before Phase 5.
 
 ---
 
