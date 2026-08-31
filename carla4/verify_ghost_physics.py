@@ -20,6 +20,7 @@ run against a session someone else is using.
 
 import argparse
 import collections
+import faulthandler
 import math
 import statistics
 import time
@@ -53,6 +54,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # SIGABRT from a CARLA C++ throw on a callback thread gives no Python
+    # traceback by default; this dumps every thread's stack so the offending
+    # frame is identifiable.
+    faulthandler.enable(all_threads=True)
     import carla
 
     client = carla.Client(args.host, args.port)
@@ -114,7 +119,7 @@ def main():
 
         for frame_index in range(args.frames):
             world.tick()
-            if frame_index and frame_index % 50 == 0:
+            if frame_index and frame_index % 10 == 0:
                 print(f"  ... {frame_index}/{args.frames} frames, "
                       f"{ghost_frames} with ghosts, "
                       f"{len(per_path_snr)} paths", flush=True)
