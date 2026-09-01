@@ -495,13 +495,13 @@ def main():
     parser.add_argument(
         "--traffic-light-red-s",
         type=float,
-        default=5.0,
+        default=0.0,
         help=(
-            "how long every traffic light stays red. The ego ignores lights "
-            "but NPCs do not, so it queues behind them; a shorter red cuts "
-            "the queues without thinning the traffic that supplies radar "
-            "targets. Green and yellow are left alone. Pass 0 to leave the "
-            "map's own timing untouched (default: 5.0)"
+            "how long every traffic light stays red; 0 leaves the map's own "
+            "timing alone (default). Measured on Town01 the map's red is "
+            "already 2.0 s, which is far too short to explain the queueing "
+            "seen there -- that is traffic density in a small map, not "
+            "signal timing. Green and yellow are never touched"
         ),
     )
     parser.add_argument(
