@@ -46,6 +46,44 @@ class RealisticRadarCoreTest(unittest.TestCase):
         self.assertEqual(output.distance_m, 32.0)
         self.assertEqual(output.relative_velocity_mps, 4.0)
 
+    def test_clean_profile_emits_no_ghosts_from_either_source(self):
+        """The clean baseline arm needs full sensor realism minus multipath.
+
+        ``ideal_target_list_v1`` also has no ghosts, but it switches off the
+        noise, dropouts and false alarms too, so it is an ablation endpoint
+        rather than a usable clean radar. This profile is the control arm the
+        ghost-filter comparison is measured against, so it has to be silent on
+        both ghost paths: the stochastic one and the geometry one.
+        """
+
+        config = load_realistic_radar_config("realistic_clean_v1")
+        self.assertEqual(config.multipath_mode, "off")
+        self.assertEqual(config.max_active_ghosts, 0)
+
+        near_ghost = ideal_target(object_id=99, distance_m=12.0, snr_db=45.0)
+        clean = RealisticRadarModel(config, seed=7)
+        for _ in range(400):
+            output = clean.step(
+                [ideal_target(object_id=1, distance_m=30.0)],
+                multipath_targets=[near_ghost],
+            )
+            self.assertNotEqual(output.source, "ghost")
+
+        # Same inputs through the geometry profile must surface the ghost,
+        # otherwise the assertion above passes for want of a ghost to find.
+        geometry = RealisticRadarModel(
+            load_realistic_radar_config("geometry_multipath_v1"), seed=7
+        )
+        sources = set()
+        for _ in range(400):
+            sources.add(
+                geometry.step(
+                    [ideal_target(object_id=1, distance_m=30.0)],
+                    multipath_targets=[near_ghost],
+                ).source
+            )
+        self.assertIn("ghost", sources)
+
     def test_default_tracker_applies_latency_and_m_of_n_confirmation(self):
         base = load_realistic_radar_config("generic_lrr_v1")
         config = replace(

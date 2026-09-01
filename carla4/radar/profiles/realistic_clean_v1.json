@@ -1,0 +1,7 @@
+{
+  "profile_name": "realistic_clean_v1",
+  "multipath_mode": "off",
+  "ghost_start_probability": 0.0,
+  "ghost_survival_probability": 0.0,
+  "max_active_ghosts": 0
+}

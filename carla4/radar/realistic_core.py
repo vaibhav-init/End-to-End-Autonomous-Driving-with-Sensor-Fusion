@@ -33,6 +33,7 @@ REALISTIC_RADAR_PROFILES = (
     "ideal_target_list_v1",
     "gaussian_baseline_v1",
     "generic_lrr_v1",
+    "realistic_clean_v1",
     "geometry_multipath_v1",
     "rgd_regime_v1",
 )
