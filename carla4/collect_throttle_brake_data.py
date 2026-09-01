@@ -113,6 +113,32 @@ def _load_idm_teacher(desired_speed_kmh, fps):
     return model, controller, BasicAgentSteering
 
 
+def follow_ego_with_spectator(world, ego):
+    """Point the CARLA spectator at the ego (third-person chase view).
+
+    The spectator is a free camera and follows nothing on its own, so without
+    this the window stays wherever it was left and the run appears to do
+    nothing. Called from the settle loop as well as the main loop so the ego
+    is visible from the moment it spawns rather than only once collection
+    starts.
+    """
+
+    try:
+        if not ego.is_alive:
+            return
+        transform = ego.get_transform()
+        world.get_spectator().set_transform(
+            carla.Transform(
+                transform.location
+                - transform.get_forward_vector() * 15
+                + carla.Location(z=8),
+                carla.Rotation(pitch=-20, yaw=transform.rotation.yaw),
+            )
+        )
+    except RuntimeError:
+        pass
+
+
 def stacked_feature_names(base_cols, history_frames):
     cols = []
     for lag in range(history_frames):
@@ -665,6 +691,7 @@ def main():
     for settle_index in range(40):
         tick_start = time.time()
         world.tick()
+        follow_ego_with_spectator(world, ego)
         tick_elapsed = time.time() - tick_start
         if settle_index < 3 or tick_elapsed > 1.0:
             print(
@@ -1007,18 +1034,7 @@ def main():
                     f"area={visual['tl_bbox_area']:.4f}"
                 )
 
-            try:
-                spectator = world.get_spectator()
-                transform = ego.get_transform()
-                spectator.set_transform(
-                    carla.Transform(
-                        transform.location - transform.get_forward_vector() * 12
-                        + carla.Location(z=6),
-                        carla.Rotation(pitch=-20, yaw=transform.rotation.yaw),
-                    )
-                )
-            except RuntimeError:
-                pass
+            follow_ego_with_spectator(world, ego)
 
     except KeyboardInterrupt:
         print("\n  Collection interrupted")
