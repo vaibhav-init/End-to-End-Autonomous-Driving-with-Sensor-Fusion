@@ -43,7 +43,7 @@ from yolo_perception import (
     empty_obstacle_features,
     empty_visual_features,
 )
-from speed_model import BASE_FEATURE_COLS, flatten_history
+from speed_model import BASE_FEATURE_COLS, feature_cols_for, flatten_history
 from weather_utils import apply_random_fog
 
 try:
@@ -555,6 +555,16 @@ def main():
         if args.radar_backend == "native"
         else 240000
     )
+    # Radar-only runs drop the traffic-light columns entirely rather than
+    # pinning them at zero: ten frames of four constants would spend 40 of the
+    # model's 100 inputs saying nothing.
+    active_feature_cols = feature_cols_for(args.vision)
+    print(
+        f"  Features:        {len(active_feature_cols)} base x {args.history} "
+        f"frames = {len(active_feature_cols) * args.history} inputs"
+        f"{'' if args.vision else '  (radar only)'}"
+    )
+
     radar_metadata = describe_radar_configuration(
         backend=args.radar_backend,
         range_m=MAX_RADAR_RANGE,
@@ -1053,7 +1063,7 @@ def main():
             feature_history.append(base_features)
 
             if len(feature_history) == args.history:
-                row = flatten_history(feature_history, BASE_FEATURE_COLS)
+                row = flatten_history(feature_history, active_feature_cols)
                 row.update(
                     {
                         "frame": frame,
@@ -1119,8 +1129,10 @@ def main():
                     "label_horizon": args.label_horizon,
                     "vision_enabled": bool(args.vision),
                     "teacher": args.teacher,
-                    "base_feature_cols": BASE_FEATURE_COLS,
-                    "stacked_feature_cols": stacked_feature_names(BASE_FEATURE_COLS, args.history),
+                    "base_feature_cols": active_feature_cols,
+                    "stacked_feature_cols": stacked_feature_names(
+                        active_feature_cols, args.history
+                    ),
                     "label_col": "teacher_target_speed",
                 }
                 config.update(radar_metadata)

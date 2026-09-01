@@ -145,6 +145,18 @@ class MLPDriver(Driver):
         self.base_feature_cols = (
             model_config.get("base_feature_cols") or DEFAULT_BASE_FEATURE_COLS
         )
+        # A radar-only model has no traffic-light columns, so there is nothing
+        # for the camera or YOLO to feed; attaching them would only add a
+        # sensor and a CUDA context that contend with CARLA's renderer.
+        self.vision_enabled = bool(
+            model_config.get(
+                "vision_enabled",
+                any(
+                    name.startswith("tl_") or name == "traffic_light_state"
+                    for name in self.base_feature_cols
+                ),
+            )
+        )
         trained_radar_backend = model_config.get("radar_backend", "native")
         self.radar_points_per_second = int(
             model_config.get(
@@ -244,10 +256,17 @@ class MLPDriver(Driver):
                     "Ghost rejection threshold differs from training data."
                 )
 
-        # Camera + YOLO give traffic-light features in both modes (and obstacle
-        # detection in vision mode). YOLO is required for vision, optional for radar.
-        self.camera = CameraManager(ego, world)
-        self.yolo = YOLOPerception() if YOLO_AVAILABLE else None
+        # Camera + YOLO give traffic-light features (and obstacle detection in
+        # vision mode). A radar-only model has no columns for them, so skip
+        # both entirely rather than paying for a sensor and a CUDA context
+        # whose output is discarded.
+        if self.vision_enabled:
+            self.camera = CameraManager(ego, world)
+            self.yolo = YOLOPerception() if YOLO_AVAILABLE else None
+        else:
+            self.camera = None
+            self.yolo = None
+            print("  [mlp] radar-only model; camera and YOLO not attached")
         if self.use_radar:
             self.radar = create_front_radar(
                 ego,
@@ -319,7 +338,7 @@ class MLPDriver(Driver):
         accel = (speed - self._prev_speed) * self.fps if self._frame > 0 else 0.0
         self._prev_speed = speed
 
-        cam_frame = self.camera.get_frame()
+        cam_frame = self.camera.get_frame() if self.camera is not None else None
         visual = empty_visual_features()
         obstacle = empty_obstacle_features()
         if self.yolo is not None and cam_frame is not None:

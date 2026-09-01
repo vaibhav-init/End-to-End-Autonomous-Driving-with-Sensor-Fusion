@@ -7,18 +7,38 @@ import torch
 import torch.nn as nn
 
 
-BASE_FEATURE_COLS = [
+# Longitudinal state the radar and ego provide on their own.
+RADAR_ONLY_FEATURE_COLS = [
     "ego_speed",
     "ego_acceleration",
     "distance",
     "relative_velocity",
     "ttc",
     "obstacle_speed",
+]
+
+# Traffic-light features, which need the camera and YOLO.
+VISION_FEATURE_COLS = [
     "traffic_light_state",
     "tl_confidence",
     "tl_bbox_area",
     "tl_center_x",
 ]
+
+# Full schema. A radar-only run uses RADAR_ONLY_FEATURE_COLS instead: carrying
+# four columns pinned at zero through a ten-frame history would spend 40 of
+# the model's 100 inputs on constants.
+BASE_FEATURE_COLS = RADAR_ONLY_FEATURE_COLS + VISION_FEATURE_COLS
+
+
+def feature_cols_for(vision_enabled):
+    """Base column list for a run with or without the camera."""
+
+    return (
+        list(BASE_FEATURE_COLS)
+        if vision_enabled
+        else list(RADAR_ONLY_FEATURE_COLS)
+    )
 
 
 def feature_sort_key(name):

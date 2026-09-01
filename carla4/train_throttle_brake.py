@@ -452,6 +452,12 @@ def main():
         "town": dataset_config.get("town") if dataset_config else None,
         "history_frames": dataset_config.get("history_frames") if dataset_config else None,
         "base_feature_cols": dataset_config.get("base_feature_cols") if dataset_config else None,
+        # Carried through so the deployed driver matches how the data was
+        # collected: a radar-only model must not have a camera attached.
+        "vision_enabled": (
+            dataset_config.get("vision_enabled", True) if dataset_config else True
+        ),
+        "teacher": dataset_config.get("teacher") if dataset_config else None,
         "fps": dataset_config.get("fps") if dataset_config else None,
         "radar_backend": (
             dataset_config.get("radar_backend", "native")
