@@ -91,6 +91,7 @@ class IntelligentDriverModel:
         max_acceleration_mps2=1.5,
         comfortable_deceleration_mps2=2.0,
         acceleration_exponent=4.0,
+        command_lead_margin_mps=2.0,
     ):
         self.desired_speed_mps = float(desired_speed_mps)
         self.time_headway_s = float(time_headway_s)
@@ -100,6 +101,13 @@ class IntelligentDriverModel:
             comfortable_deceleration_mps2
         )
         self.acceleration_exponent = float(acceleration_exponent)
+        self.command_lead_margin_mps = float(command_lead_margin_mps)
+        self._commanded_speed = None
+
+    def reset(self):
+        """Forget the integrated command; call after a respawn or handover."""
+
+        self._commanded_speed = None
 
     def acceleration(self, speed_mps, gap_m, closing_speed_mps):
         """IDM acceleration.
@@ -127,13 +135,31 @@ class IntelligentDriverModel:
         return self.max_acceleration_mps2 * (free_road - interaction)
 
     def target_speed(self, speed_mps, gap_m, closing_speed_mps, dt):
-        """Integrate one step of IDM acceleration into a target speed."""
+        """Integrate one step of IDM acceleration into a target speed.
+
+        The command is integrated from its own previous value, not from the
+        measured speed. Integrating from the measured speed returns
+        ``speed + a*dt``, so the PID downstream sees an error of exactly
+        ``a*dt`` on every tick no matter how far from the desired speed the
+        vehicle is -- at 20 Hz that is 0.075 m/s for a full 1.5 m/s^2 demand,
+        which is not enough throttle to accelerate at all. From a standstill
+        it also sits under the brake-hold threshold, so the state machine
+        holds the brake, the speed stays zero, and the ego never moves.
+
+        ``command_lead_margin_mps`` is the anti-windup: the setpoint may not
+        run more than that far ahead of what the vehicle actually achieved,
+        so a blocked ego does not accumulate an unreachable command.
+        """
 
         acceleration = self.acceleration(speed_mps, gap_m, closing_speed_mps)
-        return max(
-            0.0,
-            min(
-                self.desired_speed_mps,
-                float(speed_mps) + acceleration * float(dt),
-            ),
+        measured = max(0.0, float(speed_mps))
+        base = (
+            measured if self._commanded_speed is None else self._commanded_speed
         )
+        command = base + acceleration * float(dt)
+        # Anti-windup, applied after integrating so the bound is exact.
+        command = min(command, measured + self.command_lead_margin_mps)
+        self._commanded_speed = max(
+            0.0, min(self.desired_speed_mps, command)
+        )
+        return self._commanded_speed

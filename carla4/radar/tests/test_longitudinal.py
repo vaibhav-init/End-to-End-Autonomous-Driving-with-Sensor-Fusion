@@ -73,6 +73,52 @@ class IntelligentDriverModelTest(unittest.TestCase):
             model.desired_speed_mps + 1.0e-9,
         )
 
+    def test_accelerates_away_from_a_standstill(self):
+        """Regression: the ego sat still forever at the start of collection.
+
+        ``target_speed`` used to integrate from the *measured* speed, so at
+        rest it returned 0 + 1.5*0.05 = 0.075 m/s. That is below the hold
+        threshold of the controller it feeds, so the brake was held, the
+        speed stayed zero, and the command stayed at 0.075 -- a deadlock the
+        run could never leave.
+        """
+
+        model = idm()
+        controller = HybridStateMachineController(PIDSpeedController(dt=0.05))
+        speed = 0.0
+        for _ in range(40):  # two seconds at 20 Hz
+            target = model.target_speed(
+                speed, gap_m=100.0, closing_speed_mps=0.0, dt=0.05
+            )
+            throttle, brake = controller.run_step(target, speed)
+            # Crude plant: enough to tell "moving" from "held at zero".
+            speed = max(0.0, speed + (throttle * 1.5 - brake * 4.0) * 0.05)
+        self.assertEqual(controller.state, "DRIVE")
+        self.assertGreater(speed, 1.0)
+
+    def test_command_does_not_wind_up_while_blocked(self):
+        """A stuck ego must not accumulate an unreachable setpoint."""
+
+        model = idm()
+        target = 0.0
+        for _ in range(200):
+            target = model.target_speed(
+                0.0, gap_m=100.0, closing_speed_mps=0.0, dt=0.05
+            )
+        self.assertLessEqual(target, model.command_lead_margin_mps + 1.0e-6)
+
+    def test_reset_forgets_the_integrated_command(self):
+        model = idm()
+        for _ in range(40):
+            model.target_speed(8.0, gap_m=100.0, closing_speed_mps=0.0, dt=0.05)
+        model.reset()
+        # After a reset the command restarts from the measured speed.
+        self.assertAlmostEqual(
+            model.target_speed(0.0, gap_m=100.0, closing_speed_mps=0.0, dt=0.05),
+            1.5 * 0.05,
+            places=3,
+        )
+
     def test_larger_headway_keeps_a_larger_gap(self):
         timid = idm(time_headway_s=2.5).acceleration(15.0, 30.0, 0.0)
         eager = idm(time_headway_s=0.8).acceleration(15.0, 30.0, 0.0)

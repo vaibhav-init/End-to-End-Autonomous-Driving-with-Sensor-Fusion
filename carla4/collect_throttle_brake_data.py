@@ -495,6 +495,18 @@ def main():
         help="Change weather within each scenario at this interval",
     )
     parser.add_argument(
+        "--scenarios",
+        nargs="+",
+        choices=SCENARIOS,
+        default=list(SCENARIOS),
+        help=(
+            "scenario phases to rotate through, in order. Pass a single "
+            "phase to disable staging entirely: 'traffic_light' is plain "
+            "town driving with no lead, emergency or cut-in actor spawned "
+            "(default: all five)"
+        ),
+    )
+    parser.add_argument(
         "--teacher",
         choices=("autopilot", "idm"),
         default="idm",
@@ -775,7 +787,8 @@ def main():
 
     feature_history = deque(maxlen=args.history)
     samples = []
-    scenario_counts = {name: 0 for name in SCENARIOS}
+    active_scenarios = tuple(args.scenarios)
+    scenario_counts = {name: 0 for name in active_scenarios}
 
     prev_speed = 0.0
     active_scenario = None
@@ -841,8 +854,11 @@ def main():
             control = ego.get_control()
 
             progress = frame / max(1, total_frames)
-            scenario_index = min(len(SCENARIOS) - 1, int(progress * len(SCENARIOS)))
-            scenario = SCENARIOS[scenario_index]
+            scenario_index = min(
+                len(active_scenarios) - 1,
+                int(progress * len(active_scenarios)),
+            )
+            scenario = active_scenarios[scenario_index]
             if scenario != active_scenario:
                 active_scenario = scenario
                 current_weather_name = apply_random_fog(world)
@@ -1058,6 +1074,7 @@ def main():
                     ego.set_autopilot(False)
                     idm_steering = steering_class(ego, world.get_map())
                     idm_controller.pid.reset()
+                    idm_model.reset()
                 feature_history.clear()
                 prev_speed = 0.0
                 lead_last_change_frame = frame
@@ -1161,6 +1178,7 @@ def main():
                     "label_horizon": args.label_horizon,
                     "vision_enabled": bool(args.vision),
                     "teacher": args.teacher,
+                    "scenarios": list(active_scenarios),
                     "base_feature_cols": active_feature_cols,
                     "stacked_feature_cols": stacked_feature_names(
                         active_feature_cols, args.history
