@@ -123,6 +123,70 @@ class FrontRadarTest(unittest.TestCase):
         self.assertEqual(debug["semantic_tag_counts"]["14"]["name"], "Car")
         radar.cleanup()
 
+    def test_sensor_callback_never_calls_into_the_simulator(self):
+        """Regression: an RPC inside the LiDAR callback deadlocked sync mode.
+
+        ``_read_environment`` called ``world.get_weather()`` from inside
+        ``_on_semantic_lidar``. In a synchronous run the main thread is inside
+        ``world.tick()`` waiting for the sensor to deliver, while the sensor
+        thread waits for a server that cannot answer until the tick finishes.
+        Collection hung on ``world.tick()`` with no traceback and no CSV.
+
+        The weather must therefore be read on the main thread only. This test
+        makes any simulator call from the callback an immediate failure.
+        """
+
+        ego = FakeActor(1, FakeVector(), FakeVector(10.0, 0.0, 0.0))
+        lead = FakeActor(77, FakeVector(25.0, 0.0, 0.0), FakeVector(5.0, 0.0, 0.0))
+        world = FakeWorld((ego, lead))
+        fake_carla = SimpleNamespace(
+            Location=lambda **kwargs: SimpleNamespace(**kwargs),
+            Transform=lambda *args, **kwargs: SimpleNamespace(
+                args=args, kwargs=kwargs
+            ),
+        )
+        # Deterministic profile: one scan is enough to confirm a track, so a
+        # failed callback shows up as the empty state rather than as noise.
+        config = load_realistic_radar_config("ideal_target_list_v1")
+
+        with patch("radar.front_radar._carla_module", return_value=fake_carla):
+            radar = RealisticFrontRadar(
+                ego, world, range_m=100.0, fps=20, config=config
+            )
+
+        # The main-thread hook is allowed to read weather, and must, or the
+        # model would run the whole session on a default environment.
+        weather_calls = []
+        real_get_weather = world.get_weather
+        world.get_weather = lambda: (
+            weather_calls.append(1) or real_get_weather()
+        )
+        radar.update_ego_speed(10.0)
+        self.assertEqual(len(weather_calls), 1)
+
+        returns = np.zeros(3, dtype=SEMANTIC_LIDAR_DTYPE)
+        returns[0] = (25.0, -0.2, 0.0, 1.0, 77, 14)
+        returns[1] = (25.0, 0.0, 0.1, 1.0, 77, 14)
+        returns[2] = (25.0, 0.2, -0.1, 1.0, 77, 14)
+        measurement = SimpleNamespace(
+            raw_data=returns.tobytes(), frame=123, timestamp=6.15
+        )
+
+        def deadlock(*_args, **_kwargs):
+            raise AssertionError(
+                "sensor callback read the weather over RPC; in a synchronous "
+                "run this deadlocks world.tick()"
+            )
+
+        world.get_weather = deadlock
+        radar._on_semantic_lidar(measurement)
+
+        # The callback must have completed and selected the lead, not fallen
+        # back to the empty state -- the adapter swallows callback exceptions,
+        # so asserting on the result is what makes this test real.
+        self.assertAlmostEqual(radar.get()["distance"], 25.0, delta=1.0)
+        self.assertIsNone(radar.diagnostics()["last_error"])
+
     def test_realistic_adapter_preserves_contract_without_carla_install(self):
         ego = FakeActor(1, FakeVector(), FakeVector(10.0, 0.0, 0.0))
         lead = FakeActor(

@@ -748,6 +748,9 @@ class RealisticFrontRadar(CShenronFrontRadar):
         self._reflector_snapshot = []
         self._capture_debug = bool(capture_debug)
         self._path_curvature_per_m = 0.0
+        # Weather is read on the main thread and cached; see update_ego_speed.
+        self._environment = RadarEnvironment()
+        self._environment_countdown = 0
         self.realistic_config = resolve_realistic_radar_config(
             range_m=range_m,
             fps=fps,
@@ -812,7 +815,30 @@ class RealisticFrontRadar(CShenronFrontRadar):
         )
         self.sensor.listen(self._on_semantic_lidar)
 
+    def update_ego_speed(self, speed):
+        """Main-thread per-tick hook; also refreshes the cached weather.
+
+        ``world.get_weather()`` is a blocking RPC. Calling it from inside the
+        semantic-LiDAR callback deadlocks a synchronous run: ``world.tick()``
+        is holding the main thread until every sensor has delivered, while the
+        sensor thread is waiting on a server that cannot answer until the tick
+        completes. It presents as a dead ``world.tick()`` with no traceback.
+
+        Weather only changes on a weather-segment boundary (60 s by default),
+        so a refresh every half second is far more resolution than the model
+        needs, and it costs one RPC between ticks instead of one inside one.
+        """
+
+        if self._environment_countdown <= 0:
+            self._environment = self._read_environment()
+            self._environment_countdown = 10
+        else:
+            self._environment_countdown -= 1
+        super().update_ego_speed(speed)
+
     def _read_environment(self):
+        """Read weather over RPC. MAIN THREAD ONLY -- never from a callback."""
+
         try:
             weather = self.world.get_weather()
         except (AttributeError, RuntimeError):
@@ -950,7 +976,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
             selected = self.model.step(
                 ideal_targets,
                 timestamp_s=timestamp,
-                environment=self._read_environment(),
+                environment=self._environment,
                 path_curvature_per_m=path_curvature_per_m,
                 multipath_targets=multipath_targets,
             )
