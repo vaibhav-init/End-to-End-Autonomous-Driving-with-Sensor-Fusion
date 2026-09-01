@@ -9,6 +9,7 @@ training label is built later as a smoothed future speed target.
 
 import argparse
 from collections import deque
+import faulthandler
 import json
 import math
 import os
@@ -513,6 +514,16 @@ def main():
             "old 30 s was not enough to get through them"
         ),
     )
+    parser.add_argument(
+        "--watchdog-s",
+        type=float,
+        default=0.0,
+        help=(
+            "if a tick blocks this long, dump every thread's stack and exit. "
+            "A CARLA sensor callback that stalls shows up only as a client "
+            "timeout otherwise, with no indication of where"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR)
     add_radar_arguments(parser)
@@ -687,12 +698,24 @@ def main():
 
     # First ticks after the sensors attach are much slower than steady state;
     # report them so a stall here is visible instead of just timing out.
+    if args.watchdog_s > 0:
+        faulthandler.enable(all_threads=True)
+        faulthandler.dump_traceback_later(
+            float(args.watchdog_s), repeat=False, exit=True
+        )
+        print(f"  Watchdog armed at {args.watchdog_s:.0f}s")
+
     settle_start = time.time()
     for settle_index in range(40):
         tick_start = time.time()
         world.tick()
         follow_ego_with_spectator(world, ego)
         tick_elapsed = time.time() - tick_start
+        if args.watchdog_s > 0:
+            faulthandler.cancel_dump_traceback_later()
+            faulthandler.dump_traceback_later(
+                float(args.watchdog_s), repeat=False, exit=True
+            )
         if settle_index < 3 or tick_elapsed > 1.0:
             print(
                 f"  settle tick {settle_index:2d}: {tick_elapsed:6.2f}s",
