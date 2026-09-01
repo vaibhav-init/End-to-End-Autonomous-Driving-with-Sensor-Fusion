@@ -721,6 +721,10 @@ def main():
                 f"  settle tick {settle_index:2d}: {tick_elapsed:6.2f}s",
                 flush=True,
             )
+    if args.watchdog_s > 0:
+        # The settle loop re-arms the watchdog each tick; leaving the last one
+        # pending would kill the collection itself a few seconds in.
+        faulthandler.cancel_dump_traceback_later()
     print(f"  Sensors settled in {time.time() - settle_start:.1f}s")
 
     feature_history = deque(maxlen=args.history)
