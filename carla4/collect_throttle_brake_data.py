@@ -524,6 +524,18 @@ def main():
             "timeout otherwise, with no indication of where"
         ),
     )
+    parser.add_argument(
+        "--no-vision",
+        dest="vision",
+        action="store_false",
+        help=(
+            "collect from radar alone: no RGB camera, no YOLO. The traffic-"
+            "light features stay in the schema but are held at zero, so the "
+            "column contract is unchanged and vision can be reinstated later "
+            "without recollecting. Also removes the camera sensor and YOLO's "
+            "CUDA context, which contend with CARLA's renderer"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR)
     add_radar_arguments(parser)
@@ -556,12 +568,17 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, "data.csv")
     config_path = os.path.join(args.output, "dataset_config.json")
+    # Recorded so the deployed driver can match how the data was collected:
+    # a model trained with the traffic-light columns pinned at zero must not
+    # be fed live ones at runtime.
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as fh:
             existing_config = json.load(fh)
         expected = {
             "town": args.town,
             "max_target_speed_kmh": args.max_speed_kmh,
+            "vision_enabled": bool(args.vision),
+            "teacher": args.teacher,
             "history_frames": args.history,
             "label_horizon": args.label_horizon,
         }
@@ -689,10 +706,15 @@ def main():
         ghost_threshold=args.radar_ghost_threshold,
         ghost_device=args.radar_ghost_device,
     )
-    camera = CameraManager(ego, world)
-    yolo = YOLOPerception() if YOLO_AVAILABLE else None
-    if yolo is None:
-        print("  YOLO unavailable; traffic-light features will be zeroed")
+    if args.vision:
+        camera = CameraManager(ego, world)
+        yolo = YOLOPerception() if YOLO_AVAILABLE else None
+        if yolo is None:
+            print("  YOLO unavailable; traffic-light features will be zeroed")
+    else:
+        camera = None
+        yolo = None
+        print("  Vision disabled: radar only, traffic-light features zeroed")
     current_weather_name = apply_random_fog(world)
     print(f"  Weather:         {current_weather_name}")
 
@@ -952,7 +974,7 @@ def main():
                 )
                 ego.apply_control(control)
 
-            cam_frame = camera.get_frame()
+            cam_frame = camera.get_frame() if camera is not None else None
             visual = empty_visual_features()
             obstacle = empty_obstacle_features()
             if yolo is not None and cam_frame is not None:
@@ -1002,18 +1024,19 @@ def main():
                 print(f"  Ego safely respawned after confirmed stall ({respawn_count})")
                 continue
 
-            draw_camera_overlay(
-                cam_frame,
-                visual,
-                obstacle,
-                speed,
-                scenario,
-                radar_state,
-                ttc,
-                current_weather_name,
-                teacher=args.teacher,
-                target_speed=teacher_target_speed,
-            )
+            if camera is not None:
+                draw_camera_overlay(
+                    cam_frame,
+                    visual,
+                    obstacle,
+                    speed,
+                    scenario,
+                    radar_state,
+                    ttc,
+                    current_weather_name,
+                    teacher=args.teacher,
+                    target_speed=teacher_target_speed,
+                )
 
             base_features = {
                 "ego_speed": round(speed, 4),
@@ -1040,7 +1063,11 @@ def main():
                         "episode_id": active_episode_id,
                         "ego_speed_now": round(speed, 4),
                         "teacher": args.teacher,
-                        "teacher_target_speed": round(teacher_target_speed, 4),
+                        # Distinct from the label column of the same idea:
+                        # this is what the teacher asked for on this frame,
+                        # while teacher_target_speed is the smoothed future
+                        # speed computed at save time.
+                        "teacher_command_speed": round(teacher_target_speed, 4),
                         "autopilot_throttle": round(control.throttle, 4),
                         "autopilot_brake": round(control.brake, 4),
                     }
@@ -1090,6 +1117,8 @@ def main():
                     "collection_seed": args.seed,
                     "history_frames": args.history,
                     "label_horizon": args.label_horizon,
+                    "vision_enabled": bool(args.vision),
+                    "teacher": args.teacher,
                     "base_feature_cols": BASE_FEATURE_COLS,
                     "stacked_feature_cols": stacked_feature_names(BASE_FEATURE_COLS, args.history),
                     "label_col": "teacher_target_speed",
@@ -1118,7 +1147,8 @@ def main():
         cleanup_actor(emergency_actor)
         cleanup_actor(cut_in_npc)
         radar.cleanup()
-        camera.cleanup()
+        if camera is not None:
+            camera.cleanup()
         if CV2_AVAILABLE:
             cv2.destroyAllWindows()
 
