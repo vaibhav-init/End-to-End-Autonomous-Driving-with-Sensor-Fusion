@@ -60,6 +60,11 @@ SAVE_DIR = "dataset_throttle_brake"
 SCENARIOS = ("traffic_light", "car_following", "lead_decelerating", "emergency", "cut_in")
 LEAD_BRAKE_PERIOD_S = 10.0    # how often the decelerating lead slams its brakes
 CUT_IN_PERIOD_S = 12.0        # how often a fresh cut-in is forced
+# Ego car-following defaults. CARLA's Traffic Manager follows a simplified
+# IDM: it targets a speed and brakes to defend a gap. These two are what set
+# how much braking a collection contains.
+LEADING_DISTANCE_M = 5.0
+IGNORE_LIGHTS_PCT = 100.0
 STALL_SPEED_MPS = 0.3
 STALL_FRAMES = FPS * 8
 STALL_MIN_THROTTLE = 0.2
@@ -179,12 +184,27 @@ def spawn_pedestrians(world, count):
     return [w.id for w in walkers], [c.id for c in controllers]
 
 
-def configure_ego_autopilot(ego, tm, port, max_speed_kmh=MAX_TARGET_SPEED_KMH):
+def configure_ego_autopilot(
+    ego,
+    tm,
+    port,
+    max_speed_kmh=MAX_TARGET_SPEED_KMH,
+    leading_distance_m=LEADING_DISTANCE_M,
+    ignore_lights_pct=IGNORE_LIGHTS_PCT,
+):
     ego.set_autopilot(True, port)
     set_tm_target_speed(ego, tm, max_speed_kmh)
-    tm.distance_to_leading_vehicle(ego, 10.0)
-    tm.ignore_lights_percentage(ego, 0)
-    tm.ignore_signs_percentage(ego, 0)
+    # The gap the Traffic Manager holds behind a lead. It brakes to defend
+    # this distance, so it is the single knob that decides how much braking
+    # the dataset contains: a large gap means the ego lifts off early and
+    # rarely brakes hard.
+    tm.distance_to_leading_vehicle(ego, float(leading_distance_m))
+    # A red-light stop is a label the radar features cannot explain -- the
+    # ego brakes for something the sensor never sees, so the model learns to
+    # brake for no reason. Skipping lights keeps every braking frame caused
+    # by something in the radar's field of view.
+    tm.ignore_lights_percentage(ego, float(ignore_lights_pct))
+    tm.ignore_signs_percentage(ego, float(ignore_lights_pct))
     tm.ignore_walkers_percentage(ego, 0)
     tm.auto_lane_change(ego, True)
 
@@ -322,6 +342,8 @@ def safe_respawn_ego(
     tm,
     port,
     max_speed_kmh=MAX_TARGET_SPEED_KMH,
+    leading_distance_m=LEADING_DISTANCE_M,
+    ignore_lights_pct=IGNORE_LIGHTS_PCT,
 ):
     respawn_transform = carla.Transform(
         carla.Location(
@@ -332,7 +354,10 @@ def safe_respawn_ego(
         spawn_transform.rotation,
     )
 
-    ego.set_autopilot(False)
+    # Must name the port: set_autopilot(False) with no port makes the client
+    # create a Traffic Manager on the default 8000, which is exactly the
+    # occupied port --tm-port exists to route around.
+    ego.set_autopilot(False, port)
     ego.set_target_velocity(carla.Vector3D(0.0, 0.0, 0.0))
     ego.set_target_angular_velocity(carla.Vector3D(0.0, 0.0, 0.0))
     ego.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0, hand_brake=True))
@@ -342,7 +367,14 @@ def safe_respawn_ego(
     ego.set_simulate_physics(True)
     ego.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
     world.tick()
-    configure_ego_autopilot(ego, tm, port, max_speed_kmh=max_speed_kmh)
+    configure_ego_autopilot(
+        ego,
+        tm,
+        port,
+        max_speed_kmh=max_speed_kmh,
+        leading_distance_m=leading_distance_m,
+        ignore_lights_pct=ignore_lights_pct,
+    )
     world.tick()
 
 
@@ -408,6 +440,26 @@ def main():
             "semantic-LiDAR density for the non-native backends. Defaults to "
             "240000, which is 80x what the native radar uses and appears to be "
             "what stalls synchronous ticks; lower it if collection hangs"
+        ),
+    )
+    parser.add_argument(
+        "--leading-distance-m",
+        type=float,
+        default=LEADING_DISTANCE_M,
+        help=(
+            "gap the ego's autopilot holds behind a lead vehicle. It brakes "
+            "to defend this, so a smaller value yields more braking frames "
+            f"(default: {LEADING_DISTANCE_M:g})"
+        ),
+    )
+    parser.add_argument(
+        "--ignore-lights-pct",
+        type=float,
+        default=IGNORE_LIGHTS_PCT,
+        help=(
+            "percent of traffic lights and signs the ego ignores. Default "
+            f"{IGNORE_LIGHTS_PCT:g}: a red-light stop is a braking label the "
+            "radar cannot explain, so it teaches the model to brake at random"
         ),
     )
     parser.add_argument(
@@ -516,6 +568,8 @@ def main():
     print(f"  Output:          {csv_path}")
     print(f"  Scenarios:       {', '.join(args.scenarios)}")
     print(f"  TM port:         {args.tm_port}")
+    print(f"  Lead gap:        {args.leading_distance_m:.1f}m")
+    print(f"  Ignore lights:   {args.ignore_lights_pct:.0f}%")
     print("=" * 72)
 
     client = carla.Client(args.host, args.port)
@@ -570,7 +624,14 @@ def main():
         raise RuntimeError("Failed to spawn ego vehicle")
 
     port = tm.get_port()
-    configure_ego_autopilot(ego, tm, port, max_speed_kmh=args.max_speed_kmh)
+    configure_ego_autopilot(
+        ego,
+        tm,
+        port,
+        max_speed_kmh=args.max_speed_kmh,
+        leading_distance_m=args.leading_distance_m,
+        ignore_lights_pct=args.ignore_lights_pct,
+    )
 
     print("  Teacher: CARLA autopilot")
 
@@ -778,7 +839,7 @@ def main():
                             lead_actor.set_autopilot(True, port)
                             set_tm_target_speed(lead_actor, tm, random.uniform(20.0, 40.0))
                     elif frame - last_lead_brake_frame > LEAD_BRAKE_PERIOD_S * FPS:
-                        lead_actor.set_autopilot(False)
+                        lead_actor.set_autopilot(False, port)
                         lead_brake_force = random.choice((0.5, 0.75, 1.0))
                         brake_duration_s = random.uniform(1.5, 3.5)
                         lead_brake_until = frame + int(brake_duration_s * FPS)
@@ -894,6 +955,8 @@ def main():
                     tm,
                     port,
                     max_speed_kmh=args.max_speed_kmh,
+                    leading_distance_m=args.leading_distance_m,
+                    ignore_lights_pct=args.ignore_lights_pct,
                 )
                 feature_history.clear()
                 prev_speed = 0.0
@@ -971,6 +1034,8 @@ def main():
                     "max_target_speed_kmh": args.max_speed_kmh,
                     "weather_interval_s": args.weather_interval_s,
                     "collection_seed": args.seed,
+                    "leading_distance_m": args.leading_distance_m,
+                    "ignore_lights_pct": args.ignore_lights_pct,
                     "history_frames": args.history,
                     "label_horizon": args.label_horizon,
                     "scenarios": list(active_scenarios),
