@@ -17,7 +17,8 @@ The four that matter:
 * **stopped frames** -- training downsamples these to ~15%, so a run that
   spends its time queueing yields far less than its row count suggests.
 * **ghost selected** -- how often a multipath ghost was the controlling
-  target. This is the phenomenon the filter is meant to remove.
+  target. This is the phenomenon the filter is meant to remove, and the
+  within-30 m share is the part of it that can actually provoke a brake.
 """
 
 import argparse
@@ -51,11 +52,14 @@ def summarise(directory):
     # behind a queue" and flatters the dataset by roughly the stopped
     # fraction.
     braking = fraction((frame["autopilot_brake"] > 0.1) & ~stopped_mask)
-    ghost = (
-        fraction(frame["radar_selected_source"] == "ghost")
-        if "radar_selected_source" in frame
-        else None
-    )
+    ghost = ghost_near = None
+    if "radar_selected_source" in frame:
+        ghost_mask = frame["radar_selected_source"] == "ghost"
+        ghost = fraction(ghost_mask)
+        # A ghost only matters if it is close enough to make the controller
+        # lift off or brake. One at 80 m while cruising changes nothing, so
+        # the total ghost rate overstates how much there is to fix.
+        ghost_near = fraction(ghost_mask & (frame["distance_t-0"] < 30.0))
 
     print(f"  dataset          {csv_path}")
     for key in ("town", "radar_backend", "radar_profile", "weather_mode",
@@ -68,6 +72,7 @@ def summarise(directory):
     print(f"  stopped frames   {stopped:.3f}")
     if ghost is not None:
         print(f"  ghost selected   {ghost:.3f}")
+        print(f"  ghost within 30m {ghost_near:.3f}  ({int(ghost_near * total):,} frames)")
 
     # Rules of thumb, not thresholds anyone measured -- they exist to catch a
     # collection that is obviously not worth training on.
