@@ -184,30 +184,34 @@ def spawn_pedestrians(world, count):
     return [w.id for w in walkers], [c.id for c in controllers]
 
 
-def scale_traffic_light_cycles(world, scale):
-    """Shorten every traffic-light phase by a constant factor.
+def set_traffic_light_red_time(world, red_s):
+    """Cap how long every traffic light stays red.
 
     The ego ignores lights, but the NPCs do not, so it still queues behind
     them: 43% of a 10 min Town01 run was spent stationary. Thinning the
-    traffic would fix that too, at the cost of the radar targets and multipath
-    reflectors that dense traffic provides -- which is the point of the run.
-    Shortening the cycle keeps the traffic and shortens the queues.
+    traffic would fix that at the cost of the radar targets and multipath
+    reflectors dense traffic provides, which is the reason for collecting in
+    it. A shorter red keeps the traffic and shortens the queues.
 
-    All three phases are scaled by the same factor on purpose. Lights at an
-    intersection are interlocked -- one light's red spans the others' green
-    plus yellow -- so scaling the phases unequally can desynchronise a group
-    into all-green or all-red. A uniform factor preserves the ratio.
+    Only red is touched. Green and yellow are left as the map defines them,
+    so the phase a driver reacts to is unchanged and only the waiting is cut.
+    Note that lights at an intersection are interlocked -- one light's red
+    spans the others' green plus yellow -- so a red shorter than that sum
+    lets a group turn green early. The Traffic Manager still runs its own
+    collision avoidance, so the visible effect is busier intersections rather
+    than crashes, but it is a change to the scene: watch for NPCs entering on
+    a conflicting phase, and raise --traffic-light-red-s if you see it.
+
+    Returns (count, original_min, original_max) so the change is visible.
     """
 
-    if scale >= 1.0:
-        return 0
-    count = 0
-    for light in world.get_actors().filter("traffic.traffic_light*"):
-        light.set_green_time(light.get_green_time() * scale)
-        light.set_yellow_time(light.get_yellow_time() * scale)
-        light.set_red_time(light.get_red_time() * scale)
-        count += 1
-    return count
+    lights = list(world.get_actors().filter("traffic.traffic_light*"))
+    if not lights or red_s is None:
+        return 0, 0.0, 0.0
+    originals = [light.get_red_time() for light in lights]
+    for light in lights:
+        light.set_red_time(float(red_s))
+    return len(lights), min(originals), max(originals)
 
 
 def configure_ego_autopilot(
@@ -489,14 +493,15 @@ def main():
         ),
     )
     parser.add_argument(
-        "--traffic-light-scale",
+        "--traffic-light-red-s",
         type=float,
-        default=0.4,
+        default=5.0,
         help=(
-            "multiply every traffic-light phase by this. The ego ignores "
-            "lights but NPCs do not, so it queues behind them; a shorter "
-            "cycle shortens the queues without thinning the traffic that "
-            "supplies radar targets. 1.0 leaves the map alone (default: 0.4)"
+            "how long every traffic light stays red. The ego ignores lights "
+            "but NPCs do not, so it queues behind them; a shorter red cuts "
+            "the queues without thinning the traffic that supplies radar "
+            "targets. Green and yellow are left alone. Pass 0 to leave the "
+            "map's own timing untouched (default: 5.0)"
         ),
     )
     parser.add_argument(
@@ -528,8 +533,10 @@ def main():
         )
     if args.weather_interval_s <= 0:
         parser.error("--weather-interval-s must be positive")
-    if not 0.0 < args.traffic_light_scale <= 1.0:
-        parser.error("--traffic-light-scale must be in (0, 1]")
+    if args.traffic_light_red_s < 0.0:
+        parser.error("--traffic-light-red-s must not be negative")
+    if args.traffic_light_red_s == 0.0:
+        args.traffic_light_red_s = None
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -620,7 +627,14 @@ def main():
     print(f"  Lead gap:        {args.leading_distance_m:.1f}m")
     print(f"  Ignore lights:   {args.ignore_lights_pct:.0f}%")
     print(f"  Weather mode:    {args.weather}")
-    print(f"  Light cycle:     {args.traffic_light_scale:.2f}x")
+    print(
+        "  Red light:       "
+        + (
+            "map default"
+            if args.traffic_light_red_s is None
+            else f"{args.traffic_light_red_s:.1f}s"
+        )
+    )
     print("=" * 72)
 
     client = carla.Client(args.host, args.port)
@@ -686,11 +700,13 @@ def main():
 
     print("  Teacher: CARLA autopilot")
 
-    retimed = scale_traffic_light_cycles(world, args.traffic_light_scale)
+    retimed, red_min, red_max = set_traffic_light_red_time(
+        world, args.traffic_light_red_s
+    )
     if retimed:
         print(
-            f"  Retimed {retimed} traffic lights to "
-            f"{args.traffic_light_scale:.2f}x their normal cycle"
+            f"  Red time set to {args.traffic_light_red_s:.1f}s on {retimed} "
+            f"lights (was {red_min:.1f}-{red_max:.1f}s)"
         )
 
     npc_ids = spawn_vehicles(world, client, tm, args.vehicles)
@@ -1092,7 +1108,7 @@ def main():
                     "max_target_speed_kmh": args.max_speed_kmh,
                     "weather_interval_s": args.weather_interval_s,
                     "weather_mode": args.weather,
-                    "traffic_light_scale": args.traffic_light_scale,
+                    "traffic_light_red_s": args.traffic_light_red_s,
                     "collection_seed": args.seed,
                     "leading_distance_m": args.leading_distance_m,
                     "ignore_lights_pct": args.ignore_lights_pct,
