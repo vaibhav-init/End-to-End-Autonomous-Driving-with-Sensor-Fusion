@@ -536,6 +536,16 @@ def main():
             "CUDA context, which contend with CARLA's renderer"
         ),
     )
+    parser.add_argument(
+        "--radar-points-per-second",
+        type=int,
+        default=None,
+        help=(
+            "semantic-LiDAR density for the non-native backends. Defaults to "
+            "240000, which is 80x what the native radar uses and appears to be "
+            "what stalls synchronous ticks; lower it if collection hangs"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR)
     add_radar_arguments(parser)
@@ -551,9 +561,13 @@ def main():
 
     total_frames = args.duration * FPS
     radar_points_per_second = (
-        NATIVE_RADAR_POINTS_PER_SECOND
-        if args.radar_backend == "native"
-        else 240000
+        int(args.radar_points_per_second)
+        if args.radar_points_per_second
+        else (
+            NATIVE_RADAR_POINTS_PER_SECOND
+            if args.radar_backend == "native"
+            else 240000
+        )
     )
     # Radar-only runs drop the traffic-light columns entirely rather than
     # pinning them at zero: ten frames of four constants would spend 40 of the
