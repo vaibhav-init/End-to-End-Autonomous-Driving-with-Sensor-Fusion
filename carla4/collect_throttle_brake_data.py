@@ -543,6 +543,10 @@ def main():
             "(8001, 8002, ...)."
         ) from exc
     tm.set_synchronous_mode(True)
+    # Without this the NPCs behave differently every run, so two collections
+    # that differ only in radar profile do not see the same traffic and
+    # cannot be compared to each other.
+    tm.set_random_device_seed(args.seed)
     world.tick()
 
     carla_map = world.get_map()
