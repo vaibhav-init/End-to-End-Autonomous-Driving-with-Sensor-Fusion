@@ -808,9 +808,27 @@ def main():
             except EOFError:
                 break
 
-    listener_thread = threading.Thread(target=key_listener, daemon=True)
-    listener_thread.start()
-    print("  Press ENTER during the emergency phase to force an obstacle spawn")
+    # Only listen for keys when stdin is a real terminal. Detached -- under
+    # tmux, nohup, a CI runner or any non-interactive shell -- the process sits
+    # in a background process group with no controlling terminal, so input()
+    # raises SIGTTIN and *suspends the whole process*: state T, zero CPU, no
+    # output, no CSV, and CARLA frozen waiting for a tick that never comes.
+    # Nothing about it looks like a crash, which makes it expensive to
+    # diagnose.
+    interactive = False
+    try:
+        interactive = bool(sys.stdin) and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        interactive = False
+    if interactive:
+        listener_thread = threading.Thread(target=key_listener, daemon=True)
+        listener_thread.start()
+        print("  Press ENTER during the emergency phase to force an obstacle spawn")
+    else:
+        print(
+            "  stdin is not a terminal; manual emergency-spawn key disabled "
+            "(scheduled spawns are unaffected)"
+        )
 
     try:
         for frame in range(total_frames):

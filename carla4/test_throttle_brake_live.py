@@ -668,9 +668,20 @@ def main():
             except EOFError:
                 break
 
-    listener_thread = threading.Thread(target=key_listener, daemon=True)
-    listener_thread.start()
-    print("  Press ENTER to spawn a random test scenario ahead of the ego vehicle")
+    # See collect_throttle_brake_data.py: input() from a background process
+    # group raises SIGTTIN and suspends the whole process, so only listen when
+    # stdin is a real terminal.
+    interactive = False
+    try:
+        interactive = bool(sys.stdin) and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        interactive = False
+    if interactive:
+        listener_thread = threading.Thread(target=key_listener, daemon=True)
+        listener_thread.start()
+        print("  Press ENTER to spawn a random test scenario ahead of the ego vehicle")
+    else:
+        print("  stdin is not a terminal; manual scenario-spawn key disabled")
 
     try:
         for frame in range(total_frames):
