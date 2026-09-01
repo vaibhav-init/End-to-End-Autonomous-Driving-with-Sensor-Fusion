@@ -410,6 +410,15 @@ def main():
             "what stalls synchronous ticks; lower it if collection hangs"
         ),
     )
+    parser.add_argument(
+        "--tm-port",
+        type=int,
+        default=8000,
+        help=(
+            "Traffic Manager RPC port. A killed run keeps the default bound, "
+            "so pass a free one rather than waiting it out (default: 8000)"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR)
     add_radar_arguments(parser)
@@ -506,6 +515,7 @@ def main():
     print(f"  Pedestrians:     {args.pedestrians}")
     print(f"  Output:          {csv_path}")
     print(f"  Scenarios:       {', '.join(args.scenarios)}")
+    print(f"  TM port:         {args.tm_port}")
     print("=" * 72)
 
     client = carla.Client(args.host, args.port)
@@ -523,7 +533,15 @@ def main():
     settings.fixed_delta_seconds = 1.0 / FPS
     world.apply_settings(settings)
 
-    tm = client.get_trafficmanager(8000)
+    try:
+        tm = client.get_trafficmanager(args.tm_port)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Traffic Manager port {args.tm_port} is already bound: {exc}\n"
+            "  A previous run that was killed usually still holds it. Either "
+            "stop the stale process, or pass --tm-port with a free port "
+            "(8001, 8002, ...)."
+        ) from exc
     tm.set_synchronous_mode(True)
     world.tick()
 
