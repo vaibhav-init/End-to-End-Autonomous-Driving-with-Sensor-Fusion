@@ -81,6 +81,37 @@ STALL_MAX_BRAKE = 0.1
 STALL_MIN_CLEAR_DISTANCE_M = 12.0
 RESPAWN_Z_OFFSET = 0.5
 
+_SCENARIOS_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "scenarios"
+)
+if _SCENARIOS_DIR not in sys.path:
+    sys.path.insert(0, _SCENARIOS_DIR)
+
+
+def _load_idm_teacher(desired_speed_kmh, fps):
+    """Build the IDM teacher, reusing the components the scenarios already use.
+
+    The autopilot teacher almost never brakes hard, so a model imitating it
+    never learns the response that matters -- measured directly: the shipped
+    model asks for 53 km/h with a stopped car 8 m ahead. IDM brakes properly,
+    is deterministic, and takes exactly the radar contract as input, so the
+    labels it produces cover the regime the controller actually needs.
+    """
+
+    from drivers.longitudinal import (
+        HybridStateMachineController,
+        IntelligentDriverModel,
+        PIDSpeedController,
+    )
+    from drivers.steering import BasicAgentSteering
+
+    model = IntelligentDriverModel(
+        desired_speed_mps=min(float(desired_speed_kmh), MAX_TARGET_SPEED_KMH) / 3.6
+    )
+    controller = HybridStateMachineController(PIDSpeedController(dt=1.0 / fps))
+    return model, controller, BasicAgentSteering
+
+
 def stacked_feature_names(base_cols, history_frames):
     cols = []
     for lag in range(history_frames):
@@ -327,7 +358,7 @@ def safe_respawn_ego(
     world.tick()
 
 
-def draw_camera_overlay(frame, visual, obstacle, speed, scenario, radar_state, ttc, weather_name):
+def draw_camera_overlay(frame, visual, obstacle, speed, scenario, radar_state, ttc, weather_name, teacher="", target_speed=0.0):
     if not CV2_AVAILABLE or frame is None:
         return
 
@@ -398,6 +429,17 @@ def draw_camera_overlay(frame, visual, obstacle, speed, scenario, radar_state, t
             2,
         )
 
+    if teacher:
+        cv2.putText(
+            display,
+            f"teacher={teacher} target={target_speed * 3.6:5.1f}km/h "
+            f"gap={radar_state['distance']:5.1f}m",
+            (10, display.shape[0] - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 255, 255),
+            1,
+        )
     cv2.imshow("CARLA Collector Camera", display)
     cv2.waitKey(1)
 
@@ -423,6 +465,16 @@ def main():
         type=int,
         default=WEATHER_SEGMENT_S,
         help="Change weather within each scenario at this interval",
+    )
+    parser.add_argument(
+        "--teacher",
+        choices=("autopilot", "idm"),
+        default="idm",
+        help=(
+            "policy that drives the ego and therefore defines the labels. "
+            "autopilot rarely brakes hard, so a model imitating it does not "
+            "learn to brake; idm does and is deterministic (default: idm)"
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR)
@@ -552,6 +604,25 @@ def main():
 
     port = tm.get_port()
     configure_ego_autopilot(ego, tm, port, max_speed_kmh=args.max_speed_kmh)
+
+    # Teacher selection. The autopilot path is unchanged; the IDM path takes
+    # longitudinal control away from the traffic manager and leaves it only
+    # the route, with BasicAgent supplying steer exactly as the scenario
+    # drivers do.
+    idm_model = idm_controller = idm_steering = None
+    if args.teacher == "idm":
+        idm_model, idm_controller, steering_class = _load_idm_teacher(
+            args.max_speed_kmh, FPS
+        )
+        ego.set_autopilot(False)
+        idm_steering = steering_class(ego, world.get_map())
+        print(
+            f"  Teacher: IDM (v0={idm_model.desired_speed_mps * 3.6:.0f} km/h, "
+            f"T={idm_model.time_headway_s}s, s0={idm_model.minimum_gap_m}m); "
+            "autopilot disabled, BasicAgent steers"
+        )
+    else:
+        print("  Teacher: CARLA autopilot")
 
     npc_ids = spawn_vehicles(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_pedestrians(world, args.pedestrians)
@@ -787,6 +858,24 @@ def main():
             else:
                 ttc = 10.0
 
+            teacher_target_speed = 0.0
+            if idm_model is not None:
+                teacher_target_speed = idm_model.target_speed(
+                    speed_mps=speed,
+                    gap_m=radar_state["distance"],
+                    closing_speed_mps=radar_state["relative_velocity"],
+                    dt=1.0 / FPS,
+                )
+                throttle_cmd, brake_cmd = idm_controller.run_step(
+                    teacher_target_speed, speed
+                )
+                control = carla.VehicleControl(
+                    throttle=float(throttle_cmd),
+                    steer=float(idm_steering.get_steer()),
+                    brake=float(brake_cmd),
+                )
+                ego.apply_control(control)
+
             cam_frame = camera.get_frame()
             visual = empty_visual_features()
             obstacle = empty_obstacle_features()
@@ -822,6 +911,13 @@ def main():
                     port,
                     max_speed_kmh=args.max_speed_kmh,
                 )
+                if idm_model is not None:
+                    # safe_respawn_ego re-enables autopilot; the IDM teacher
+                    # must take longitudinal control back and re-aim BasicAgent
+                    # at the new location, or the ego drives itself from here.
+                    ego.set_autopilot(False)
+                    idm_steering = steering_class(ego, world.get_map())
+                    idm_controller.pid.reset()
                 feature_history.clear()
                 prev_speed = 0.0
                 lead_last_change_frame = frame
@@ -839,6 +935,8 @@ def main():
                 radar_state,
                 ttc,
                 current_weather_name,
+                teacher=args.teacher,
+                target_speed=teacher_target_speed,
             )
 
             base_features = {
@@ -865,6 +963,8 @@ def main():
                         "weather": current_weather_name,
                         "episode_id": active_episode_id,
                         "ego_speed_now": round(speed, 4),
+                        "teacher": args.teacher,
+                        "teacher_target_speed": round(teacher_target_speed, 4),
                         "autopilot_throttle": round(control.throttle, 4),
                         "autopilot_brake": round(control.brake, 4),
                     }

@@ -79,105 +79,86 @@ path-dependent but does not isolate the tangential contribution on its own --
 the run reached 84 of 150 frames before a tick exceeded a 300 s timeout; see
 the open issue below.
 
-### Open issue: geometry multipath is too slow for closed loop
+### Measured throughput (corrected)
 
-Geometry mode refits reflector planes from the full semantic LiDAR sweep every
-scan and then solves the image method for every dynamic target against every
-plane. Measured at roughly 5.6 s per frame with 3 vehicles, and a tick
-eventually exceeds even a 300 s timeout. Offline collection (Phase 3) tolerates
-this; **Phase 5 cannot** -- the closed loop needs 20 Hz. Likely fixes: cache
-reflector fits across scans, cap reflectors per sweep, or precompute static
-scene planes once per map. Revisit before Phase 5.
+An earlier note here claimed geometry multipath was too slow for closed loop.
+That was wrong: it measured the probe's own instrumentation, not the sensor.
+`verify_ghost_physics.py` runs with `capture_debug=True` and calls
+`debug_snapshot()` every frame, which deep-copies every target, detection and
+track. Measured without it, on Town04 with 8 vehicles:
 
----
+| configuration | s/frame | vs real time | per 60 s sequence |
+|---|---|---|---|
+| native | 0.034 | 1.5x | 0.7 min |
+| realistic, multipath off | 0.0147 | 3.4x | 0.3 min |
+| realistic, geometry multipath | 0.0137 | 3.7x | 0.3 min |
 
-## Phase 2 — Fix the controller
-
-Independent of Phase 1; can run alongside.
-
-- Demote the hardcoded braking rules in `scenarios/drivers/mlp_driver.py` to a
-  switchable ablation. Today they full-brake on `<30 m closing` or `TTC<3 s`,
-  so in every hazard the rules drive and the MLP does not.
-- Add IDM as a second controller — known behaviour, physical parameters,
-  deterministic. It isolates the ghost effect; the MLP shows the effect
-  carries to a learned controller.
-
-**Done when:** the same scenario runs with rules on/off and with either
-controller, and the MLP's output visibly determines braking.
+Collection is comfortably feasible and 20 Hz closed loop is fine. Ghost
+generation costs essentially nothing.
 
 ---
 
-## Phase 3 — Collect training data
+## Findings that change the plan
 
-Depends on Phase 1.
+### The learned driver does not brake
 
-- Use `collect_carla_radar_dataset.py` (driving), **not**
-  `collect_carla_radar_ghosts.py` (parked ego, built to copy the real dataset).
-- Several towns, varied weather and traffic. Prefer maps with reflective
-  surfaces — Town04 guardrails, Town03/Town05 walls, Town10 buildings — and
-  check the ghost yield per sequence.
-- **Collect condition by condition, kept separate.** Hold out at least one
-  town and one reflector type entirely.
+Measured on S1, same seed, one flag apart:
 
-**Done when:** labelled ghosts across conditions, with a clean held-out set the
-detector never sees.
+| | target speed at 8 m, closing +13.6 m/s | throttle/brake | outcome |
+|---|---|---|---|
+| rules off (model decides) | **53.0 km/h** | 1.00 / 0.00 | collision at 15.5 km/h |
+| rules on (ablation) | 32.0 km/h | 0.00 / 1.00 | stopped at 8.5 m |
 
----
+The hardcoded rules were doing all of the braking, in every result the repo
+has. IDM on the same scenario stopped safely at 7.2 m.
 
-## Phase 4 — Train the detector
+Consequence: **a ghost filter cannot improve a controller that ignores
+obstacles**, so Phases 5-7 are unmeasurable on the shipped model. The retrained
+model needs an explicit acceptance test -- obstacle at 10 m closing fast, the
+predicted target speed must drop below current -- and IDM carries the study
+until it passes.
 
-Depends on Phase 3.
+Root cause is the teacher: CARLA autopilot rarely brakes hard, so the training
+set is dominated by free driving. Phase 3 now collects with an IDM teacher
+(`--teacher idm`).
 
-- Feature schema v2 — `RuntimeGhostFilter` refuses anything else.
-- Evaluate on **held-out conditions**, not a random split. With no real data as
-  an external check this is the only thing proving the detector learned
-  multipath structure rather than memorising the generator.
-- Conformal calibration for the operating threshold, giving a distribution-free
-  guarantee on the false-rejection rate.
-- Full confusion matrices on every result.
+### Arm D: can the controller just learn to ignore ghosts?
 
-**Done when:** it still works on unseen towns and unseen wall types. If it
-collapses there, stop — the study would be circular.
+A fair question that the three-arm design does not answer. Added:
 
----
+| arm | controller trained on | runtime |
+|---|---|---|
+| A | clean radar | no filter |
+| B | clean radar | oracle filter |
+| C | clean radar | learned filter |
+| D | ghost-contaminated radar | no filter |
 
-## Phase 5 — Wire the filter into the loop
+If D does badly, the filter is justified by data rather than assertion -- the
+controller only ever sees the scalar contract (`distance`, `relative_velocity`,
+`obstacle_speed`), by which point the evidence that identifies a ghost has
+already been discarded by target selection. If D does well, "end-to-end
+controllers absorb radar false alarms, at the cost of inspectability" is itself
+a result nobody has published.
 
-Depends on Phase 4.
+### The config signature blocks arms A-C as currently designed
 
-- Deploy through `--radar-ghost-detector` (already plumbed).
-- Add an **oracle** filter mode that rejects using ground-truth labels.
-- Add a ghost-rate knob so the problem can be dialled up and down.
+`mlp_driver` refuses to run when the deployed radar config signature differs
+from the trained one. Arms A-C need a clean-trained model deployed *with*
+ghosts, which changes the signature. So the ghost rate must be a runtime
+injection knob **outside** the signature, not a profile difference. Required
+before Phase 5.
 
-**Done when:** the same scenario runs three ways off one flag.
+### Environment
 
----
+`CARLA_ROOT` is unset on the remote box and `steering.py` defaults to
+`/opt/carla-simulator`, while CARLA lives at `/storage/CARLA_0.9.16`. Scenarios
+do not fail on this -- they warn and fall back to degraded steering, which
+would silently contaminate Phase 6. Export it in the shell profile.
 
-## Phase 6 — Run the experiment
+### Sensor teardown leaks
 
-3 arms x 2 controllers x ghost rates x S1-S4 and free driving x **many seeds**.
-
-**Done when:** every cell has enough seeds to report a distribution, not a mean.
-
----
-
-## Phase 7 — Analyse and write
-
-- Jerk against the 2.94 m/s^3 comfort threshold; ISO 2631-1 weighted RMS
-  acceleration.
-- Phantom brakes per km; velocity lost to false alarms.
-- Safety: collision rate, min TTC, min gap.
-- Headline: the gap between oracle and learned — the size of the prize versus
-  how much of it the detector captures.
-- Include the sim-to-real negative result as the scope statement.
-
----
-
-## Gates
-
-Two places to stop and check rather than push on:
-
-1. **Phase 2** — if the MLP is not actually driving, nothing measured
-   downstream means anything.
-2. **Phase 4 held-out test** — if the detector only works on conditions it was
-   trained on, the whole study is circular.
+A killed run leaves the semantic LiDAR attached and streaming at 240k points/s.
+Five such orphans accumulated during debugging and crushed throughput until
+cleaned up manually. A long collection with `--sequence-retries` will leak the
+same way; the collector should sweep stale sensors and vehicles before each
+sequence.
