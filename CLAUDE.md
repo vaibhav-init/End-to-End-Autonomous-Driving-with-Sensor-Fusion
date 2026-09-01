@@ -18,10 +18,10 @@ Layout:
 
 - **`carla4/`** — everything above. Top-level scripts are the entry points; `radar/` is the one real package.
 - **`carla4/radar/`** — pluggable forward-radar backends + the ghost-detection training/runtime subsystem. Has unit tests.
-- **`carla4/scenarios/`** — NHTSA-aligned evaluation harness (Town04) with *pluggable drivers*, so the same scenarios can score the trained MLP, an IDM reference controller, or a PCLA agent.
+- **`carla4/scenarios/`** — NHTSA-aligned evaluation harness (Town04) with *pluggable drivers*, so the same scenarios can score the trained MLP or a PCLA agent.
 - **`PCLA/`** — vendored third-party framework (Pretrained CARLA Leaderboard Agents, FSE 2025), own conda env, independent of `carla4/`. Call out any change under it explicitly.
 
-No build system, no `requirements.txt`, no packaging. Plain `python3` scripts run from `carla4/`. Implicit deps: `carla` (PythonAPI), `torch`, `numpy`, `h5py`, `pandas`, `scikit-learn`, `ultralytics` (YOLOv8n, auto-downloads `yolov8n.pt`), `opencv` (`cv2`), `matplotlib`.
+No build system, no `requirements.txt`, no packaging. Plain `python3` scripts run from `carla4/`. Implicit deps: `carla` (PythonAPI), `torch`, `numpy`, `h5py`, `pandas`, `scikit-learn`, `matplotlib`.
 
 `AGENTS.md` holds the style/commit conventions and is the authority on those.
 
@@ -56,19 +56,19 @@ Record driver, weather/fog preset, seed, town, and collision/result summary when
 
 The model predicts a **target speed** (m/s); a PID converts it to throttle/brake. The model never emits throttle/brake. Keep that separation.
 
-**Perception — `yolo_perception.py`**: `YOLOPerception` (YOLOv8n) gives traffic-light features (HSV color of the largest light box) and obstacle features; monocular bbox-height distance is *overlay only* — real distance comes from radar. `CameraManager` wraps the RGB sensor (640×480, FOV 90, threaded buffer).
+**The pipeline is radar-only.** The camera + YOLO path was removed; `vision.md` (repo root) records exactly what left and how to reinstate it. Don't reintroduce `ultralytics`, `cv2` or traffic-light features without going through that file.
 
-**Feature/model contract — `speed_model.py`**: `BASE_FEATURE_COLS` = `RADAR_ONLY_FEATURE_COLS` (ego speed/accel, distance, rel-vel, ttc, obstacle speed) + `VISION_FEATURE_COLS` (4 traffic-light features) = 10 per-frame features. **A radar-only run uses the 6-column list instead** — `feature_cols_for(vision_enabled)` picks; carrying four zero-pinned columns through a 10-frame history would spend 40 of 100 inputs on constants. `flatten_history()` stacks the last N frames as `<feature>_t-<lag>` (lag 0 = current); 10 frames → input dim 100 with vision, 60 without. `model_config.json` records `vision_enabled` and `base_feature_cols`, and `mlp_driver` reads them, so a radar-only model deploys without a flag. `TargetSpeedMLP` = `encode()` + linear speed head, kept explicit so extra sensors can fuse into the head without reworking training/inference.
+**Feature/model contract — `speed_model.py`**: `BASE_FEATURE_COLS` = 6 per-frame features (ego speed/accel, distance, rel-vel, ttc, obstacle speed). `flatten_history()` stacks the last N frames as `<feature>_t-<lag>` (lag 0 = current); 10 frames → input dim 60. `TargetSpeedMLP` = `encode()` + linear speed head, kept explicit so extra sensors can fuse into the head without reworking training/inference.
 
 **Shared limits — `driving_contract.py`**: `RADAR_RANGE_M`, `MAX_TARGET_SPEED_KMH` (60 — collection labels and runtime predictions must never exceed it), `MAX_STOPPED_FRACTION`, weather segment length. Prefer importing these over re-declaring constants.
 
-**Collection** (`collect_throttle_brake_data.py`, plus `collect_scenario_data.py` for staged NHTSA-like episodes): a teacher policy drives the ego and thereby defines the labels; each frame logs stacked history. `--teacher {autopilot,idm}` **defaults to `idm`**: CARLA autopilot almost never brakes hard, so the shipped model trained on it does not brake at all (measured: 53 km/h target with an obstacle at 8 m closing at 13.6 m/s). `--no-vision` collects from radar alone (no camera sensor, no YOLO, no OpenCV window). `--scenarios` selects which staged phases to rotate through — pass just `traffic_light` for plain town driving with no lead, emergency or cut-in actor spawned. Label = smoothed *future* ego speed over `LABEL_HORIZON` (10) frames, computed at save time. Writes `dataset_throttle_brake/data.csv` (+ `data_staged.csv`) and `dataset_config.json`.
+**Collection** (`collect_throttle_brake_data.py`, plus `collect_scenario_data.py` for staged NHTSA-like episodes): ego drives on CARLA autopilot (the teacher); each frame logs stacked history. `--scenarios` selects which staged phases to rotate through — pass just `traffic_light` for plain town driving with no lead, emergency or cut-in actor spawned. Label = smoothed *future* ego speed over `LABEL_HORIZON` (10) frames, computed at save time. Writes `dataset_throttle_brake/data.csv` (+ `data_staged.csv`) and `dataset_config.json`.
 
 **Training** (`train_throttle_brake.py`): reads `dataset_config.json` for the column list; `--data` accepts a CSV *or a directory* (globs all CSVs and assigns episode IDs). Drops idle frames and downsamples stopped frames to ~15%. StandardScaler on the train split. Writes `target_speed_mlp.pt`, `scaler.pkl`, `model_config.json`.
 
-**Inference** (`test_throttle_brake_live.py`): perception → radar → feature row → scale → MLP → target speed → PID/`HybridStateMachineController`. **Hybrid override**: with no obstacle and no red light, target speed is floored to a cruise speed (~30 km/h) — the ML model handles obstacles/braking, a rule handles open road. Steering is separate (lane-follow or route agent), never learned.
+**Inference** (`test_throttle_brake_live.py`): radar → feature row → scale → MLP → target speed → PID/`HybridStateMachineController`. **Hybrid override**: with no obstacle detected, target speed is floored to a cruise speed (~30 km/h) — the ML model handles obstacles/braking, a rule handles open road. `scenarios/drivers/mlp_driver.py` duplicates this logic; the two must stay in step. Steering is separate (lane-follow or route agent), never learned.
 
-**The hardcoded emergency-brake overrides are now off by default** (`--safety-rules` re-enables them as an ablation arm). They were doing *all* of the braking in every result the repo has, including `scenarios/RESULTS_COMPARISON.md` — those numbers describe a rule-based AEB, not a learned controller. Treat pre-existing MLP results as suspect until a model retrained on the IDM teacher passes the acceptance test: **obstacle at 10 m closing fast, predicted target speed must drop below current speed.** Loss curves do not substitute for it.
+**The hardcoded emergency-brake overrides are now off by default** (`--safety-rules` re-enables them as an ablation arm). They were doing *all* of the braking in every result the repo has, including `scenarios/RESULTS_COMPARISON.md` — those numbers describe a rule-based AEB, not a learned controller. Treat pre-existing MLP results as suspect until a retrained model passes the acceptance test: **obstacle at 10 m closing fast, predicted target speed must drop below current speed.** Loss curves do not substitute for it. Note the open risk this leaves: the autopilot teacher rarely brakes hard, which is *why* the shipped model never learned to (measured: 53 km/h target with a stopped car 8 m ahead).
 
 ### The config-provenance chain (important)
 
@@ -124,9 +124,7 @@ Notes that are easy to get wrong:
 
 Town04, shared settings in `config.py` (geometry, `FOG_LADDER` weather presets 1–4, seeds, per-scenario durations). `s1`–`s4` are the NHTSA cases (lead stopped / decelerating / constant speed / cut-in); `run_all.py` launches each `(scenario, fog, seed)` as a fresh subprocess. Ground truth via `ground_truth_logger.py` → `results_*/` CSVs + `summary_all.csv`; `analyze_results.py` and `compare_drivers.py` aggregate.
 
-**Drivers** (`scenarios/drivers/`): a `Driver` decides only throttle/brake/steer per tick; the scenario owns spawning, weather, obstacles, logging and termination. Every driver produces **longitudinal** control from its model and delegates **lateral** control to `BasicAgent`, so runs differ only in longitudinal behavior. `make_driver()` imports lazily so each conda env loads only what it can (`pcla` pulls in PCLA, `mlp` pulls in ultralytics + sklearn, `idm` needs neither). Choose with `--driver {mlp,pcla,idm}`; `run_all.py` also forwards the shared radar flags.
-
-`idm` (`drivers/idm_driver.py`) is the **reference longitudinal policy**: radar gap + closing speed → Treiber's IDM → target speed → the same PID tail as the MLP. Deterministic, physical parameters, no camera or weights. It is the measurement instrument that carries the study while the learned model is unreliable; the MLP is the subject. `drivers/longitudinal.py` holds the shared tail (`PIDSpeedController`, `HybridStateMachineController`, `IntelligentDriverModel`) — keeping it identical across drivers is what makes the comparison mean anything.
+**Drivers** (`scenarios/drivers/`): a `Driver` decides only throttle/brake/steer per tick; the scenario owns spawning, weather, obstacles, logging and termination. Every driver produces **longitudinal** control from its model and delegates **lateral** control to `BasicAgent`, so runs differ only in longitudinal behavior. `make_driver()` imports lazily so each conda env loads only what it can (`pcla` pulls in PCLA, `mlp` pulls in sklearn). Choose with `--driver {mlp,pcla}`; `run_all.py` also forwards the shared radar flags. `drivers/longitudinal.py` holds the shared tail (`PIDSpeedController`, `HybridStateMachineController`) — keeping it identical across drivers is what makes the comparison mean anything.
 
 ```bash
 cd carla4/scenarios
@@ -144,7 +142,7 @@ Separate conda env (`conda env create -f PCLA/environment.yml`); agents in `PCLA
 
 - Model emits target speed only; PID converts to throttle/brake.
 - Keep the radar result dict (`distance`, `relative_velocity`, `obstacle_speed`) intact — it is the interface every backend and the ghost filter must satisfy.
-- Datasets and models are coupled to their `*_config.json` schema; the 10-col `BASE_FEATURE_COLS` is canonical for the controller, `FEATURE_SCHEMA_VERSION` for the ghost detector.
+- Datasets and models are coupled to their `*_config.json` schema; the 6-col `BASE_FEATURE_COLS` is canonical for the controller, `FEATURE_SCHEMA_VERSION` for the ghost detector.
 - Prefer `argparse` options over hard-coded experiment values; new radar options go through `add_radar_arguments`.
 - Generated output stays out of commits — `.gitignore` covers `carla4/artifacts/`, `data/`, `dataset_*/`, `model_*/`, `radar_validation_*/`, `scenarios/results*/`. Downloaded RGD data and weights are never committed.
 - Be precise in docs and commit messages about what is *measured* vs. what is a *prior*: the radar profiles and ghost-transfer claims are the parts most easily overstated.
@@ -160,7 +158,7 @@ Separate conda env (`conda env create -f PCLA/environment.yml`); agents in `PCLA
 
 ## Documentation map
 
-Root, current: `work.md` (phase plan, scope boundary, measured throughput), `handover.md` (session state — what is verified vs. merely committed).
+Root, current: `work.md` (phase plan, scope boundary, measured throughput), `handover.md` (session state — what is verified vs. merely committed), `vision.md` (the removed camera/YOLO path and how to restore it).
 Root, historical background: `SIM2REAL_RADAR_RESEARCH_BRIEF.md` (the closed transfer study, most complete statement of its method and results), `RADAR_FALSE_ALARM_RESEARCH_REPORT.md`, `RESEARCH_DIRECTION_REPORT.md`, `PROFESSOR_RESEARCH_DIRECTION.md`, `deepresearch.md`, `report.md`.
 `carla4/radar/`: `README.md` (backend architecture + profiles), `GHOST_DETECTION.md` (execution protocol), `ZERO_SHOT_V2.md`, `RGD_REGIME_COLLECTION.md`, `REALISM_ROADMAP.md`.
 `carla4/scenarios/`: `EVALUATION_GUIDE.md`, `RESULTS_COMPARISON.md`.

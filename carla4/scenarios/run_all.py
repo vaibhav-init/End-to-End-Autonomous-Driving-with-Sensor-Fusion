@@ -77,7 +77,7 @@ def main():
             "driver (ablation arm). Off by default so the model decides."
         ),
     )
-    parser.add_argument("--driver", choices=["pcla", "mlp", "idm"], default="mlp",
+    parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
                         help="Longitudinal control source for every run")
     parser.add_argument("--model-dir", default="../model_throttle_brake",
                         help="MLP model directory (for --driver mlp)")

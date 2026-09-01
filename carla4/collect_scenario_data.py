@@ -10,7 +10,7 @@ radar + traffic-light feature schema as collect_throttle_brake_data.py:
     within range, follow/brake with GapKeepController using GROUND-TRUTH lead
     distance/speed. This is a clean, collision-avoiding expert (like an ACC).
   - Student features (what we save): RADAR distance/rel-vel/obstacle-speed +
-    YOLO traffic-light features — exactly the columns the MLP trains on.
+    radar features — exactly the columns the MLP trains on.
 
 So the MLP imitates good staged-scenario braking/following from radar alone.
 
@@ -39,12 +39,6 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if os.path.join(_HERE, "scenarios") not in sys.path:
     sys.path.insert(0, os.path.join(_HERE, "scenarios"))
 
-from yolo_perception import (
-    CameraManager,
-    YOLOPerception,
-    YOLO_AVAILABLE,
-    empty_visual_features,
-)
 from speed_model import BASE_FEATURE_COLS, flatten_history
 from collect_throttle_brake_data import (
     compute_future_speed_label,
@@ -109,7 +103,7 @@ def cleanup_actor(actor):
             pass
 
 
-def build_base_features(ego_speed, accel, radar_state, visual):
+def build_base_features(ego_speed, accel, radar_state):
     if radar_state["relative_velocity"] > 0.1:
         ttc = min(radar_state["distance"] / radar_state["relative_velocity"], 10.0)
     else:
@@ -121,10 +115,6 @@ def build_base_features(ego_speed, accel, radar_state, visual):
         "relative_velocity": round(radar_state["relative_velocity"], 4),
         "ttc": round(ttc, 4),
         "obstacle_speed": round(radar_state["obstacle_speed"], 4),
-        "traffic_light_state": float(visual["traffic_light_state"]),
-        "tl_confidence": round(visual["tl_confidence"], 4),
-        "tl_bbox_area": round(visual["tl_bbox_area"], 6),
-        "tl_center_x": round(visual["tl_center_x"], 4),
     }
 
 
@@ -232,8 +222,6 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         ghost_threshold=args.radar_ghost_threshold,
         ghost_device=args.radar_ghost_device,
     )
-    camera = CameraManager(ego, world)
-    yolo = YOLOPerception() if YOLO_AVAILABLE else None
     steering = BasicAgentSteering(ego, carla_map)
     cruise = SpeedController(cruise_mps, dt)
     gapkeep = GapKeepController(
@@ -270,7 +258,6 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
     if npc is None:
         cleanup_actor(coll_sensor)
         radar.cleanup()
-        camera.cleanup()
         cleanup_actor(ego)
         return [], frame_counter
 
@@ -331,12 +318,7 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         radar.update_ego_speed(ego_speed)
         radar_state = radar.get()
         radar_diagnostics = radar_diagnostics_row(radar)
-        visual = empty_visual_features()
-        cam_frame = camera.get_frame()
-        if yolo is not None and cam_frame is not None:
-            visual = yolo.extract_scene_features(cam_frame)["visual"]
-
-        history.append(build_base_features(ego_speed, accel, radar_state, visual))
+        history.append(build_base_features(ego_speed, accel, radar_state))
         if len(history) == args.history:
             row = flatten_history(history, BASE_FEATURE_COLS)
             row.update({
@@ -365,7 +347,6 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
     cleanup_actor(coll_sensor)
     cleanup_actor(npc)
     radar.cleanup()
-    camera.cleanup()
     cleanup_actor(ego)
     return rows, frame_counter
 

@@ -3,7 +3,7 @@
 Collect non-GT longitudinal driving data for target-speed imitation.
 
 The collector now saves stacked temporal history instead of single-frame rows.
-Each sample contains the latest N frames of radar + vision features, and the
+Each sample contains the latest N frames of radar features, and the
 training label is built later as a smoothed future speed target.
 """
 
@@ -35,24 +35,8 @@ from driving_contract import (
     RADAR_RANGE_M,
     WEATHER_SEGMENT_S,
 )
-from yolo_perception import (
-    CameraManager,
-    TL_STATE_NAMES,
-    YOLO_AVAILABLE,
-    YOLOPerception,
-    empty_obstacle_features,
-    empty_visual_features,
-)
-from speed_model import BASE_FEATURE_COLS, feature_cols_for, flatten_history
+from speed_model import BASE_FEATURE_COLS, flatten_history
 from weather_utils import apply_random_fog
-
-try:
-    import cv2
-
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
-    print("WARNING: OpenCV not available; camera preview disabled")
 
 
 CARLA_HOST = "127.0.0.1"
@@ -88,30 +72,6 @@ _SCENARIOS_DIR = os.path.join(
 )
 if _SCENARIOS_DIR not in sys.path:
     sys.path.insert(0, _SCENARIOS_DIR)
-
-
-def _load_idm_teacher(desired_speed_kmh, fps):
-    """Build the IDM teacher, reusing the components the scenarios already use.
-
-    The autopilot teacher almost never brakes hard, so a model imitating it
-    never learns the response that matters -- measured directly: the shipped
-    model asks for 53 km/h with a stopped car 8 m ahead. IDM brakes properly,
-    is deterministic, and takes exactly the radar contract as input, so the
-    labels it produces cover the regime the controller actually needs.
-    """
-
-    from drivers.longitudinal import (
-        HybridStateMachineController,
-        IntelligentDriverModel,
-        PIDSpeedController,
-    )
-    from drivers.steering import BasicAgentSteering
-
-    model = IntelligentDriverModel(
-        desired_speed_mps=min(float(desired_speed_kmh), MAX_TARGET_SPEED_KMH) / 3.6
-    )
-    controller = HybridStateMachineController(PIDSpeedController(dt=1.0 / fps))
-    return model, controller, BasicAgentSteering
 
 
 def follow_ego_with_spectator(world, ego):
@@ -386,92 +346,6 @@ def safe_respawn_ego(
     world.tick()
 
 
-def draw_camera_overlay(frame, visual, obstacle, speed, scenario, radar_state, ttc, weather_name, teacher="", target_speed=0.0):
-    if not CV2_AVAILABLE or frame is None:
-        return
-
-    display = frame.copy()
-    bbox = visual["tl_bbox"]
-    tl_state = visual["traffic_light_state"]
-    if bbox is not None:
-        x1, y1, x2, y2 = bbox
-        color_map = {
-            0: (180, 180, 180),
-            1: (0, 255, 0),
-            2: (0, 255, 255),
-            3: (0, 0, 255),
-        }
-        box_color = color_map.get(tl_state, (180, 180, 180))
-        cv2.rectangle(display, (x1, y1), (x2, y2), box_color, 2)
-        label = (
-            f"{TL_STATE_NAMES.get(tl_state, 'none')} "
-            f"conf={visual['tl_confidence']:.2f} "
-            f"area={visual['tl_bbox_area']:.4f}"
-        )
-        cv2.putText(
-            display,
-            label,
-            (x1, max(20, y1 - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            box_color,
-            1,
-        )
-
-    for entry in obstacle.get("obstacle_boxes", []):
-        x1, y1, x2, y2 = entry["bbox"]
-        box_color = (0, 140, 255) if entry["is_primary"] else (255, 180, 0)
-        thickness = 2 if entry["is_primary"] else 1
-        cv2.rectangle(display, (x1, y1), (x2, y2), box_color, thickness)
-        obj_label = (
-            f"{entry['label']} "
-            f"{entry['distance']:.1f}m "
-            f"{entry['confidence']:.2f}"
-        )
-        cv2.putText(
-            display,
-            obj_label,
-            (x1, min(display.shape[0] - 10, y2 + 16)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            box_color,
-            1,
-        )
-
-    hud_lines = [
-        f"Scenario: {scenario}",
-        f"Weather: {weather_name}",
-        f"Speed: {speed * 3.6:.1f} km/h",
-        f"TL: {TL_STATE_NAMES.get(tl_state, 'none')}",
-        f"TL center_x: {visual['tl_center_x']:.2f}",
-        f"Dist: {radar_state['distance']:.1f}m TTC: {ttc:.1f}s",
-    ]
-    for line_index, line in enumerate(hud_lines):
-        cv2.putText(
-            display,
-            line,
-            (10, 25 + line_index * 22),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 0),
-            2,
-        )
-
-    if teacher:
-        cv2.putText(
-            display,
-            f"teacher={teacher} target={target_speed * 3.6:5.1f}km/h "
-            f"gap={radar_state['distance']:5.1f}m",
-            (10, display.shape[0] - 12),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 255),
-            1,
-        )
-    cv2.imshow("CARLA Collector Camera", display)
-    cv2.waitKey(1)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Collect target-speed imitation data")
     parser.add_argument("--host", default=CARLA_HOST)
@@ -507,22 +381,12 @@ def main():
         ),
     )
     parser.add_argument(
-        "--teacher",
-        choices=("autopilot", "idm"),
-        default="idm",
-        help=(
-            "policy that drives the ego and therefore defines the labels. "
-            "autopilot rarely brakes hard, so a model imitating it does not "
-            "learn to brake; idm does and is deterministic (default: idm)"
-        ),
-    )
-    parser.add_argument(
         "--client-timeout",
         type=float,
         default=120.0,
         help=(
             "CARLA client timeout. The first ticks after attaching semantic "
-            "LiDAR, camera and YOLO are far slower than steady state, and the "
+            "LiDAR and radar are far slower than steady state, and the "
             "old 30 s was not enough to get through them"
         ),
     )
@@ -534,18 +398,6 @@ def main():
             "if a tick blocks this long, dump every thread's stack and exit. "
             "A CARLA sensor callback that stalls shows up only as a client "
             "timeout otherwise, with no indication of where"
-        ),
-    )
-    parser.add_argument(
-        "--no-vision",
-        dest="vision",
-        action="store_false",
-        help=(
-            "collect from radar alone: no RGB camera, no YOLO. The traffic-"
-            "light features stay in the schema but are held at zero, so the "
-            "column contract is unchanged and vision can be reinstated later "
-            "without recollecting. Also removes the camera sensor and YOLO's "
-            "CUDA context, which contend with CARLA's renderer"
         ),
     )
     parser.add_argument(
@@ -581,14 +433,10 @@ def main():
             else 240000
         )
     )
-    # Radar-only runs drop the traffic-light columns entirely rather than
-    # pinning them at zero: ten frames of four constants would spend 40 of the
-    # model's 100 inputs saying nothing.
-    active_feature_cols = feature_cols_for(args.vision)
+    active_feature_cols = list(BASE_FEATURE_COLS)
     print(
         f"  Features:        {len(active_feature_cols)} base x {args.history} "
         f"frames = {len(active_feature_cols) * args.history} inputs"
-        f"{'' if args.vision else '  (radar only)'}"
     )
 
     radar_metadata = describe_radar_configuration(
@@ -604,17 +452,13 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, "data.csv")
     config_path = os.path.join(args.output, "dataset_config.json")
-    # Recorded so the deployed driver can match how the data was collected:
-    # a model trained with the traffic-light columns pinned at zero must not
-    # be fed live ones at runtime.
+    # Recorded so the deployed driver can match how the data was collected.
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as fh:
             existing_config = json.load(fh)
         expected = {
             "town": args.town,
             "max_target_speed_kmh": args.max_speed_kmh,
-            "vision_enabled": bool(args.vision),
-            "teacher": args.teacher,
             "history_frames": args.history,
             "label_horizon": args.label_horizon,
         }
@@ -706,24 +550,7 @@ def main():
     port = tm.get_port()
     configure_ego_autopilot(ego, tm, port, max_speed_kmh=args.max_speed_kmh)
 
-    # Teacher selection. The autopilot path is unchanged; the IDM path takes
-    # longitudinal control away from the traffic manager and leaves it only
-    # the route, with BasicAgent supplying steer exactly as the scenario
-    # drivers do.
-    idm_model = idm_controller = idm_steering = None
-    if args.teacher == "idm":
-        idm_model, idm_controller, steering_class = _load_idm_teacher(
-            args.max_speed_kmh, FPS
-        )
-        ego.set_autopilot(False)
-        idm_steering = steering_class(ego, world.get_map())
-        print(
-            f"  Teacher: IDM (v0={idm_model.desired_speed_mps * 3.6:.0f} km/h, "
-            f"T={idm_model.time_headway_s}s, s0={idm_model.minimum_gap_m}m); "
-            "autopilot disabled, BasicAgent steers"
-        )
-    else:
-        print("  Teacher: CARLA autopilot")
+    print("  Teacher: CARLA autopilot")
 
     npc_ids = spawn_vehicles(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_pedestrians(world, args.pedestrians)
@@ -742,15 +569,6 @@ def main():
         ghost_threshold=args.radar_ghost_threshold,
         ghost_device=args.radar_ghost_device,
     )
-    if args.vision:
-        camera = CameraManager(ego, world)
-        yolo = YOLOPerception() if YOLO_AVAILABLE else None
-        if yolo is None:
-            print("  YOLO unavailable; traffic-light features will be zeroed")
-    else:
-        camera = None
-        yolo = None
-        print("  Vision disabled: radar only, traffic-light features zeroed")
     current_weather_name = apply_random_fog(world)
     print(f"  Weather:         {current_weather_name}")
 
@@ -1014,32 +832,6 @@ def main():
             else:
                 ttc = 10.0
 
-            teacher_target_speed = 0.0
-            if idm_model is not None:
-                teacher_target_speed = idm_model.target_speed(
-                    speed_mps=speed,
-                    gap_m=radar_state["distance"],
-                    closing_speed_mps=radar_state["relative_velocity"],
-                    dt=1.0 / FPS,
-                )
-                throttle_cmd, brake_cmd = idm_controller.run_step(
-                    teacher_target_speed, speed
-                )
-                control = carla.VehicleControl(
-                    throttle=float(throttle_cmd),
-                    steer=float(idm_steering.get_steer()),
-                    brake=float(brake_cmd),
-                )
-                ego.apply_control(control)
-
-            cam_frame = camera.get_frame() if camera is not None else None
-            visual = empty_visual_features()
-            obstacle = empty_obstacle_features()
-            if yolo is not None and cam_frame is not None:
-                scene_features = yolo.extract_scene_features(cam_frame)
-                visual = scene_features["visual"]
-                obstacle = scene_features["obstacle"]
-
             blocked_by_obstacle = radar_state["distance"] < STALL_MIN_CLEAR_DISTANCE_M
             trying_to_move = (
                 control.throttle > STALL_MIN_THROTTLE and control.brake < STALL_MAX_BRAKE
@@ -1067,14 +859,6 @@ def main():
                     port,
                     max_speed_kmh=args.max_speed_kmh,
                 )
-                if idm_model is not None:
-                    # safe_respawn_ego re-enables autopilot; the IDM teacher
-                    # must take longitudinal control back and re-aim BasicAgent
-                    # at the new location, or the ego drives itself from here.
-                    ego.set_autopilot(False)
-                    idm_steering = steering_class(ego, world.get_map())
-                    idm_controller.pid.reset()
-                    idm_model.reset()
                 feature_history.clear()
                 prev_speed = 0.0
                 lead_last_change_frame = frame
@@ -1083,20 +867,6 @@ def main():
                 print(f"  Ego safely respawned after confirmed stall ({respawn_count})")
                 continue
 
-            if camera is not None:
-                draw_camera_overlay(
-                    cam_frame,
-                    visual,
-                    obstacle,
-                    speed,
-                    scenario,
-                    radar_state,
-                    ttc,
-                    current_weather_name,
-                    teacher=args.teacher,
-                    target_speed=teacher_target_speed,
-                )
-
             base_features = {
                 "ego_speed": round(speed, 4),
                 "ego_acceleration": round(max(-20.0, min(20.0, accel)), 4),
@@ -1104,10 +874,6 @@ def main():
                 "relative_velocity": round(radar_state["relative_velocity"], 4),
                 "ttc": round(ttc, 4),
                 "obstacle_speed": round(radar_state["obstacle_speed"], 4),
-                "traffic_light_state": float(visual["traffic_light_state"]),
-                "tl_confidence": round(visual["tl_confidence"], 4),
-                "tl_bbox_area": round(visual["tl_bbox_area"], 6),
-                "tl_center_x": round(visual["tl_center_x"], 4),
             }
             feature_history.append(base_features)
 
@@ -1121,12 +887,6 @@ def main():
                         "weather": current_weather_name,
                         "episode_id": active_episode_id,
                         "ego_speed_now": round(speed, 4),
-                        "teacher": args.teacher,
-                        # Distinct from the label column of the same idea:
-                        # this is what the teacher asked for on this frame,
-                        # while teacher_target_speed is the smoothed future
-                        # speed computed at save time.
-                        "teacher_command_speed": round(teacher_target_speed, 4),
                         "autopilot_throttle": round(control.throttle, 4),
                         "autopilot_brake": round(control.brake, 4),
                     }
@@ -1135,7 +895,6 @@ def main():
                 samples.append(row)
 
             if frame % (FPS * 5) == 0 and frame > 0:
-                tl_name = TL_STATE_NAMES.get(int(visual["traffic_light_state"]), "none")
                 print(
                     f"  [{frame:>6,}/{total_frames:,}] "
                     f"scene={scenario:>13s} "
@@ -1143,8 +902,8 @@ def main():
                     f"spd={speed * 3.6:5.1f}km/h "
                     f"dist={radar_state['distance']:5.1f}m "
                     f"ttc={ttc:4.1f}s "
-                    f"tl={tl_name:>6s} "
-                    f"area={visual['tl_bbox_area']:.4f}"
+                    f"thr={control.throttle:4.2f} "
+                    f"brk={control.brake:4.2f}"
                 )
 
             follow_ego_with_spectator(world, ego)
@@ -1176,8 +935,6 @@ def main():
                     "collection_seed": args.seed,
                     "history_frames": args.history,
                     "label_horizon": args.label_horizon,
-                    "vision_enabled": bool(args.vision),
-                    "teacher": args.teacher,
                     "scenarios": list(active_scenarios),
                     "base_feature_cols": active_feature_cols,
                     "stacked_feature_cols": stacked_feature_names(
@@ -1209,10 +966,6 @@ def main():
         cleanup_actor(emergency_actor)
         cleanup_actor(cut_in_npc)
         radar.cleanup()
-        if camera is not None:
-            camera.cleanup()
-        if CV2_AVAILABLE:
-            cv2.destroyAllWindows()
 
         for controller_id in ctrl_ids:
             actor = world.get_actor(controller_id)

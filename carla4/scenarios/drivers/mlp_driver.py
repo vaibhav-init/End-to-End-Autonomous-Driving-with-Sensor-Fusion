@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-MLP driver — custom vision-only target-speed model for longitudinal control.
+MLP driver — the learned radar target-speed model for longitudinal control.
 
 Ports the "as-deployed" longitudinal pipeline from
 carla4/test_throttle_brake_live.py:
-  YOLO perception -> VisionDistanceTracker -> stacked feature history ->
-  TargetSpeedMLP -> target speed -> PID (+ hold-state machine) -> throttle/brake.
+  radar -> stacked feature history -> TargetSpeedMLP -> target speed ->
+  PID (+ hold-state machine) -> throttle/brake.
 
 Steering is delegated to BasicAgent (lateral-only). Runs in the `carla4` conda
-env (needs ultralytics + scikit-learn).
+env (needs scikit-learn).
 
 Lazy-imported by drivers/__init__.py so the PCLA env never has to import it.
 """
@@ -33,15 +33,6 @@ _CARLA4_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."
 if _CARLA4_DIR not in sys.path:
     sys.path.insert(0, _CARLA4_DIR)
 
-from yolo_perception import (  # noqa: E402
-    CameraManager,
-    TL_RED,
-    VisionDistanceTracker,
-    YOLO_AVAILABLE,
-    YOLOPerception,
-    empty_obstacle_features,
-    empty_visual_features,
-)
 from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS  # noqa: E402
 from speed_model import TargetSpeedMLP, flatten_history  # noqa: E402
 from radar import (  # noqa: E402
@@ -60,7 +51,6 @@ from driving_contract import (  # noqa: E402
 
 # Same constants as the live deployment (test_throttle_brake_live.py)
 FPS = 20
-MAX_RANGE = 50.0          # vision (YOLO monocular) max range
 RADAR_RANGE = RADAR_RANGE_M
 BOOTSTRAP_TARGET_SPEED_MPS = 12.0 / 3.6
 CRUISE_SPEED_MPS = 30.0 / 3.6
@@ -114,12 +104,8 @@ class MLPDriver(Driver):
         self.feature_cols = None
         self.base_feature_cols = None
         self.history_frames = None
-        self.camera = None
-        self.yolo = None
-        self.vision_tracker = None
         self.radar = None
-        self.use_radar = False
-        self.max_range = MAX_RANGE
+        self.max_range = RADAR_RANGE
         self.max_target_speed_mps = MAX_TARGET_SPEED_KMH / 3.6
         self.radar_points_per_second = NATIVE_RADAR_POINTS_PER_SECOND
         self.steering = None
@@ -144,18 +130,6 @@ class MLPDriver(Driver):
         self.history_frames = int(model_config.get("history_frames") or 10)
         self.base_feature_cols = (
             model_config.get("base_feature_cols") or DEFAULT_BASE_FEATURE_COLS
-        )
-        # A radar-only model has no traffic-light columns, so there is nothing
-        # for the camera or YOLO to feed; attaching them would only add a
-        # sensor and a CUDA context that contend with CARLA's renderer.
-        self.vision_enabled = bool(
-            model_config.get(
-                "vision_enabled",
-                any(
-                    name.startswith("tl_") or name == "traffic_light_state"
-                    for name in self.base_feature_cols
-                ),
-            )
         )
         trained_radar_backend = model_config.get("radar_backend", "native")
         self.radar_points_per_second = int(
@@ -187,25 +161,14 @@ class MLPDriver(Driver):
         )
         self.model.eval()
 
-        # Distance source is chosen from the model's feature schema: the radar
-        # model (model_throttle_brake) has 10 base cols; the vision model adds
-        # 'obstacle_detected'. Radar models need radar at inference, not YOLO depth.
-        self.use_radar = "obstacle_detected" not in self.base_feature_cols
-        self.max_range = (
-            float(model_config.get("radar_range_m", RADAR_RANGE))
-            if self.use_radar
-            else MAX_RANGE
-        )
-        if (
-            self.use_radar
-            and self.radar_backend != trained_radar_backend
-        ):
+        self.max_range = float(model_config.get("radar_range_m", RADAR_RANGE))
+        if self.radar_backend != trained_radar_backend:
             raise RuntimeError(
                 "Sensor distribution mismatch: model data used radar backend "
                 f"'{trained_radar_backend}', runtime requested "
                 f"'{self.radar_backend}'."
             )
-        if self.use_radar and self.radar_backend == "realistic":
+        if self.radar_backend == "realistic":
             embedded_config = (
                 None
                 if self.radar_profile or self.radar_config_path
@@ -256,41 +219,19 @@ class MLPDriver(Driver):
                     "Ghost rejection threshold differs from training data."
                 )
 
-        # Camera + YOLO give traffic-light features (and obstacle detection in
-        # vision mode). A radar-only model has no columns for them, so skip
-        # both entirely rather than paying for a sensor and a CUDA context
-        # whose output is discarded.
-        if self.vision_enabled:
-            self.camera = CameraManager(ego, world)
-            self.yolo = YOLOPerception() if YOLO_AVAILABLE else None
-        else:
-            self.camera = None
-            self.yolo = None
-            print("  [mlp] radar-only model; camera and YOLO not attached")
-        if self.use_radar:
-            self.radar = create_front_radar(
-                ego,
-                world,
-                self.max_range,
-                backend=self.radar_backend,
-                fps=self.fps,
-                points_per_second=self.radar_points_per_second,
-                config=self.realistic_radar_config,
-                seed=self.radar_seed,
-                ghost_detector_path=self.radar_ghost_detector,
-                ghost_threshold=self.radar_ghost_threshold,
-                ghost_device=self.radar_ghost_device,
-            )
-            self.vision_tracker = None
-            if self.yolo is None:
-                print("  [mlp] YOLO unavailable; traffic-light features zeroed")
-        else:
-            if self.yolo is None:
-                raise RuntimeError(
-                    "Vision MLP driver requires YOLO (ultralytics) in the carla4 env."
-                )
-            self.radar = None
-            self.vision_tracker = VisionDistanceTracker(fps=self.fps, max_range=self.max_range)
+        self.radar = create_front_radar(
+            ego,
+            world,
+            self.max_range,
+            backend=self.radar_backend,
+            fps=self.fps,
+            points_per_second=self.radar_points_per_second,
+            config=self.realistic_radar_config,
+            seed=self.radar_seed,
+            ghost_detector_path=self.radar_ghost_detector,
+            ghost_threshold=self.radar_ghost_threshold,
+            ghost_device=self.radar_ghost_device,
+        )
 
         self.steering = BasicAgentSteering(ego, carla_map)
         self.controller = HybridStateMachineController(
@@ -302,27 +243,21 @@ class MLPDriver(Driver):
 
         print("  [mlp] driver ready")
         print(f"  [mlp]   model:          {model_path}")
-        sensor_name = (
-            f"radar ({self.radar_backend})"
-            if self.use_radar
-            else "vision (YOLO)"
-        )
-        print(f"  [mlp]   sensor:         {sensor_name} "
+        print(f"  [mlp]   sensor:         radar ({self.radar_backend}) "
               f"(max {self.max_range:.0f}m)")
-        if self.use_radar:
+        print(
+            f"  [mlp]   radar sampling: "
+            f"{self.radar_points_per_second} points/s"
+        )
+        if self.realistic_radar_config is not None:
             print(
-                f"  [mlp]   radar sampling: "
-                f"{self.radar_points_per_second} points/s"
+                "  [mlp]   radar profile:  "
+                f"{self.realistic_radar_config.profile_name}"
             )
-            if self.realistic_radar_config is not None:
-                print(
-                    "  [mlp]   radar profile:  "
-                    f"{self.realistic_radar_config.profile_name}"
-                )
-                print(
-                    "  [mlp]   radar config:   "
-                    f"{realistic_radar_config_signature(self.realistic_radar_config)}"
-                )
+            print(
+                "  [mlp]   radar config:   "
+                f"{realistic_radar_config_signature(self.realistic_radar_config)}"
+            )
         print(f"  [mlp]   device:         {self.device}")
         print(f"  [mlp]   history_frames: {self.history_frames}")
         print(
@@ -338,20 +273,8 @@ class MLPDriver(Driver):
         accel = (speed - self._prev_speed) * self.fps if self._frame > 0 else 0.0
         self._prev_speed = speed
 
-        cam_frame = self.camera.get_frame() if self.camera is not None else None
-        visual = empty_visual_features()
-        obstacle = empty_obstacle_features()
-        if self.yolo is not None and cam_frame is not None:
-            scene_features = self.yolo.extract_scene_features(cam_frame)
-            visual = scene_features["visual"]
-            obstacle = scene_features["obstacle"]
-
-        if self.use_radar:
-            self.radar.update_ego_speed(speed)
-            dist_state = self.radar.get()
-        else:
-            self.vision_tracker.update_ego_speed(speed)
-            dist_state = self.vision_tracker.update(obstacle)
+        self.radar.update_ego_speed(speed)
+        dist_state = self.radar.get()
         self._last_distance_state = dist_state.copy()
 
         if dist_state["relative_velocity"] > 0.1:
@@ -367,11 +290,6 @@ class MLPDriver(Driver):
             "relative_velocity": round(dist_state["relative_velocity"], 4),
             "ttc": round(ttc, 4),
             "obstacle_speed": round(dist_state["obstacle_speed"], 4),
-            "obstacle_detected": obstacle_detected,
-            "traffic_light_state": float(visual["traffic_light_state"]),
-            "tl_confidence": round(visual["tl_confidence"], 4),
-            "tl_bbox_area": round(visual["tl_bbox_area"], 6),
-            "tl_center_x": round(visual["tl_center_x"], 4),
         }
         self.feature_history.append(current_features)
 
@@ -386,12 +304,10 @@ class MLPDriver(Driver):
         else:
             target_speed_pred = BOOTSTRAP_TARGET_SPEED_MPS
 
-        # Hybrid override (same as deployment): cruise on open road, but never
-        # override a red light. Only fires with nothing detected, so a ghost
-        # still reaches the model unmodified.
-        if (self.cruise_floor
-                and obstacle_detected < 0.5
-                and int(visual["traffic_light_state"]) != TL_RED):
+        # Hybrid override (same as deployment): cruise on open road. Only
+        # fires with nothing detected, so a ghost still reaches the model
+        # unmodified.
+        if self.cruise_floor and obstacle_detected < 0.5:
             target_speed_pred = max(target_speed_pred, CRUISE_SPEED_MPS)
 
         # Launch assist: help the car pull away from a standstill on clear road.
@@ -465,9 +381,6 @@ class MLPDriver(Driver):
         return diagnostics
 
     def cleanup(self):
-        if self.camera is not None:
-            self.camera.cleanup()
-            self.camera = None
         if self.radar is not None:
             self.radar.cleanup()
             self.radar = None

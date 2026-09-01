@@ -12,11 +12,6 @@ Setup:
   - At step 200 (~10s), NPC changes lane into ego's lane
   - Ego must detect the now-close vehicle and brake to avoid collision
 
-Why this matters for camera vs radar:
-  - Radar detects the NPC instantly when it enters the ego's lane
-  - Camera/YOLO needs 1-2 frames to detect and estimate distance
-  - This latency difference is the core thesis comparison
-
 Measures:
   - Collision rate (primary safety metric)
   - Reaction time: steps from cut-in completion to ego braking
@@ -529,7 +524,7 @@ def main():
             "driver (ablation arm). Off by default so the model decides."
         ),
     )
-    parser.add_argument("--driver", choices=["pcla", "mlp", "idm"], default="mlp",
+    parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
                         help="Longitudinal control source")
     parser.add_argument("--model-dir", default="../model_throttle_brake",
                         help="MLP model directory (for --driver mlp)")

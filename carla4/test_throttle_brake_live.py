@@ -24,15 +24,6 @@ from radar import (
     describe_radar_configuration,
     resolve_realistic_radar_config,
 )
-from yolo_perception import (
-    CameraManager,
-    TL_RED,
-    TL_STATE_NAMES,
-    YOLO_AVAILABLE,
-    YOLOPerception,
-    empty_obstacle_features,
-    empty_visual_features,
-)
 from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS
 from speed_model import TargetSpeedMLP, flatten_history
 from weather_utils import apply_random_fog
@@ -619,10 +610,6 @@ def main():
     hybrid_controller = HybridStateMachineController(speed_controller)
 
     collision = CollisionRecorder(ego, world)
-    camera = CameraManager(ego, world)
-    yolo = YOLOPerception() if YOLO_AVAILABLE else None
-    if yolo is None:
-        print("  YOLO unavailable; traffic-light features will be zeroed")
 
     radar = create_front_radar(
         ego,
@@ -696,14 +683,6 @@ def main():
             radar.update_ego_speed(speed)
             dist_state = radar.get()
 
-            cam_frame = camera.get_frame()
-            visual = empty_visual_features()
-            obstacle = empty_obstacle_features()
-            if yolo is not None and cam_frame is not None:
-                scene_features = yolo.extract_scene_features(cam_frame)
-                visual = scene_features["visual"]
-                obstacle = scene_features["obstacle"]
-
             if dist_state["relative_velocity"] > 0.1:
                 ttc = min(dist_state["distance"] / dist_state["relative_velocity"], 10.0)
             else:
@@ -718,11 +697,6 @@ def main():
                 "relative_velocity": round(dist_state["relative_velocity"], 4),
                 "ttc": round(ttc, 4),
                 "obstacle_speed": round(dist_state["obstacle_speed"], 4),
-                "obstacle_detected": obstacle_detected,
-                "traffic_light_state": float(visual["traffic_light_state"]),
-                "tl_confidence": round(visual["tl_confidence"], 4),
-                "tl_bbox_area": round(visual["tl_bbox_area"], 6),
-                "tl_center_x": round(visual["tl_center_x"], 4),
             }
             feature_history.append(current_features)
 
@@ -742,7 +716,7 @@ def main():
             # mixed red-light stops and cruising, so it learns a confused average.
             # This hybrid approach: ML handles obstacles, simple rule handles open
             # road. Red light check prevents trying to drive through a red.
-            if obstacle_detected < 0.5 and int(visual["traffic_light_state"]) != TL_RED:
+            if obstacle_detected < 0.5:
                 target_speed_pred = max(target_speed_pred, CRUISE_SPEED_MPS)
             target_speed_pred = min(
                 max(0.0, target_speed_pred),
@@ -808,7 +782,6 @@ def main():
                     scenario_state = init_scenario_state()
 
             if frame % FPS == 0:
-                tl_name = TL_STATE_NAMES.get(int(visual["traffic_light_state"]), "none")
                 scenario_name = scenario_state["name"] or "none"
                 print(
                     f"  {frame:>6,} "
@@ -819,8 +792,6 @@ def main():
                     f"thr={throttle:4.2f} "
                     f"brk={brake:4.2f} "
                     f"fog={current_weather_name:>11s} "
-                    f"tl={tl_name:>6s} "
-                    f"area={visual['tl_bbox_area']:.4f} "
                     f"scene={scenario_name} "
                     f"state={hybrid_controller.state}"
                 )
@@ -860,7 +831,6 @@ def main():
     destroy_scenario_state(scenario_state)
     radar.cleanup()
     collision.cleanup()
-    camera.cleanup()
 
     for controller_id in ctrl_ids:
         actor = world.get_actor(controller_id)
