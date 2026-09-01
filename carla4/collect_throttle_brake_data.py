@@ -665,7 +665,19 @@ def main():
 
     try:
         for frame in range(total_frames):
+            if args.watchdog_s > 0:
+                faulthandler.cancel_dump_traceback_later()
+                faulthandler.dump_traceback_later(
+                    float(args.watchdog_s), repeat=False, exit=True
+                )
+            tick_start = time.time()
             world.tick()
+            tick_elapsed = time.time() - tick_start
+            if tick_elapsed > 1.0:
+                print(
+                    f"  slow tick {frame}: {tick_elapsed:.2f}s",
+                    flush=True,
+                )
 
             velocity = ego.get_velocity()
             speed = math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
@@ -913,6 +925,8 @@ def main():
     except KeyboardInterrupt:
         print("\n  Collection interrupted")
     finally:
+        if args.watchdog_s > 0:
+            faulthandler.cancel_dump_traceback_later()
         # Save whatever was collected (best-effort), then ALWAYS clean the map \u2014
         # even on Ctrl+C or an error \u2014 so the next run starts from a clean world.
         try:
