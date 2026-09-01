@@ -10,8 +10,7 @@ prompt, with or without access to the repository it describes.
 
 ## 1. Executive Summary
 
-**Goal:** Build a _realistic automotive radar_ inside the CARLA 0.9.16 simulator, **collectbad." AUROC 0.819 means
-training data in it**, and **evaluate a ghost (multipath false-alarm) detector trained on that
+**Goal:** Build a _realistic automotive radar_ inside the CARLA 0.9.16 simulator, **collect training data in it**, and **evaluate a ghost (multipath false-alarm) detector trained on that
 synthetic data against the real-life Radar Ghost Dataset (RGD) v1.1** — i.e., a sim-to-real
 transfer study for radar multipath-ghost detection.
 
@@ -379,7 +378,72 @@ Not yet supportable: any deployment-grade false-alarm filter claim at ≤1 % FPR
 
 ---
 
-## 5. Planned Next Steps (current plan)
+### 4.7 Zero-Shot v2 Results (CFAR-style expansion + invariant features)
+
+**Date:** August 25, 2026
+**Checkpoint:** `artifacts/zeroshot_v2_carla_pretrain/best_detector.pt` (epoch 14,
+synthetic val AUPRC 0.962)
+**Data:** trained on `ghost_carla_zeroshot_v2` (17 sequences, CFAR-emulating
+expansion, ~2000 pts/frame); evaluated on `ghost_real_official` (manifest
+patched to schema v2; stored raw fields unchanged by the patch)
+
+| Metric | v1 zero-shot | **v2 zero-shot** |
+|---|---|---|
+| Test AUPRC | 0.159 | **0.077** |
+| Test AUROC | 0.606 | **0.281** |
+| Ghost recall @ op. thr | 0.30% | 0.21% |
+| Op. threshold | 0.9995 (saturated) | 0.979 (healthy) |
+| Op. FPR | 1.45% | 0.97% ✓ |
+
+**Verdict: worse than v1.** Structural fixes alone did not close the gap.
+AUROC < 0.5 shows an *inverted* transfer signal: real ghost points receive
+systematically LOWER ghost-probability than real direct returns under the
+model — some cue learned from expanded synthetic data is anti-correlated in
+reality (candidates: local-density ordering, relative-amplitude ordering, or
+cluster-Doppler residual direction). Notably, the expansion gives synthetic
+ghost detections dense point clusters exactly like direct returns, which may
+have destroyed the sparsity cue that v1's sparse ghosts accidentally carried.
+
+**Positive:** label smoothing fixed calibration — the operating point lands
+at 0.97% FPR instead of saturating at 0.9995 with a 5% floor.
+
+**Next diagnostic:** per-feature marginal comparison of synthetic-train vs
+real-test (`analyze_ghost_dataset.py` on both prepared sets) to identify
+which v2 statistic is reversed before any further generator work.
+
+### 4.8 Cross-Domain Diagnostic: Real-Trained Model Scored on Synthetic
+
+**Date:** August 25, 2026
+**Tool:** `evaluate_cross_domain.py` (schema-tolerant evaluator)
+**Checkpoint:** `ghost_temporal_official/best_detector.pt` (real-only, schema v1)
+**Validation:** reproduces the baseline exactly on real test
+(AUPRC 0.3291 / AUROC 0.8191 / recall@0.782 = 68.3%)
+
+| Evaluated set | Base rate (ghost) | Random AUPRC | Observed AUPRC | AUROC | pts > 0.782 thr |
+|---|---|---|---|---|---|
+| Real test | 13% | ~0.13 | **0.329** ✓ | 0.819 | many |
+| Old synthetic (densified) | ~75% | ~0.75 | 0.635 (below random) | 0.462 | ~0.4% |
+| New synthetic (expanded) | ~75% | ~0.75 | 0.745 (= random) | 0.508 | **none** |
+
+**Findings:**
+
+1. The real-trained model ranks BOTH synthetic generations at chance level
+   (AUROC 0.46 / 0.51) — the domain gap is symmetric and survived both
+   generator iterations (densified v1, CFAR-expanded v2).
+2. Not one labeled synthetic point crosses the real-model's operating
+   threshold: the entire synthetic score mass sits below where real-data
+   scores live. Primary suspect: v1's absolute-amplitude feature operates on
+   completely different scales (SNR-proxy vs measured echo power), so the
+   model sees out-of-range inputs everywhere.
+3. Caveat: because the v1 checkpoint depends on absolute amplitude, this
+   test is partially blind to *geometric* quality — it measures total
+   feature-space distance more than shape realism.
+
+**Combined with §4.5–4.7:** four independent transfer measurements
+(synthetic→real twice, real→synthetic twice, two generator generations) all
+show chance-or-worse transfer. Conclusion: pure Level-A zero-shot is not
+achievable with this target-list simulator fidelity, and the gap is
+quantified bidirectionally — a defensible negative result.
 
 ---
 
@@ -391,7 +455,7 @@ Not yet supportable: any deployment-grade false-alarm filter claim at ≤1 % FPR
    (`python3 -m unittest discover -s radar/tests -p 'test_*.py'`, mock CARLA, no server
    needed) + confirm `rgd_regime_v1` profile loads.
 3. Real RGD v1.1 is downloaded AND prepared (`artifacts/ghost_real_official`,
-   `artifacts/ghost_real_scenario`); verify manifest (schema aus et al. 2020 (arXiv 2007.05280) — machine-learning ghost detection on real Mercedes radar data, using an established radar classifier with object`radar_ghost_physical_v1`, both
+   `artifacts/ghost_real_scenario`); verify manifest (schema `radar_ghost_physical_v1`, both
    classes per split).
 4. Start CARLA 0.9.16 (`./CarlaUE4.sh -quality-level=Epic`, add `-RenderOffScreen` when
    headless). Smoke collect 1 pedestrian sequence → must print `ALL CHECKS PASSED`.
