@@ -505,7 +505,7 @@ def main():
     print(f"  Vehicles:        {args.vehicles}")
     print(f"  Pedestrians:     {args.pedestrians}")
     print(f"  Output:          {csv_path}")
-    print(f"  Scenarios:       {', '.join(SCENARIOS)}")
+    print(f"  Scenarios:       {', '.join(args.scenarios)}")
     print("=" * 72)
 
     client = carla.Client(args.host, args.port)
@@ -583,6 +583,8 @@ def main():
 
     settle_start = time.time()
     for settle_index in range(40):
+        if settle_index < 5:
+            print(f"  settle tick {settle_index:2d}: ...", flush=True)
         tick_start = time.time()
         world.tick()
         follow_ego_with_spectator(world, ego)
