@@ -36,7 +36,7 @@ from driving_contract import (
     WEATHER_SEGMENT_S,
 )
 from speed_model import BASE_FEATURE_COLS, flatten_history
-from weather_utils import apply_random_fog
+from weather_utils import WEATHER_MODES, apply_weather
 
 
 CARLA_HOST = "127.0.0.1"
@@ -395,6 +395,16 @@ def main():
         help="Hard ceiling for teacher speed and target-speed labels",
     )
     parser.add_argument(
+        "--weather",
+        choices=WEATHER_MODES,
+        default="clear",
+        help=(
+            "clear (default) or fog_ladder. The ladder costs GPU render time "
+            "and, on a radar-only run, buys nothing: every preset has zero "
+            "precipitation and fog is worth 0.05 dB per 100 m at 77 GHz"
+        ),
+    )
+    parser.add_argument(
         "--weather-interval-s",
         type=int,
         default=WEATHER_SEGMENT_S,
@@ -570,6 +580,7 @@ def main():
     print(f"  TM port:         {args.tm_port}")
     print(f"  Lead gap:        {args.leading_distance_m:.1f}m")
     print(f"  Ignore lights:   {args.ignore_lights_pct:.0f}%")
+    print(f"  Weather mode:    {args.weather}")
     print("=" * 72)
 
     client = carla.Client(args.host, args.port)
@@ -652,7 +663,7 @@ def main():
         ghost_threshold=args.radar_ghost_threshold,
         ghost_device=args.radar_ghost_device,
     )
-    current_weather_name = apply_random_fog(world)
+    current_weather_name = apply_weather(world, args.weather)
     print(f"  Weather:         {current_weather_name}")
 
     # First ticks after the sensors attach are much slower than steady state;
@@ -776,7 +787,7 @@ def main():
             scenario = active_scenarios[scenario_index]
             if scenario != active_scenario:
                 active_scenario = scenario
-                current_weather_name = apply_random_fog(world)
+                current_weather_name = apply_weather(world, args.weather)
                 last_weather_change_frame = frame
                 segment_counter += 1
                 active_episode_id = f"base_{segment_counter:04d}_{scenario}"
@@ -801,7 +812,7 @@ def main():
                     cleanup_actor(cut_in_npc)
                     cut_in_npc = None
             elif frame - last_weather_change_frame >= args.weather_interval_s * FPS:
-                current_weather_name = apply_random_fog(world)
+                current_weather_name = apply_weather(world, args.weather)
                 last_weather_change_frame = frame
                 segment_counter += 1
                 active_episode_id = f"base_{segment_counter:04d}_{scenario}"
@@ -1033,6 +1044,7 @@ def main():
                     "fps": FPS,
                     "max_target_speed_kmh": args.max_speed_kmh,
                     "weather_interval_s": args.weather_interval_s,
+                    "weather_mode": args.weather,
                     "collection_seed": args.seed,
                     "leading_distance_m": args.leading_distance_m,
                     "ignore_lights_pct": args.ignore_lights_pct,

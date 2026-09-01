@@ -77,6 +77,48 @@ FOG_WEATHER_PRESETS = [
 ]
 
 
+# Radar barely notices fog: at 77 GHz the model charges 0.05 dB per 100 m of
+# fog, so the densest preset above costs about 0.045 dB at full range. The fog
+# ladder exists for the camera, which it blinds. A radar-only collection pays
+# the render cost for no measurable sensor effect, so it should usually run
+# clear. Kept alongside the ladder rather than replacing it, because vision is
+# reinstatable (see vision.md) and the scenario harness still sweeps fog.
+CLEAR_WEATHER_PRESET = {
+    "name": "clear",
+    "cloudiness": 5.0,
+    "precipitation": 0.0,
+    "precipitation_deposits": 0.0,
+    "wind_intensity": 5.0,
+    "sun_azimuth_angle": 45.0,
+    "sun_altitude_angle": 60.0,
+    "fog_density": 0.0,
+    "fog_distance": 0.0,
+    "fog_falloff": 0.0,
+    "wetness": 0.0,
+}
+
+WEATHER_MODES = ("clear", "fog_ladder")
+
+
+def _to_weather(preset):
+    return carla.WeatherParameters(
+        **{key: value for key, value in preset.items() if key != "name"}
+    )
+
+
+def apply_weather(world, mode="clear", rng=None):
+    """Apply a weather mode by name; returns the preset name applied."""
+
+    if mode not in WEATHER_MODES:
+        raise ValueError(
+            f"Unknown weather mode '{mode}'. Choose from {WEATHER_MODES}."
+        )
+    if mode == "clear":
+        world.set_weather(_to_weather(CLEAR_WEATHER_PRESET))
+        return CLEAR_WEATHER_PRESET["name"]
+    return apply_random_fog(world, rng=rng)
+
+
 def choose_random_fog_weather(rng=None):
     rng = rng or random
     preset = dict(rng.choice(FOG_WEATHER_PRESETS))
