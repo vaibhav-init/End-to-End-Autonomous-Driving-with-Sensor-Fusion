@@ -184,6 +184,32 @@ def spawn_pedestrians(world, count):
     return [w.id for w in walkers], [c.id for c in controllers]
 
 
+def scale_traffic_light_cycles(world, scale):
+    """Shorten every traffic-light phase by a constant factor.
+
+    The ego ignores lights, but the NPCs do not, so it still queues behind
+    them: 43% of a 10 min Town01 run was spent stationary. Thinning the
+    traffic would fix that too, at the cost of the radar targets and multipath
+    reflectors that dense traffic provides -- which is the point of the run.
+    Shortening the cycle keeps the traffic and shortens the queues.
+
+    All three phases are scaled by the same factor on purpose. Lights at an
+    intersection are interlocked -- one light's red spans the others' green
+    plus yellow -- so scaling the phases unequally can desynchronise a group
+    into all-green or all-red. A uniform factor preserves the ratio.
+    """
+
+    if scale >= 1.0:
+        return 0
+    count = 0
+    for light in world.get_actors().filter("traffic.traffic_light*"):
+        light.set_green_time(light.get_green_time() * scale)
+        light.set_yellow_time(light.get_yellow_time() * scale)
+        light.set_red_time(light.get_red_time() * scale)
+        count += 1
+    return count
+
+
 def configure_ego_autopilot(
     ego,
     tm,
@@ -463,6 +489,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--traffic-light-scale",
+        type=float,
+        default=0.4,
+        help=(
+            "multiply every traffic-light phase by this. The ego ignores "
+            "lights but NPCs do not, so it queues behind them; a shorter "
+            "cycle shortens the queues without thinning the traffic that "
+            "supplies radar targets. 1.0 leaves the map alone (default: 0.4)"
+        ),
+    )
+    parser.add_argument(
         "--ignore-lights-pct",
         type=float,
         default=IGNORE_LIGHTS_PCT,
@@ -491,6 +528,8 @@ def main():
         )
     if args.weather_interval_s <= 0:
         parser.error("--weather-interval-s must be positive")
+    if not 0.0 < args.traffic_light_scale <= 1.0:
+        parser.error("--traffic-light-scale must be in (0, 1]")
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -581,6 +620,7 @@ def main():
     print(f"  Lead gap:        {args.leading_distance_m:.1f}m")
     print(f"  Ignore lights:   {args.ignore_lights_pct:.0f}%")
     print(f"  Weather mode:    {args.weather}")
+    print(f"  Light cycle:     {args.traffic_light_scale:.2f}x")
     print("=" * 72)
 
     client = carla.Client(args.host, args.port)
@@ -645,6 +685,13 @@ def main():
     )
 
     print("  Teacher: CARLA autopilot")
+
+    retimed = scale_traffic_light_cycles(world, args.traffic_light_scale)
+    if retimed:
+        print(
+            f"  Retimed {retimed} traffic lights to "
+            f"{args.traffic_light_scale:.2f}x their normal cycle"
+        )
 
     npc_ids = spawn_vehicles(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_pedestrians(world, args.pedestrians)
@@ -1045,6 +1092,7 @@ def main():
                     "max_target_speed_kmh": args.max_speed_kmh,
                     "weather_interval_s": args.weather_interval_s,
                     "weather_mode": args.weather,
+                    "traffic_light_scale": args.traffic_light_scale,
                     "collection_seed": args.seed,
                     "leading_distance_m": args.leading_distance_m,
                     "ignore_lights_pct": args.ignore_lights_pct,
