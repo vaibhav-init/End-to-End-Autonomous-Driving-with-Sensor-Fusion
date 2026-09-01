@@ -477,6 +477,16 @@ def main():
             "learn to brake; idm does and is deterministic (default: idm)"
         ),
     )
+    parser.add_argument(
+        "--client-timeout",
+        type=float,
+        default=120.0,
+        help=(
+            "CARLA client timeout. The first ticks after attaching semantic "
+            "LiDAR, camera and YOLO are far slower than steady state, and the "
+            "old 30 s was not enough to get through them"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR)
     add_radar_arguments(parser)
@@ -565,7 +575,7 @@ def main():
     print("=" * 72)
 
     client = carla.Client(args.host, args.port)
-    client.set_timeout(30.0)
+    client.set_timeout(float(args.client_timeout))
 
     world = client.get_world()
     if world.get_map().name.split("/")[-1] != args.town:
@@ -649,8 +659,19 @@ def main():
     current_weather_name = apply_random_fog(world)
     print(f"  Weather:         {current_weather_name}")
 
-    for _ in range(40):
+    # First ticks after the sensors attach are much slower than steady state;
+    # report them so a stall here is visible instead of just timing out.
+    settle_start = time.time()
+    for settle_index in range(40):
+        tick_start = time.time()
         world.tick()
+        tick_elapsed = time.time() - tick_start
+        if settle_index < 3 or tick_elapsed > 1.0:
+            print(
+                f"  settle tick {settle_index:2d}: {tick_elapsed:6.2f}s",
+                flush=True,
+            )
+    print(f"  Sensors settled in {time.time() - settle_start:.1f}s")
 
     feature_history = deque(maxlen=args.history)
     samples = []
