@@ -42,7 +42,16 @@ python3 -m unittest radar.tests.test_ghost_model            # single test module
 python3 -m unittest radar.tests.test_ghost_model.RadarGhostModelTest.test_model_output_shapes
 ```
 
-Torch and `carla` are typically absent on the authoring box, so three modules (`test_ghost_model`, `test_collector_motion`, `test_densify_radar_ghost_dataset`) fail to *import* there and the rest still run — that is expected, not a regression. The full suite (~75 tests) passes on the GPU box.
+Torch and `carla` are typically absent on the authoring box, so three modules (`test_ghost_model`, `test_collector_motion`, `test_densify_radar_ghost_dataset`) fail to *import* there and the remaining 61 tests still run — that is expected, not a regression. The full suite (~75 tests) passes on the GPU box.
+
+Two gates that are not unit tests but decide whether a run was worth doing, both CARLA-free:
+
+```bash
+python3 inspect_dataset.py dataset_throttle_brake            # before training
+python3 acceptance_test.py --model-dir model_throttle_brake  # after training
+```
+
+`inspect_dataset.py` (positional dirs, one or more) prints the four numbers that say whether a collection is usable: braking-while-moving share (standstill frames excluded, or queueing counts as deceleration), target-detected share, stopped-frame share (training downsamples these to ~15%, so a queueing-heavy run yields far less than its row count), and ghost-selected share with its within-30 m subset. `acceptance_test.py` is the braking probe described above.
 
 Simulator smoke test after touching scenario/driver code:
 
@@ -62,7 +71,14 @@ The model predicts a **target speed** (m/s); a PID converts it to throttle/brake
 
 **Shared limits — `driving_contract.py`**: `RADAR_RANGE_M`, `MAX_TARGET_SPEED_KMH` (60 — collection labels and runtime predictions must never exceed it), `MAX_STOPPED_FRACTION`, weather segment length. Prefer importing these over re-declaring constants.
 
-**Collection** (`collect_throttle_brake_data.py`, plus `collect_scenario_data.py` for staged NHTSA-like episodes): ego drives on CARLA autopilot (the teacher); each frame logs stacked history. `--scenarios` selects which staged phases to rotate through — pass just `traffic_light` for plain town driving with no lead, emergency or cut-in actor spawned. Label = smoothed *future* ego speed over `LABEL_HORIZON` (10) frames, computed at save time. Writes `dataset_throttle_brake/data.csv` (+ `data_staged.csv`) and `dataset_config.json`.
+**Collection** (`collect_throttle_brake_data.py`, plus `collect_scenario_data.py` for staged NHTSA-like episodes): ego drives on CARLA autopilot (the teacher); each frame logs stacked history. `--scenarios` selects which staged phases to rotate through — pass just `traffic_light` for plain town driving with no lead, emergency or cut-in actor spawned. Label = smoothed *future* ego speed over `LABEL_HORIZON` (10) frames, computed at save time. Writes `dataset_throttle_brake/data.csv` (+ `data_staged.csv`) and `dataset_config.json`. Town04 by default, same as the scenario harness.
+
+The collector flags that change what the data *contains*, as opposed to how the run behaves — get these wrong and the run is wasted:
+
+- `--ignore-lights-pct` (default **100**): the ego ignores every light. A red-light stop is a braking label the radar cannot explain, so it teaches the model to brake at random. `--traffic-light-red-s` (default 0 = leave the map's timing alone) is the other half of that knob.
+- `--leading-distance-m` (default 5.0): the gap the teacher's autopilot defends. It brakes to hold this, so a smaller value is the main lever on how many braking frames a run yields — and the shipped model's failure to brake traces back to a teacher that rarely did.
+- `--weather` (default `clear`, modes in `weather_utils.WEATHER_MODES`): `fog_ladder` costs GPU render time and, radar-only, buys nothing — every preset is zero-precipitation and fog is ~0.05 dB per 100 m at 77 GHz.
+- `--max-speed-kmh` caps teacher speed *and* labels (ceiling `MAX_TARGET_SPEED_KMH`); `--radar-points-per-second` lowers semantic-LiDAR density for the non-native backends (default 240k, the usual cause of stalled synchronous ticks); `--tm-port` avoids the port a killed run left bound; `--client-timeout` (120 s) covers the slow first ticks after sensors attach; `--watchdog-s` dumps every thread's stack when a tick blocks.
 
 **Training** (`train_throttle_brake.py`): reads `dataset_config.json` for the column list; `--data` accepts a CSV *or a directory* (globs all CSVs and assigns episode IDs). Drops idle frames and downsamples stopped frames to ~15%. StandardScaler on the train split. Writes `target_speed_mlp.pt`, `scaler.pkl`, `model_config.json`.
 
@@ -72,7 +88,7 @@ The model predicts a **target speed** (m/s); a PID converts it to throttle/brake
 
 ### The config-provenance chain (important)
 
-Radar backend, profile, and ghost-detector identity are recorded in `dataset_config.json` at collection, copied into `model_config.json` at training (`radar_backend`, `radar_ghost_detector_signature`), and **checked at runtime**: `scenarios/drivers/mlp_driver.py` raises if either the deployed `radar_config_signature` or the `radar_ghost_detector_signature` differs from the one the model was trained under. Feature-schema or radar-config changes therefore mean re-collect → retrain, not just a flag flip.
+Radar backend, profile, and ghost-detector identity are recorded in `dataset_config.json` at collection, copied into `model_config.json` at training (`radar_backend`, `radar_ghost_detector_signature`), and **checked at runtime**: `scenarios/drivers/mlp_driver.py` and `test_throttle_brake_live.py` each raise if either the deployed `radar_config_signature` or the `radar_ghost_detector_signature` differs from the one the model was trained under (two copies of the same gate — keep them in step). Feature-schema or radar-config changes therefore mean re-collect → retrain, not just a flag flip.
 
 **Known blocker:** arms A–C need a *clean-trained* model deployed *with* ghosts, which changes the signature and trips this gate. The ghost rate has to become a runtime injection knob **outside** the signature before those arms can run.
 
@@ -162,3 +178,4 @@ Root, current: `work.md` (phase plan, scope boundary, measured throughput), `han
 Root, historical background: `SIM2REAL_RADAR_RESEARCH_BRIEF.md` (the closed transfer study, most complete statement of its method and results), `RADAR_FALSE_ALARM_RESEARCH_REPORT.md`, `RESEARCH_DIRECTION_REPORT.md`, `PROFESSOR_RESEARCH_DIRECTION.md`, `deepresearch.md`, `report.md`.
 `carla4/radar/`: `README.md` (backend architecture + profiles), `GHOST_DETECTION.md` (execution protocol), `ZERO_SHOT_V2.md`, `RGD_REGIME_COLLECTION.md`, `REALISM_ROADMAP.md`.
 `carla4/scenarios/`: `EVALUATION_GUIDE.md`, `RESULTS_COMPARISON.md`.
+**Stale, still committed:** `carla4/method.md` and `carla4/diagram.md` describe the camera+YOLO fusion pipeline and an ACC/IDM teacher, both of which were removed. Treat `vision.md` as the record of the camera path and this file for the rest; don't cite either as current.
