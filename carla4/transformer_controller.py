@@ -35,11 +35,19 @@ from radar.ghost_detection.features import (
 MODEL_TYPE = "transformer"
 CHECKPOINT_NAME = "target_speed_transformer.pt"
 POINT_FEATURE_DIM = len(FEATURE_NAMES)
-# Ego token: speed, acceleration, and a flag that marks it as the ego token.
-EGO_FEATURE_DIM = 3
+# Ego token: speed and a flag that marks it as the ego token. Ego
+# acceleration is deliberately absent: with it, a model trained on future
+# speed learns "keep decelerating if already decelerating" from its own past
+# commands and never has to read the radar (measured: zeroing that channel
+# removed the braking prediction, removing every radar point did not).
+EGO_FEATURE_DIM = 2
 TOKEN_DIM = POINT_FEATURE_DIM + EGO_FEATURE_DIM
 SPEED_SCALE_MPS = 20.0
 ACCEL_SCALE_MPS2 = 5.0
+# The head predicts the change from the current ego speed, in
+# SPEED_SCALE_MPS units; the target speed is ego speed plus that change. A
+# stationary scene therefore has to be read out of the points to brake.
+OUTPUT_MODE = "delta"
 # Same corridor as the radar selector, used for the cruise floor only.
 PATH_HALF_WIDTH_M = 1.8
 PATH_WIDTH_GROWTH_PER_M = 0.004
@@ -127,9 +135,10 @@ def build_window_tokens(scans, ego_speed_mps, ego_accel_mps2, max_points):
     tokens = np.zeros((max_points + 1, TOKEN_DIM), dtype=np.float32)
     mask = np.zeros(max_points + 1, dtype=np.bool_)
     source_codes = np.full(max_points + 1, -1, dtype=np.int8)
+    # ``ego_accel_mps2`` is accepted for call compatibility and ignored.
+    del ego_accel_mps2
     tokens[0, POINT_FEATURE_DIM:] = (
         float(ego_speed_mps) / SPEED_SCALE_MPS,
-        float(np.clip(ego_accel_mps2, -20.0, 20.0)) / ACCEL_SCALE_MPS2,
         1.0,
     )
     mask[0] = True
@@ -186,6 +195,7 @@ def obstacle_in_corridor(scan, max_range_m):
 def default_model_kwargs():
     return {
         "token_dim": TOKEN_DIM,
+        "output_mode": OUTPUT_MODE,
         "d_model": 64,
         "heads": 4,
         "layers": 2,
@@ -209,7 +219,10 @@ def create_model(**kwargs):
     class TargetSpeedTransformer(nn.Module):
         """Set attention over detection tokens, read out at the ego token."""
 
-        def __init__(self, token_dim, d_model, heads, layers, ff_dim, dropout):
+        def __init__(self, token_dim, d_model, heads, layers, ff_dim, dropout,
+                     output_mode=OUTPUT_MODE):
+            if output_mode != OUTPUT_MODE:
+                raise ValueError(f"unsupported output_mode {output_mode!r}")
             super().__init__()
             self.input = nn.Sequential(
                 nn.Linear(token_dim, d_model),
@@ -234,7 +247,7 @@ def create_model(**kwargs):
             )
 
         def forward(self, tokens, mask):
-            """Normalised target speed (divide-by-SPEED_SCALE units)."""
+            """Normalised speed change (divide-by-SPEED_SCALE units)."""
 
             hidden = self.input(tokens)
             hidden = self.encoder(hidden, src_key_padding_mask=~mask)
@@ -282,6 +295,23 @@ def load_model(model_dir, device="cpu"):
     return model, config
 
 
+def outputs_to_target_speed(outputs, ego_speed_mps):
+    """Model outputs (normalised speed change) -> target speed in m/s.
+
+    Works on numpy arrays and torch tensors alike; ``ego_speed_mps`` is the
+    current ego speed the window was built with.
+    """
+
+    speed = ego_speed_mps + outputs * SPEED_SCALE_MPS
+    if hasattr(speed, "clamp"):
+        return speed.clamp(min=0.0)
+    return np.maximum(speed, 0.0)
+
+
+def ego_speed_from_window(window):
+    return float(window["tokens"][0, POINT_FEATURE_DIM]) * SPEED_SCALE_MPS
+
+
 def predict_target_speed(model, window, device="cpu"):
     """Target speed in m/s for one window dict from ``build_window_tokens``."""
 
@@ -290,11 +320,11 @@ def predict_target_speed(model, window, device="cpu"):
     mask = torch.from_numpy(window["mask"][None]).to(device)
     with torch.no_grad():
         normalised = float(model(tokens, mask)[0])
-    return max(0.0, normalised * SPEED_SCALE_MPS)
+    return float(outputs_to_target_speed(normalised, ego_speed_from_window(window)))
 
 
 def predict_batch(model, tokens, mask):
-    """Normalised predictions for a batch; callers rescale."""
+    """Normalised speed-change predictions for a batch; callers rescale."""
 
     return model(tokens, mask)
 

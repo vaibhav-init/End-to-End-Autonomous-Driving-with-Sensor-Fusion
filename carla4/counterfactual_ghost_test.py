@@ -35,6 +35,7 @@ from train_target_speed_transformer import (
 from transformer_controller import (
     SOURCE_CODES,
     SPEED_SCALE_MPS,
+    outputs_to_target_speed,
     load_model,
 )
 from driving_contract import MAX_TARGET_SPEED_KMH
@@ -107,7 +108,7 @@ def main():
             mask = batch["mask"].to(args.device)
             sources = batch["sources"].numpy()
             ego_speed = batch["ego_speed"].numpy()
-            full = model(tokens, mask).cpu().numpy() * SPEED_SCALE_MPS
+            full = outputs_to_target_speed(model(tokens, mask).cpu().numpy(), ego_speed)
             predictions_full.extend(full.tolist())
             windows_total += len(full)
 
@@ -118,7 +119,7 @@ def main():
             # No-ghost variant: mask the ghost tokens out.
             noghost_mask = mask.clone()
             noghost_mask[torch.from_numpy(is_ghost).to(args.device)] = False
-            noghost = model(tokens, noghost_mask).cpu().numpy() * SPEED_SCALE_MPS
+            noghost = outputs_to_target_speed(model(tokens, noghost_mask).cpu().numpy(), ego_speed)
             # Dropout variant: remove as many direct points as there were ghosts.
             dropout_mask = mask.clone().cpu().numpy()
             for row in np.flatnonzero(has_ghost):
@@ -127,7 +128,9 @@ def main():
                 if take > 0:
                     drop = rng.choice(direct_idx, take, replace=False)
                     dropout_mask[row, drop] = False
-            dropout = model(tokens, torch.from_numpy(dropout_mask).to(args.device)).cpu().numpy() * SPEED_SCALE_MPS
+            dropout = outputs_to_target_speed(
+                model(tokens, torch.from_numpy(dropout_mask).to(args.device)).cpu().numpy(), ego_speed
+            )
 
             # Closest ghost range from the range feature (range/100 in column 2).
             range_feature = tokens[..., 2].cpu().numpy() * 100.0

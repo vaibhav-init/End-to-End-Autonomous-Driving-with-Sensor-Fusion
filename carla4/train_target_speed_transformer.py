@@ -90,8 +90,10 @@ class WindowedDetectionDataset(Dataset):
             "tokens": torch.from_numpy(built["tokens"]),
             "mask": torch.from_numpy(built["mask"]),
             "sources": torch.from_numpy(built["sources"]),
+            # Speed change from now to the label horizon, normalised.
             "target": torch.tensor(
-                float(row[self.label_col]) / SPEED_SCALE_MPS, dtype=torch.float32
+                (float(row[self.label_col]) - float(row["ego_speed_now"])) / SPEED_SCALE_MPS,
+                dtype=torch.float32,
             ),
             "ego_speed": torch.tensor(float(row["ego_speed_now"]), dtype=torch.float32),
             "point_count": torch.tensor(int(built["point_count"]), dtype=torch.int64),
@@ -177,10 +179,16 @@ def select_rows(rows, label_col, max_speed_kmh, speed_tolerance_kmh,
     return rows
 
 
-def run_epoch(model, loader, device, optimizer=None):
+# Braking windows are rare (a few percent of frames) and are the ones that
+# matter; a window whose label sits BRAKE_WEIGHT_SCALE_MPS or more below the
+# ego speed carries 1 + brake_weight times the loss of a cruise window.
+BRAKE_WEIGHT_SCALE_MPS = 3.0
+
+
+def run_epoch(model, loader, device, optimizer=None, brake_weight=4.0):
     training = optimizer is not None
     model.train(training)
-    loss_fn = torch.nn.SmoothL1Loss(beta=0.1)
+    loss_fn = torch.nn.SmoothL1Loss(beta=0.1, reduction="none")
     total = 0.0
     count = 0
     abs_error = 0.0
@@ -188,9 +196,11 @@ def run_epoch(model, loader, device, optimizer=None):
         tokens = batch["tokens"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
         target = batch["target"].to(device, non_blocking=True)
+        braking = (-target * SPEED_SCALE_MPS / BRAKE_WEIGHT_SCALE_MPS).clamp(0.0, 1.0)
+        weight = 1.0 + float(brake_weight) * braking
         with torch.set_grad_enabled(training):
             prediction = model(tokens, mask)
-            loss = loss_fn(prediction, target)
+            loss = (loss_fn(prediction, target) * weight).sum() / weight.sum()
             if training:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -219,6 +229,8 @@ def main():
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3.0e-4)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
+    parser.add_argument("--brake-weight", type=float, default=4.0,
+                        help="extra loss weight for windows whose label is well below the ego speed")
     parser.add_argument("--early-stop-patience", type=int, default=15)
     parser.add_argument("--validation-fraction", type=float, default=0.2)
     parser.add_argument("--split-seed", type=int, default=42)
@@ -302,8 +314,8 @@ def main():
     print("TRAINING")
     print("=" * 64)
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_mae = run_epoch(model, train_dl, args.device, optimizer)
-        val_loss, val_mae = run_epoch(model, val_dl, args.device)
+        train_loss, train_mae = run_epoch(model, train_dl, args.device, optimizer, args.brake_weight)
+        val_loss, val_mae = run_epoch(model, val_dl, args.device, brake_weight=args.brake_weight)
         scheduler.step(val_loss)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss,
                         "train_mae_mps": train_mae, "val_mae_mps": val_mae,
@@ -324,7 +336,7 @@ def main():
 
     checkpoint = torch.load(checkpoint_path, map_location=args.device, weights_only=True)
     model.load_state_dict(checkpoint["model_state"])
-    _val_loss, val_mae = run_epoch(model, val_dl, args.device)
+    _val_loss, val_mae = run_epoch(model, val_dl, args.device, brake_weight=args.brake_weight)
     print(f"  Validation MAE (best checkpoint): {val_mae:.4f} m/s")
 
     provenance_keys = (
