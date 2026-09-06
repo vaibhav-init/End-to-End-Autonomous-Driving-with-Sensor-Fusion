@@ -52,6 +52,10 @@ RADAR_DTYPE = np.dtype(
 TARGET_TYPES = ("vehicle", "pedestrian", "cyclist")
 TARGET_SEMANTIC_TAGS = {"vehicle": 14, "pedestrian": 12, "cyclist": 18}
 TARGET_SPEEDS_MPS = {"vehicle": 3.0, "pedestrian": 1.4, "cyclist": 4.5}
+# Placements the solver accepts can still be invisible to the semantic LiDAR
+# (a walker parked inside terrain behind a guardrail). Try this many
+# reflectors before giving the sequence up.
+MAX_PLACEMENT_ATTEMPTS = 4
 
 
 def parse_args():
@@ -838,6 +842,7 @@ def _configure_controlled_target(
     type2_azimuth_max_rad=None,
     surface_distance_target_m=None,
     motion_direction="tangent",
+    exclude_reflectors=(),
 ):
     """Put a CARLA actor into geometry known to produce physical paths."""
 
@@ -883,6 +888,13 @@ def _configure_controlled_target(
                     semantic_tag,
                 )
             )
+    if exclude_reflectors:
+        excluded = {int(item) for item in exclude_reflectors}
+        candidates = [
+            item
+            for item in candidates
+            if int(item["reflector"].reflector_id) not in excluded
+        ]
     if not candidates:
         observed_tags = sorted(
             {int(reflector.semantic_tag) for reflector in reflectors}
@@ -1185,6 +1197,14 @@ def collect_sequence(client, args, sequence_index):
             startup_frame,
             timeout_s=args.radar_timeout,
         )
+        placement_kwargs = dict(
+            range_min_m=args.target_range_min,
+            range_max_m=args.target_range_max,
+            surface_distance_max_m=args.surface_distance_max,
+            type2_azimuth_max_rad=math.radians(args.type2_azimuth_max_deg),
+            surface_distance_target_m=args.surface_distance_target,
+            motion_direction=args.motion_direction,
+        )
         controlled_plan = _configure_controlled_target(
             radar,
             world,
@@ -1192,12 +1212,7 @@ def collect_sequence(client, args, sequence_index):
             semantic_tag,
             target_speed_mps,
             args.target_type,
-            range_min_m=args.target_range_min,
-            range_max_m=args.target_range_max,
-            surface_distance_max_m=args.surface_distance_max,
-            type2_azimuth_max_rad=math.radians(args.type2_azimuth_max_deg),
-            surface_distance_target_m=args.surface_distance_target,
-            motion_direction=args.motion_direction,
+            **placement_kwargs,
         )
         amplitude_gain = 10.0 ** (
             float(getattr(radar.realistic_config, "amplitude_gain_db", 0.0)) / 20.0
@@ -1211,25 +1226,55 @@ def collect_sequence(client, args, sequence_index):
             controlled_target,
             args.camera_view,
         )
-        print(
-            "  Controlled target "
-            f"{controlled_target.id} (type={args.target_type}, "
-            f"tag={semantic_tag}) at "
-            f"{controlled_plan['base_target_range_m']:.1f} m; "
-            f"reflector tag={controlled_plan['reflector_tag']}, "
-            f"surface gap="
-            f"{controlled_plan['target_surface_distance_m']:.1f} m; "
-            f"motion={controlled_plan['motion_direction']} "
-            f"(expected |vr| {controlled_plan['expected_radial_speed_mps']:.2f} m/s); "
-            f"camera={args.camera_view}"
-        )
-        controlled_step = _validate_controlled_target(
-            radar,
-            world,
-            controlled_plan,
-            args.fps,
-            args.radar_timeout,
-        )
+        def _describe_plan(plan):
+            print(
+                "  Controlled target "
+                f"{controlled_target.id} (type={args.target_type}, "
+                f"tag={semantic_tag}) at "
+                f"{plan['base_target_range_m']:.1f} m; "
+                f"reflector tag={plan['reflector_tag']}, "
+                f"surface gap="
+                f"{plan['target_surface_distance_m']:.1f} m; "
+                f"motion={plan['motion_direction']} "
+                f"(expected |vr| {plan['expected_radial_speed_mps']:.2f} m/s); "
+                f"camera={args.camera_view}"
+            )
+
+        _describe_plan(controlled_plan)
+        tried_reflectors = {int(controlled_plan["reflector_id"])}
+        for placement_attempt in range(MAX_PLACEMENT_ATTEMPTS):
+            try:
+                controlled_step = _validate_controlled_target(
+                    radar,
+                    world,
+                    controlled_plan,
+                    args.fps,
+                    args.radar_timeout,
+                )
+                break
+            except RuntimeError as validation_error:
+                if placement_attempt + 1 >= MAX_PLACEMENT_ATTEMPTS:
+                    raise
+                print(
+                    f"  placement rejected: {validation_error}\n"
+                    "  trying another reflector"
+                )
+                try:
+                    controlled_plan = _configure_controlled_target(
+                        radar,
+                        world,
+                        controlled_target,
+                        semantic_tag,
+                        target_speed_mps,
+                        args.target_type,
+                        exclude_reflectors=tried_reflectors,
+                        **placement_kwargs,
+                    )
+                except RuntimeError:
+                    raise validation_error
+                tried_reflectors.add(int(controlled_plan["reflector_id"]))
+                _describe_plan(controlled_plan)
+        controlled_plan["placement_attempts"] = placement_attempt + 1
         warmup_frames = int(round(args.warmup * args.fps))
         capture_frames = int(round(args.duration * args.fps))
         for _ in range(warmup_frames):
@@ -1407,6 +1452,9 @@ def collect_sequence(client, args, sequence_index):
                 "controlled_motion_amplitude_m": controlled_plan[
                     "motion_amplitude_m"
                 ],
+                "controlled_placement_attempts": int(
+                    controlled_plan.get("placement_attempts", 1)
+                ),
                 "controlled_validated_path_families": controlled_plan[
                     "validated_path_families"
                 ],
