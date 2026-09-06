@@ -2,6 +2,7 @@
 """Collect path-labeled geometry multipath target lists in CARLA 0.9.16."""
 
 import argparse
+import faulthandler
 import json
 import math
 from pathlib import Path
@@ -227,7 +228,7 @@ def parse_args():
         default=None,
         help=(
             "kill a sequence worker that has not exited after this many "
-            "seconds and count the sequence as failed (default: 120 s + 8x "
+            "seconds and count the sequence as failed (default: 60 s + 4x "
             "the warmup+capture time). A worker whose cleanup blocks on a "
             "synchronous-mode RPC otherwise stalls the whole run"
         ),
@@ -1762,6 +1763,10 @@ def _run_sequence_worker(args, sequence_index):
     when running everything in one process).
     """
 
+    # Every 90 s without exiting, dump every thread's stack to stderr: a
+    # worker that blocks inside a CARLA RPC then shows where, instead of
+    # being killed silently by the parent's timeout.
+    faulthandler.dump_traceback_later(90.0, repeat=True)
     carla = _carla_module()
     client = carla.Client(args.host, args.port)
     client.set_timeout(30.0)
@@ -1811,8 +1816,11 @@ def _run_supervisor(args):
                     f"Retrying sequence {sequence_index + 1}/"
                     f"{args.sequences} after worker exit {return_code}"
                 )
+            # Unbuffered: a worker killed by the timeout otherwise loses every
+            # line it printed, including the stack dumps below.
             command = [
                 sys.executable,
+                "-u",
                 str(Path(__file__).resolve()),
                 *worker_arguments,
                 "--worker-index",
@@ -1821,7 +1829,7 @@ def _run_supervisor(args):
             timeout_s = (
                 float(args.worker_timeout_s)
                 if args.worker_timeout_s is not None
-                else 120.0 + 8.0 * (float(args.warmup) + float(args.duration))
+                else 60.0 + 4.0 * (float(args.warmup) + float(args.duration))
             )
             try:
                 result = subprocess.run(command, timeout=timeout_s)
