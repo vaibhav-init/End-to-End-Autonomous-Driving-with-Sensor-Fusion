@@ -375,3 +375,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # libcarla can abort the interpreter during finalization ("PyGILState_Release
+    # ... must be current"), which run_all.py then records as an errored run even
+    # though the CSV and sidecar are written. Skip finalization.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
