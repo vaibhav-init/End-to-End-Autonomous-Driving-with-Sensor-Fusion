@@ -177,6 +177,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--target-speed-mps",
+        type=float,
+        default=None,
+        help=(
+            "walking/riding speed of the controlled target; default is the "
+            f"per-type table {TARGET_SPEEDS_MPS}"
+        ),
+    )
+    parser.add_argument(
         "--motion-direction",
         choices=("tangent", "radial"),
         default="tangent",
@@ -1111,7 +1120,11 @@ def collect_sequence(client, args, sequence_index):
     }
     sequence_seed = args.seed + sequence_index * 1009
     semantic_tag = TARGET_SEMANTIC_TAGS[args.target_type]
-    target_speed_mps = TARGET_SPEEDS_MPS[args.target_type]
+    target_speed_mps = (
+        float(args.target_speed_mps)
+        if args.target_speed_mps is not None
+        else TARGET_SPEEDS_MPS[args.target_type]
+    )
     try:
         settings = world.get_settings()
         settings.synchronous_mode = True
