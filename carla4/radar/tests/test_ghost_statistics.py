@@ -143,13 +143,15 @@ class StatisticsTest(unittest.TestCase):
         real["ghost_fading_std_db"] = np.full(12, 2.0)
         synthetic["ghost_fading_std_db"] = np.full(12, 4.0)
         base = {
-            "ghost_rate_scale": 0.5, "road_user_snr_offset_db": -10.0, "ghost_snr_offset_db": 1.0,
+            "ghost_rate_scale": 0.5, "static_snr_offset_db": 10.0, "ghost_snr_offset_db": 1.0,
             "amplitude_gain_db": 5.0, "static_points_per_cluster_mean": 1.5,
             "point_footprint_scale": 0.6, "micro_doppler_scale": 0.5, "multipath_fading_std_db": 2.0,
         }
         overrides, notes = derive_overrides(real, "rgd_regime_v1", synthetic, base)
         self.assertAlmostEqual(overrides["ghost_rate_scale"], 0.5 / 3.0, places=3)
-        self.assertAlmostEqual(overrides["road_user_snr_offset_db"], -30.0, delta=0.05)
+        # Synthetic road users 20 dB too bright -> statics up by 20 dB.
+        self.assertAlmostEqual(overrides["static_snr_offset_db"], 30.0, delta=0.05)
+        self.assertNotIn("road_user_snr_offset_db", overrides)
         # real gap - synthetic gap = (g - r) - ((g+16) - (r+20)) = +4 dB
         self.assertAlmostEqual(overrides["ghost_snr_offset_db"], 5.0, delta=0.05)
         self.assertAlmostEqual(overrides["amplitude_gain_db"], 105.0, delta=0.05)
@@ -159,7 +161,7 @@ class StatisticsTest(unittest.TestCase):
         self.assertAlmostEqual(overrides["micro_doppler_scale"], 0.25, places=3)
         self.assertAlmostEqual(overrides["multipath_fading_std_db"], 1.0, places=3)
         for key in (
-            "ghost_rate_scale", "road_user_snr_offset_db", "ghost_snr_offset_db", "amplitude_gain_db",
+            "ghost_rate_scale", "static_snr_offset_db", "ghost_snr_offset_db", "amplitude_gain_db",
             "static_points_per_cluster_mean", "point_footprint_scale", "micro_doppler_scale",
         ):
             self.assertIn(key, notes)
@@ -168,7 +170,7 @@ class StatisticsTest(unittest.TestCase):
         real = merge_statistics([sequence_statistics(_sequence(frames=8, seed=s)) for s in range(3)])
         overrides, _ = derive_overrides(real, "rgd_regime_v1")
         for key in (
-            "ghost_rate_scale", "road_user_snr_offset_db", "ghost_snr_offset_db",
+            "ghost_rate_scale", "road_user_snr_offset_db", "static_snr_offset_db", "ghost_snr_offset_db",
             "amplitude_gain_db", "static_points_per_cluster_mean", "expand_static_points",
         ):
             self.assertNotIn(key, overrides)

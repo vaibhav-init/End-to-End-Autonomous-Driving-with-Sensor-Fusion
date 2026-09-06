@@ -1061,6 +1061,9 @@ class RealisticFrontRadar(CShenronFrontRadar):
             path_curvature_per_m = self._update_path_curvature(ego_velocity)
             timestamp = getattr(measurement, "timestamp", None)
             road_user_offset = float(self.realistic_config.road_user_snr_offset_db)
+            static_offset = float(
+                getattr(self.realistic_config, "static_snr_offset_db", 0.0)
+            )
             ideal_targets = []
             for target in targets:
                 # Closing speed first: it also latches the sensor-frame
@@ -1075,6 +1078,8 @@ class RealisticFrontRadar(CShenronFrontRadar):
                 snr_db = target.snr_db
                 if target.semantic_tag in _DYNAMIC_ACTOR_TAGS:
                     snr_db += road_user_offset
+                else:
+                    snr_db += static_offset
                 ideal_targets.append(
                     IdealRadarTarget(
                         object_id=target.object_id,

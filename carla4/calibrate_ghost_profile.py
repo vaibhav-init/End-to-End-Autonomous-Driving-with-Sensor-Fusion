@@ -107,11 +107,14 @@ def derive_overrides(stats, base_profile, synthetic_stats=None, base_overrides=N
         syn_real_rel = synthetic_stats["real_rel_amp_db"]
         syn_ghost_rel = synthetic_stats["ghost_rel_amp_db"]
         if real_rel_amp.size >= 100 and syn_real_rel.size >= 100:
-            previous = float(base_overrides.get("road_user_snr_offset_db", 0.0))
+            # Road users sit above the frame median in the synthetic scans;
+            # close the gap by raising the static background, which leaves
+            # the road-user link budget (car detection range) untouched.
+            previous = float(base_overrides.get("static_snr_offset_db", 0.0))
             residual = float(np.median(real_rel_amp)) - float(np.median(syn_real_rel))
-            overrides["road_user_snr_offset_db"] = float(np.clip(round(previous + residual, 2), -80.0, 40.0))
-            notes["road_user_snr_offset_db"] = (
-                f"previous {previous:+.2f} dB + (real labelled-real amplitude rel. frame median "
+            overrides["static_snr_offset_db"] = float(np.clip(round(previous - residual, 2), -40.0, 80.0))
+            notes["static_snr_offset_db"] = (
+                f"previous {previous:+.2f} dB - (real labelled-real amplitude rel. frame median "
                 f"{np.median(real_rel_amp):+.2f} dB - synthetic {np.median(syn_real_rel):+.2f} dB)"
             )
         if ghost_rel_amp.size >= 100 and syn_ghost_rel.size >= 100 and real_rel_amp.size and syn_real_rel.size:
@@ -307,7 +310,7 @@ def main():
     overrides, notes = derive_overrides(stats, args.base_profile, synthetic_stats, base_overrides)
     # Carry forward relative knobs that this round could not refit.
     for key in (
-        "ghost_rate_scale", "road_user_snr_offset_db", "ghost_snr_offset_db",
+        "ghost_rate_scale", "road_user_snr_offset_db", "static_snr_offset_db", "ghost_snr_offset_db",
         "amplitude_gain_db", "static_points_per_cluster_mean", "expand_static_points",
     ):
         if key in base_overrides and key not in overrides:

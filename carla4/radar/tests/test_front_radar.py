@@ -187,6 +187,44 @@ class FrontRadarTest(unittest.TestCase):
         self.assertAlmostEqual(radar.get()["distance"], 25.0, delta=1.0)
         self.assertIsNone(radar.diagnostics()["last_error"])
 
+    def test_static_snr_offset_leaves_road_users_alone(self):
+        ego = FakeActor(1, FakeVector(), FakeVector(10.0, 0.0, 0.0))
+        lead = FakeActor(77, FakeVector(25.0, 0.0, 0.0), FakeVector(5.0, 0.0, 0.0))
+        fake_carla = SimpleNamespace(
+            Location=lambda **kwargs: SimpleNamespace(**kwargs),
+            Transform=lambda *args, **kwargs: SimpleNamespace(args=args, kwargs=kwargs),
+        )
+        returns = np.zeros(6, dtype=SEMANTIC_LIDAR_DTYPE)
+        returns[0] = (25.0, -0.2, 0.0, 1.0, 77, 14)
+        returns[1] = (25.0, 0.0, 0.1, 1.0, 77, 14)
+        returns[2] = (25.0, 0.2, -0.1, 1.0, 77, 14)
+        # A guardrail (tag 28) at 40 m, off the ego path.
+        returns[3] = (40.0, 6.0, 0.0, 1.0, 0, 28)
+        returns[4] = (40.0, 6.2, 0.1, 1.0, 0, 28)
+        returns[5] = (40.0, 6.4, -0.1, 1.0, 0, 28)
+        measurement = SimpleNamespace(raw_data=returns.tobytes(), frame=5, timestamp=1.0)
+        snr = {}
+        for offset in (0.0, 30.0):
+            config = load_realistic_radar_config(
+                "ideal_target_list_v1",
+                overrides={"static_snr_offset_db": offset, "emit_extended_points": False},
+            )
+            with patch("radar.front_radar._carla_module", return_value=fake_carla):
+                radar = RealisticFrontRadar(
+                    ego, FakeWorld((ego, lead)), range_m=100.0, fps=20,
+                    config=config, capture_debug=True,
+                )
+            radar.update_ego_speed(10.0)
+            radar._on_semantic_lidar(measurement)
+            ideal = radar.debug_snapshot()["ideal_targets"]
+            snr[offset] = {}
+            for target in ideal:
+                tag = int(target["semantic_tag"])
+                snr[offset][tag] = max(snr[offset].get(tag, -1.0e9), float(target["snr_db"]))
+            radar.cleanup()
+        self.assertAlmostEqual(snr[30.0][28] - snr[0.0][28], 30.0, places=6)
+        self.assertAlmostEqual(snr[30.0][14] - snr[0.0][14], 0.0, places=6)
+
     def test_road_user_snr_offset_reaches_the_target_list(self):
         ego = FakeActor(1, FakeVector(), FakeVector(10.0, 0.0, 0.0))
         lead = FakeActor(77, FakeVector(25.0, 0.0, 0.0), FakeVector(5.0, 0.0, 0.0))

@@ -170,6 +170,14 @@ class RealisticRadarConfig:
     # median. Applied to every dynamic road-user ideal target before the
     # multipath solver, so ghosts inherit it. Fitted by calibration.
     road_user_snr_offset_db: float = 0.0
+    # Infrastructure amplitude (walls, guardrails, fences: every non-road-user
+    # ideal target). The C-Shenron surface model puts static cells ~40 dB
+    # below a pedestrian at the same range, while measured scans have road
+    # users at the frame median. Raising the statics, rather than lowering
+    # road users, keeps the road-user link budget (a car at 100 m is ~29 dB
+    # raw and would vanish under a -40 dB road-user offset). Fitted by
+    # calibration.
+    static_snr_offset_db: float = 0.0
 
     # Absolute scale of the exported linear amplitude, in dB on the 20*log10
     # scale: exporters write 10**(snr_db/20) * 10**(amplitude_gain_db/20).
