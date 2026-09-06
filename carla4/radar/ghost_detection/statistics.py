@@ -85,8 +85,15 @@ def wasserstein_1d(a, b, quantiles=256):
     return float(np.mean(np.abs(np.quantile(a, grid) - np.quantile(b, grid))))
 
 
-def sequence_statistics(sequence, amplitude_mode="auto"):
-    """All per-sequence statistics as a dict of 1-D arrays (plus metadata)."""
+def sequence_statistics(sequence, amplitude_mode="auto", parent_mode="auto"):
+    """All per-sequence statistics as a dict of 1-D arrays (plus metadata).
+
+    ``parent_mode`` is ``auto`` (instance link when it exists, same-class
+    centroid otherwise) or ``class`` (always the same-class centroid). The
+    fidelity comparison forces ``class`` on both domains when the real data
+    has no instance links, so ghost-parent and lifetime statistics are
+    computed at the same granularity on each side.
+    """
 
     target = np.asarray(sequence["target"], dtype=np.int64)
     r = np.asarray(sequence["r_sc"], dtype=np.float64)
@@ -125,6 +132,11 @@ def sequence_statistics(sequence, amplitude_mode="auto"):
         "object_range_spread_m": [],
         "object_azimuth_spread_rad": [],
         "object_doppler_std_mps": [],
+        # Points per ghost cluster (one parent, one family, one scan) and
+        # ghost clusters per labelled real object per scan: the two numbers
+        # that set how many ghost points a scan carries.
+        "ghost_cluster_points": [],
+        "ghost_clusters_per_object": [],
     }
     for name in FAMILY_NAMES:
         stats[f"{name}_delta_range_m"] = []
@@ -150,8 +162,10 @@ def sequence_statistics(sequence, amplitude_mode="auto"):
         stats["ghost_rel_amp_db"].extend((amp_db[f_ghost] - frame_median).tolist())
 
         # Real objects: per instance when available, otherwise per class.
+        real_object_count = 0
         if len(f_real):
             object_key = instance[f_real] if instance is not None else class_id[f_real]
+            real_object_count = int(np.unique(object_key).size)
             for key in np.unique(object_key):
                 members = f_real[object_key == key]
                 if len(members) < 2:
@@ -165,10 +179,11 @@ def sequence_statistics(sequence, amplitude_mode="auto"):
                 stats["object_doppler_std_mps"].append(float(np.std(vr[members])))
 
         # Ghost-to-parent relations.
+        frame_ghost_groups = {}
         for g in f_ghost:
             parent = None
             parent_key = None
-            if instance is not None:
+            if instance is not None and parent_mode != "class":
                 same = f_real[instance[f_real] == instance[g]]
                 if len(same):
                     parent = same
@@ -196,6 +211,10 @@ def sequence_statistics(sequence, amplitude_mode="auto"):
             run_key = (int(sensor[g]), parent_key, name)
             per_frame = ghost_runs.setdefault(run_key, {})
             per_frame.setdefault(int(frame[g]), []).append(float(amp_db[g]))
+            frame_ghost_groups[(parent_key, name)] = frame_ghost_groups.get((parent_key, name), 0) + 1
+        stats["ghost_cluster_points"].extend(frame_ghost_groups.values())
+        if real_object_count:
+            stats["ghost_clusters_per_object"].append(len(frame_ghost_groups) / real_object_count)
 
     # Ghost persistence: runs of consecutive frames per (parent, family).
     lifetimes, fading_std, lag1 = [], [], []
@@ -222,6 +241,7 @@ def sequence_statistics(sequence, amplitude_mode="auto"):
     result["object_class"] = np.asarray(stats["object_class"], dtype=np.int64)
     result["_meta"] = {
         "amplitude_unit": amp_unit,
+        "parent_mode": parent_mode,
         "instance_pairs": instance_pairs,
         "class_pairs": class_pairs,
         "frames": int(len(starts)),
@@ -241,7 +261,10 @@ def merge_statistics(parts):
     keys = [key for key in parts[0] if key != "_meta"]
     for key in keys:
         merged[key] = np.concatenate([np.asarray(part[key]) for part in parts if key in part])
-    meta = {"amplitude_unit": parts[0]["_meta"]["amplitude_unit"]}
+    meta = {
+        "amplitude_unit": parts[0]["_meta"]["amplitude_unit"],
+        "parent_mode": parts[0]["_meta"].get("parent_mode", "auto"),
+    }
     for counter in ("instance_pairs", "class_pairs", "frames", "points", "real_points", "ghost_points"):
         meta[counter] = int(sum(part["_meta"][counter] for part in parts))
     merged["_meta"] = meta

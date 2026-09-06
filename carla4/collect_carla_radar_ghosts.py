@@ -135,6 +135,28 @@ def parse_args():
         help="mean expanded sub-points per detection when --expand-points",
     )
     parser.add_argument(
+        "--label-scope",
+        choices=("main", "all"),
+        default="main",
+        help=(
+            "main (default): only the controlled target and its ghosts carry "
+            "CMTO labels, every other actor is background, as the Radar Ghost "
+            "Dataset annotates one main object; all: label every road user"
+        ),
+    )
+    parser.add_argument(
+        "--target-range-min",
+        type=float,
+        default=4.0,
+        help="closest accepted controlled-target range in metres (RGD median is ~7 m)",
+    )
+    parser.add_argument(
+        "--target-range-max",
+        type=float,
+        default=16.0,
+        help="farthest accepted controlled-target range in metres",
+    )
+    parser.add_argument(
         "--points-source",
         choices=("sensor", "expand"),
         default="sensor",
@@ -190,13 +212,28 @@ def _expand_detection_points(detection, rng, mean_points):
     )
 
 
-def _cmto_label(detection):
+def _cmto_label(detection, main_object_ids=None):
+    """CMTO code for one detection.
+
+    With ``main_object_ids`` set, only the main object's direct returns and
+    the ghosts it casts are labelled; other road users become background
+    (label 0), which is how the Radar Ghost Dataset annotates a scene.
+    """
+
     source = detection.get("source", "")
     if source == "clutter":
         return -2
     semantic_tag = int(detection.get("semantic_tag", 0))
     if semantic_tag not in (12, 13, 14, 15, 16, 17, 18, 19, 21):
         return 0
+    if main_object_ids:
+        owner = (
+            int(detection.get("truth_parent_object_id") or 0)
+            if source == "ghost"
+            else int(detection.get("truth_object_id") or 0)
+        )
+        if owner not in main_object_ids:
+            return 0
     class_id = _class_id(semantic_tag)
     if source == "direct":
         return class_id * 1000 + 11
@@ -209,7 +246,8 @@ def _cmto_label(detection):
     return class_id * 1000 + bounce_type * 10 + encoded_order
 
 
-def _detection_row(sequence_id, frame, timestamp, index, detection):
+def _detection_row(sequence_id, frame, timestamp, index, detection,
+                   main_object_ids=None):
     distance = float(detection["distance_m"])
     # Convert CARLA x-forward/y-right to the real dataset's y-left convention.
     azimuth = -float(detection["azimuth_rad"])
@@ -237,7 +275,7 @@ def _detection_row(sequence_id, frame, timestamp, index, detection):
         -float(detection["relative_velocity_mps"]),
         float(snr_db_to_amplitude(detection["snr_db"])),
         identifier,
-        _cmto_label(detection),
+        _cmto_label(detection, main_object_ids),
         parent_id,
         str(detection.get("source", "")).encode("ascii", errors="replace"),
         parent_id,
@@ -565,8 +603,17 @@ def _controlled_target_candidates(
     actor_id,
     config,
     semantic_tag=14,
+    range_min_m=0.0,
+    range_max_m=None,
 ):
-    """Yield target positions whose path is accepted by the production solver."""
+    """Yield target positions whose path is accepted by the production solver.
+
+    ``range_min_m``/``range_max_m`` restrict the target's range from the
+    sensor. The Radar Ghost Dataset's main object walks a few metres from a
+    parked car (median 7 m), so the default band in the CLI keeps the
+    synthetic scene in the same regime instead of wherever a guardrail
+    happens to sit.
+    """
 
     point = np.asarray(reflector.point_xy_m, dtype=np.float64)
     tangent = np.asarray(reflector.tangent_xy, dtype=np.float64)
@@ -576,7 +623,12 @@ def _controlled_target_candidates(
     if abs(line_normal_coordinate) < 1.0e-6:
         return
 
-    surface_distances = (4.0, 6.0, 8.0, 11.0, 14.0)
+    # Close surfaces first: real ghost-to-parent range offsets are ~1.3 m for
+    # second-order paths, which needs the target within a few metres of the
+    # reflector, not the 4-14 m the original smoke test used.
+    surface_distances = (1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 11.0, 14.0)
+    if range_max_m is None:
+        range_max_m = 0.78 * float(config.max_range_m)
     reflection_offsets = (
         0.0,
         -0.12 * float(reflector.length_m),
@@ -604,7 +656,8 @@ def _controlled_target_candidates(
             )
             if (
                 target_xy[0] <= 3.0
-                or target_range > 0.78 * float(config.max_range_m)
+                or target_range < float(range_min_m)
+                or target_range > min(float(range_max_m), 0.78 * float(config.max_range_m))
                 or abs(target_azimuth) > 0.82 * half_fov
             ):
                 continue
@@ -695,6 +748,8 @@ def _configure_controlled_target(
     semantic_tag=14,
     target_speed_mps=3.0,
     target_type="vehicle",
+    range_min_m=0.0,
+    range_max_m=None,
 ):
     """Put a CARLA actor into geometry known to produce physical paths."""
 
@@ -709,8 +764,25 @@ def _configure_controlled_target(
                 target_actor.id,
                 radar.realistic_config,
                 semantic_tag,
+                range_min_m=range_min_m,
+                range_max_m=range_max_m,
             )
         )
+    if not candidates and (range_min_m > 0.0 or range_max_m is not None):
+        print(
+            f"  no placement inside the {range_min_m:.0f}-"
+            f"{'any' if range_max_m is None else f'{range_max_m:.0f}'} m range "
+            "band; falling back to any range (the scene will not match RGD geometry)"
+        )
+        for reflector in reflectors:
+            candidates.extend(
+                _controlled_target_candidates(
+                    reflector,
+                    target_actor.id,
+                    radar.realistic_config,
+                    semantic_tag,
+                )
+            )
     if not candidates:
         observed_tags = sorted(
             {int(reflector.semantic_tag) for reflector in reflectors}
@@ -1011,6 +1083,11 @@ def collect_sequence(client, args, sequence_index):
             semantic_tag,
             target_speed_mps,
             args.target_type,
+            range_min_m=args.target_range_min,
+            range_max_m=args.target_range_max,
+        )
+        main_object_ids = (
+            {int(controlled_target.id)} if args.label_scope == "main" else None
         )
         _update_spectator_camera(
             spectator,
@@ -1124,6 +1201,7 @@ def collect_sequence(client, args, sequence_index):
                             timestamp,
                             point_index,
                             point,
+                            main_object_ids=main_object_ids,
                         )
                     )
             else:
@@ -1144,6 +1222,7 @@ def collect_sequence(client, args, sequence_index):
                                 timestamp,
                                 (detection_index << 8) + point_index,
                                 point,
+                                main_object_ids=main_object_ids,
                             )
                         )
             diagnostics_summary = {
@@ -1317,6 +1396,17 @@ def _verification_block(counts):
         f"real: {counts.get('real', 0)}  "
         f"ghost: {counts.get('ghost', 0)}  "
         f"classes: {counts.get('label_class_histogram', {})}"
+    )
+    frames = max(int(counts.get("capture_frames", 0) or 0), 1)
+    lines.append(
+        f"per scan: {counts.get('points', 0) / frames:.0f} points, "
+        f"{counts.get('real', 0) / frames:.1f} labelled real, "
+        f"{counts.get('ghost', 0) / frames:.1f} labelled ghost   "
+        "(RGD train per sensor-scan: 336 points, 6.9 real, 1.8 ghost)"
+    )
+    lines.append(
+        f"target range: {float(counts.get('controlled_target_range_m', float('nan'))):.1f} m "
+        "(RGD main object median ~7 m)"
     )
     lines.append(
         f"direct target: "

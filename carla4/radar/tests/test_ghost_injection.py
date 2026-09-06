@@ -208,6 +208,37 @@ class ExtendedPointsTest(unittest.TestCase):
         self.assertTrue(all(p.truth_object_id == 10 for p in points))
         self.assertTrue(all(p.source == "direct" for p in points))
 
+    def test_static_clusters_stay_single_and_ghost_points_scale(self):
+        config = replace(
+            load_realistic_radar_config("geometry_multipath_v1"),
+            points_per_object_mean=20.0,
+            ghost_points_scale=0.1,
+            ghost_snr_offset_db=30.0,
+            min_detection_probability=1.0,
+            max_detection_probability=1.0,
+            dropout_enter_probability=0.0,
+            interference_enter_probability=0.0,
+            false_alarms_per_scan=0.0,
+            latency_scans=0,
+        )
+        model = RealisticRadarModel(config, seed=12)
+        wall = replace(direct_target(object_id=-500, distance_m=12.0), semantic_tag=4)
+        direct_points = ghost_points = wall_points = 0
+        for scan in range(40):
+            model.step(
+                [direct_target(), wall],
+                timestamp_s=scan * 0.05,
+                multipath_targets=[ghost_target()],
+            )
+            _, points = model.latest_points()
+            direct_points += sum(p.source == "direct" and p.semantic_tag == 14 for p in points)
+            ghost_points += sum(p.source == "ghost" for p in points)
+            wall_points += sum(p.semantic_tag == 4 and p.source == "direct" for p in points)
+        self.assertEqual(wall_points, 40)
+        self.assertGreater(direct_points, 40 * 10)
+        self.assertGreater(ghost_points, 0)
+        self.assertLess(ghost_points, direct_points / 4)
+
     def test_emission_can_be_switched_off(self):
         config = replace(
             load_realistic_radar_config("ideal_target_list_v1"),

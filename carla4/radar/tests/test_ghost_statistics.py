@@ -76,6 +76,8 @@ class StatisticsTest(unittest.TestCase):
         self.assertEqual(int(np.median(stats["object_points"])), 4)
         self.assertEqual(stats["ghost_lifetime_frames"].tolist(), [6.0])
         self.assertEqual(int(np.median(stats["points_per_frame"])), 7)
+        self.assertEqual(stats["ghost_cluster_points"].tolist(), [2.0] * 6)
+        self.assertEqual(stats["ghost_clusters_per_object"].tolist(), [1.0] * 6)
 
     def test_class_centroid_fallback_without_instance_ids(self):
         stats = sequence_statistics(_sequence(instance=False))
@@ -106,8 +108,20 @@ class StatisticsTest(unittest.TestCase):
         self.assertIn("multipath_second_order_loss_db", notes)
         # Pedestrian Doppler std 0.9 against an implied ~0.44 -> scale ~2.
         self.assertGreater(overrides["micro_doppler_scale"], 1.5)
+        # Two ghost points per cluster against six per real object.
+        self.assertAlmostEqual(overrides["ghost_points_scale"], 2.0 / 6.0, places=2)
+        self.assertNotIn("ghost_rate_scale", overrides)
         for key, value in overrides.items():
             self.assertTrue(isinstance(value, (int, float)), key)
+
+    def test_ghost_rate_scale_needs_a_synthetic_reference(self):
+        real = merge_statistics([sequence_statistics(_sequence(frames=8, seed=s)) for s in range(3)])
+        # Synthetic reference with three ghost clusters per object: real has one.
+        synthetic = sequence_statistics(_sequence(frames=8, seed=9))
+        synthetic["ghost_clusters_per_object"] = np.full(24, 3.0)
+        overrides, notes = derive_overrides(real, "rgd_regime_v1", synthetic)
+        self.assertAlmostEqual(overrides["ghost_rate_scale"], 1.0 / 3.0, places=3)
+        self.assertIn("ghost_rate_scale", notes)
 
 
 if __name__ == "__main__":

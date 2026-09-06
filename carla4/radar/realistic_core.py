@@ -140,13 +140,21 @@ class RealisticRadarConfig:
     # detection, which is what sets how often ghosts are seen and confirmed.
     ghost_rate_scale: float = 1.0
     ghost_snr_offset_db: float = 0.0
+    # A ghost cluster carries this fraction of a real cluster's points. The
+    # Radar Ghost Dataset shows ghost clusters much sparser than their
+    # parents; fitted by calibrate_ghost_profile.py.
+    ghost_points_scale: float = 1.0
 
     # Extended-target point emission. The tracker still consumes one cluster
     # per object; the point-level list that a point-set controller consumes
     # spreads each cluster over the object's footprint with per-point SNR
     # fluctuation and class-dependent micro-Doppler, the way CFAR output
     # looks. ``points_per_object_mean`` is a prior until fitted from real data.
+    # Static surfaces (walls, rails) are already split into range/angle cells
+    # by the front end, so they stay one point per cell unless
+    # ``expand_static_points`` is set.
     emit_extended_points: bool = True
+    expand_static_points: bool = False
     points_per_object_mean: float = 8.0
     point_footprint_scale: float = 1.0
     micro_doppler_scale: float = 1.0
@@ -376,6 +384,7 @@ def _validate_config(config):
             "multipath_mode",
             "multipath_enable_third_order",
             "emit_extended_points",
+            "expand_static_points",
         )
     )
     for name in numeric_fields:
@@ -439,6 +448,7 @@ def _validate_config(config):
         "multipath_max_ghosts_per_target",
         "point_footprint_scale",
         "micro_doppler_scale",
+        "ghost_points_scale",
     )
     for name in non_negative:
         if getattr(config, name) < 0:
@@ -504,6 +514,8 @@ def _validate_config(config):
         raise ValueError("multipath_enable_third_order must be a boolean")
     if not isinstance(config.emit_extended_points, bool):
         raise ValueError("emit_extended_points must be a boolean")
+    if not isinstance(config.expand_static_points, bool):
+        raise ValueError("expand_static_points must be a boolean")
     if config.multipath_reflector_min_points < 2:
         raise ValueError("multipath_reflector_min_points must be at least 2")
     if (
@@ -1509,15 +1521,22 @@ class RealisticRadarModel:
             return list(detections)
         points = []
         for detection in detections:
-            if detection.source == "clutter":
+            is_ghost = detection.source == "ghost"
+            static = detection.semantic_tag not in self._DYNAMIC_TAGS
+            if detection.source == "clutter" or (
+                static and not is_ghost and not self.config.expand_static_points
+            ):
                 points.append(detection)
                 continue
-            rng = self._ghost_rng if detection.source == "ghost" else self._rng
+            rng = self._ghost_rng if is_ghost else self._rng
+            mean_points = self.config.points_per_object_mean
+            if is_ghost:
+                mean_points *= self.config.ghost_points_scale
             points.extend(
                 expand_detection(
                     detection,
                     rng,
-                    mean_points=self.config.points_per_object_mean,
+                    mean_points=mean_points,
                     range_resolution_m=self.config.range_resolution_m,
                     doppler_resolution_mps=self.config.doppler_resolution_mps,
                     azimuth_resolution_rad=self._azimuth_resolution_rad,

@@ -59,7 +59,7 @@ from radar.realistic_core import load_realistic_radar_config
 ASSUMED_REFLECTION_LOSS_DB = 2.0
 
 
-def load_split(prepared_dir, split, amplitude_mode):
+def load_split(prepared_dir, split, amplitude_mode, parent_mode="auto"):
     root = Path(prepared_dir)
     with (root / "manifest.json").open("r", encoding="utf-8") as handle:
         manifest = json.load(handle)
@@ -70,7 +70,7 @@ def load_split(prepared_dir, split, amplitude_mode):
     for record in records:
         with np.load(root / record["path"], allow_pickle=False) as archive:
             sequence = {name: np.copy(archive[name]) for name in archive.files}
-        parts.append(sequence_statistics(sequence, amplitude_mode))
+        parts.append(sequence_statistics(sequence, amplitude_mode, parent_mode))
     return merge_statistics(parts), len(records), manifest
 
 
@@ -80,12 +80,39 @@ def _implied_micro_doppler_std(class_id):
     return math.sqrt(0.5 * amplitude * amplitude + MICRO_DOPPLER_NOISE_MPS ** 2)
 
 
-def derive_overrides(stats, base_profile):
-    """Map measured statistics onto profile parameters, with derivations."""
+def derive_overrides(stats, base_profile, synthetic_stats=None):
+    """Map measured statistics onto profile parameters, with derivations.
+
+    ``synthetic_stats`` is an optional synthetic collection made with
+    ``ghost_rate_scale`` 1. Ghost clusters per real object per scan in the
+    two domains then give the rate scale directly; without it the target
+    value is only reported.
+    """
 
     base = load_realistic_radar_config(base_profile)
     overrides = {}
     notes = {}
+
+    cluster_points = stats["ghost_cluster_points"]
+    object_points = stats["object_points"]
+    if cluster_points.size >= 20 and object_points.size >= 20:
+        ratio = float(np.mean(cluster_points)) / max(float(np.mean(object_points)), 1e-6)
+        overrides["ghost_points_scale"] = float(np.clip(round(ratio, 3), 0.05, 2.0))
+        notes["ghost_points_scale"] = (
+            f"mean points per ghost cluster ({np.mean(cluster_points):.2f}) / mean points "
+            f"per real object ({np.mean(object_points):.2f}) over {cluster_points.size} clusters"
+        )
+
+    real_rate = stats["ghost_clusters_per_object"]
+    if synthetic_stats is not None and real_rate.size >= 20:
+        synthetic_rate = synthetic_stats["ghost_clusters_per_object"]
+        if synthetic_rate.size >= 20 and float(np.mean(synthetic_rate)) > 0.0:
+            scale = float(np.mean(real_rate)) / float(np.mean(synthetic_rate))
+            overrides["ghost_rate_scale"] = float(np.clip(round(scale, 3), 0.01, 1.0))
+            notes["ghost_rate_scale"] = (
+                f"mean ghost clusters per real object per scan: real {np.mean(real_rate):.3f} / "
+                f"synthetic at scale 1 {np.mean(synthetic_rate):.3f}"
+            )
 
     object_points = stats["object_points"]
     if object_points.size:
@@ -182,6 +209,10 @@ def main():
                         help="profile whose priors the overrides replace")
     parser.add_argument("--amplitude", choices=("auto", "linear", "db"), default="auto",
                         help="unit of the stored amp field (default: detect)")
+    parser.add_argument("--synthetic", default=None,
+                        help="prepared synthetic set collected with ghost_rate_scale 1 "
+                             "(the smoke sequence); enables the ghost_rate_scale fit")
+    parser.add_argument("--synthetic-split", default="train")
     args = parser.parse_args()
     if args.split in ("val", "test"):
         parser.error("fit on train only; val/test are for the fidelity check")
@@ -189,7 +220,12 @@ def main():
     stats, sequences, manifest = load_split(args.data, args.split, args.amplitude)
     meta = stats["_meta"]
     summaries = summarize_statistics(stats)
-    overrides, notes = derive_overrides(stats, args.base_profile)
+    synthetic_stats = None
+    if args.synthetic:
+        synthetic_stats, _n, _m = load_split(
+            args.synthetic, args.synthetic_split, args.amplitude, "class"
+        )
+    overrides, notes = derive_overrides(stats, args.base_profile, synthetic_stats)
     overrides["profile_name"] = f"{args.base_profile}_rgd_calibrated"
 
     labeled = meta["real_points"] + meta["ghost_points"]
@@ -257,6 +293,12 @@ def main():
     life = summaries["ghost_lifetime_frames"]
     if life.get("count"):
         print(f"  ghost lifetime   median {life['median']:.0f} scans over {life['count']} runs")
+    rate = summaries["ghost_clusters_per_object"]
+    if rate.get("count"):
+        print(f"  ghost clusters   mean {rate['mean']:.3f} per real object per scan"
+              + (f"  (synthetic at scale 1: {np.mean(synthetic_stats['ghost_clusters_per_object']):.3f})"
+                 if synthetic_stats is not None and synthetic_stats["ghost_clusters_per_object"].size else
+                 "  (pass --synthetic <prepared smoke> to fit ghost_rate_scale)"))
     print()
     print("  derived overrides:")
     for key, value in sorted(overrides.items()):

@@ -82,7 +82,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--real", required=True, help="prepared real RGD directory")
     parser.add_argument("--synthetic", required=True, help="prepared synthetic directory")
-    parser.add_argument("--split", default="test", help="split compared on both sides")
+    parser.add_argument("--split", default="test", help="real split to score against")
+    parser.add_argument("--synthetic-split", default=None,
+                        help="synthetic split (default: same as --split; a set with no "
+                             "test split can be scored with its val split)")
     parser.add_argument("--reference-split", default="train",
                         help="real split that sets the floor (default train)")
     parser.add_argument("--amplitude", choices=("auto", "linear", "db"), default="auto")
@@ -90,8 +93,13 @@ def main():
     args = parser.parse_args()
 
     real_test, n_real, _ = load_split(args.real, args.split, args.amplitude)
-    real_ref, n_ref, _ = load_split(args.real, args.reference_split, args.amplitude)
-    synthetic, n_syn, _ = load_split(args.synthetic, args.split, args.amplitude)
+    # The real data may carry no instance link between ghosts and parents
+    # (RGD does not); then the synthetic side must use the same same-class
+    # parent so ghost-parent offsets and lifetimes are comparable.
+    parent_mode = "auto" if real_test["_meta"]["instance_pairs"] > 0 else "class"
+    real_ref, n_ref, _ = load_split(args.real, args.reference_split, args.amplitude, parent_mode)
+    synthetic_split = args.synthetic_split or args.split
+    synthetic, n_syn, _ = load_split(args.synthetic, synthetic_split, args.amplitude, parent_mode)
     rows = compare(real_test, synthetic, real_ref)
 
     print("=" * 110)
@@ -99,7 +107,8 @@ def main():
     print("=" * 110)
     print(f"  real {args.real} [{args.split}] {n_real} seq, amp unit {real_test['_meta']['amplitude_unit']}, "
           f"parent link instance={real_test['_meta']['instance_pairs']:,} class={real_test['_meta']['class_pairs']:,}")
-    print(f"  synthetic {args.synthetic} [{args.split}] {n_syn} seq, amp unit {synthetic['_meta']['amplitude_unit']}")
+    print(f"  synthetic {args.synthetic} [{synthetic_split}] {n_syn} seq, amp unit {synthetic['_meta']['amplitude_unit']}, "
+          f"parent mode {parent_mode}")
     print(f"  floor: real [{args.reference_split}] {n_ref} seq")
     print()
     print(f"  {'statistic':<44} {'real med':>10} {'synth med':>10} {'W1':>9} {'floor':>9} {'ratio':>7}")
