@@ -52,6 +52,10 @@ RADAR_DTYPE = np.dtype(
 # collector reproduce that regime (or keep the original vehicle smoke test).
 TARGET_TYPES = ("vehicle", "pedestrian", "cyclist")
 TARGET_SEMANTIC_TAGS = {"vehicle": 14, "pedestrian": 12, "cyclist": 18}
+# RGD class of the controlled main object, independent of which CARLA
+# two-wheeler blueprint stood in for the cyclist (motorcycle tag 18 maps to
+# class 5, bicycle/rider tags to class 2; the real recordings call it 2).
+TARGET_RGD_CLASS = {"vehicle": 3, "pedestrian": 1, "cyclist": 2}
 TARGET_SPEEDS_MPS = {"vehicle": 3.0, "pedestrian": 1.4, "cyclist": 4.5}
 # Placements the solver accepts can still be invisible to the semantic LiDAR
 # (a walker parked inside terrain behind a guardrail). Try this many
@@ -278,12 +282,14 @@ def _expand_detection_points(detection, rng, mean_points):
     )
 
 
-def _cmto_label(detection, main_object_ids=None):
+def _cmto_label(detection, main_object_ids=None, main_class=None):
     """CMTO code for one detection.
 
     With ``main_object_ids`` set, only the main object's direct returns and
     the ghosts it casts are labelled; other road users become background
     (label 0), which is how the Radar Ghost Dataset annotates a scene.
+    ``main_class`` fixes the RGD class of that main object regardless of the
+    CARLA blueprint's semantic tag.
     """
 
     source = detection.get("source", "")
@@ -300,7 +306,11 @@ def _cmto_label(detection, main_object_ids=None):
         )
         if owner not in main_object_ids:
             return 0
-    class_id = _class_id(semantic_tag)
+    class_id = (
+        int(main_class)
+        if main_class is not None and main_object_ids
+        else _class_id(semantic_tag)
+    )
     if source == "direct":
         return class_id * 1000 + 11
     bounce_type = {"type1": 1, "type2": 2}.get(
@@ -313,7 +323,7 @@ def _cmto_label(detection, main_object_ids=None):
 
 
 def _detection_row(sequence_id, frame, timestamp, index, detection,
-                   main_object_ids=None, amplitude_gain=1.0):
+                   main_object_ids=None, amplitude_gain=1.0, main_class=None):
     distance = float(detection["distance_m"])
     # Convert CARLA x-forward/y-right to the real dataset's y-left convention.
     azimuth = -float(detection["azimuth_rad"])
@@ -341,7 +351,7 @@ def _detection_row(sequence_id, frame, timestamp, index, detection,
         -float(detection["relative_velocity_mps"]),
         float(snr_db_to_amplitude(detection["snr_db"])) * float(amplitude_gain),
         identifier,
-        _cmto_label(detection, main_object_ids),
+        _cmto_label(detection, main_object_ids, main_class=main_class),
         parent_id,
         str(detection.get("source", "")).encode("ascii", errors="replace"),
         parent_id,
@@ -1229,6 +1239,7 @@ def collect_sequence(client, args, sequence_index):
         amplitude_gain = 10.0 ** (
             float(getattr(radar.realistic_config, "amplitude_gain_db", 0.0)) / 20.0
         )
+        main_class = TARGET_RGD_CLASS.get(args.target_type)
         main_object_ids = (
             {int(controlled_target.id)} if args.label_scope == "main" else None
         )
@@ -1378,6 +1389,7 @@ def collect_sequence(client, args, sequence_index):
                             point,
                             main_object_ids=main_object_ids,
                             amplitude_gain=amplitude_gain,
+                            main_class=main_class,
                         )
                     )
             else:
@@ -1400,6 +1412,7 @@ def collect_sequence(client, args, sequence_index):
                                 point,
                                 main_object_ids=main_object_ids,
                                 amplitude_gain=amplitude_gain,
+                                main_class=main_class,
                             )
                         )
             diagnostics_summary = {
@@ -1585,7 +1598,7 @@ def _verification_block(counts):
     """Render a copyable PASS/FAIL block for RGD-regime verification."""
 
     target_type = counts.get("target_type", "?")
-    expected_class = _class_id(TARGET_SEMANTIC_TAGS.get(target_type, 14))
+    expected_class = TARGET_RGD_CLASS.get(target_type, 3)
     issues = []
     lines = []
 
