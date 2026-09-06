@@ -331,11 +331,18 @@ def waypoint_ahead(carla_map, location, distance_m):
         return None
     traveled = 0.0
     step = 3.0
+    lane_id = waypoint.lane_id
+    road_id = waypoint.road_id
     while traveled < distance_m:
         next_wps = waypoint.next(step)
         if not next_wps:
             return None
-        waypoint = next_wps[0]
+        # At forks and ramps ``next()`` lists every continuation; stay on
+        # the ego's own lane so the obstacle lands in its path rather than
+        # on an exit ramp the ego never takes.
+        same_lane = [wp for wp in next_wps if wp.road_id == road_id and wp.lane_id == lane_id]
+        same_side = [wp for wp in next_wps if (wp.lane_id > 0) == (lane_id > 0) and wp.lane_type == waypoint.lane_type]
+        waypoint = (same_lane or same_side or next_wps)[0]
         traveled += step
     return waypoint
 
@@ -1115,8 +1122,23 @@ def main():
                         emergency_stopped_frames += 1
                     else:
                         emergency_stopped_frames = 0
+                    # The ego may have passed the obstacle (adjacent lane,
+                    # lane change); an obstacle behind the ego or older than
+                    # 25 s is released so the next event can happen.
+                    try:
+                        forward = ego.get_transform().get_forward_vector()
+                        offset = emergency_actor.get_location() - ego.get_location()
+                        obstacle_behind = (forward.x * offset.x + forward.y * offset.y) < -2.0
+                    except RuntimeError:
+                        obstacle_behind = True
+                    obstacle_stale = frame - last_emergency_frame > 25 * FPS
 
-                    if emergency_stopped_frames >= 2 * FPS or (speed < 0.3 and emergency_stopped_frames >= FPS):
+                    if (
+                        emergency_stopped_frames >= 2 * FPS
+                        or (speed < 0.3 and emergency_stopped_frames >= FPS)
+                        or obstacle_behind
+                        or obstacle_stale
+                    ):
                         cleanup_actor(emergency_actor)
                         emergency_actor = None
                         emergency_stopped_frames = 0
