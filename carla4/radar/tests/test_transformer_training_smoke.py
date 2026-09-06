@@ -194,6 +194,27 @@ class TransformerChainSmokeTest(unittest.TestCase):
                 summary = json.load(fh)
             self.assertTrue(summary, "counterfactual report is empty")
 
+    def test_mlp_trainer_and_probe_on_the_same_collection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "dataset_clean")
+            make_collection(data, ghosts=False, seed=1)
+            model_dir = os.path.join(tmp, "model_mlp")
+            train = _run(
+                "train_throttle_brake.py", "--data", data,
+                "--config", os.path.join(data, "dataset_config.json"),
+                "--output", model_dir, "--epochs", "3", "--batch", "64",
+            )
+            self.assertEqual(train.returncode, 0, train.stdout[-3000:] + train.stderr[-3000:])
+            for name in ("target_speed_mlp.pt", "scaler.pkl", "model_config.json"):
+                self.assertTrue(os.path.exists(os.path.join(model_dir, name)), name)
+            with open(os.path.join(model_dir, "model_config.json"), encoding="utf-8") as fh:
+                config = json.load(fh)
+            self.assertEqual(config.get("radar_backend"), "realistic")
+            self.assertEqual(config.get("radar_config_signature"), "smoke")
+            accept = _run("acceptance_test.py", "--model-dir", model_dir)
+            self.assertIn("ACCEPTANCE TEST", accept.stdout, accept.stdout[-2000:] + accept.stderr[-2000:])
+            self.assertNotIn("Traceback", accept.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
