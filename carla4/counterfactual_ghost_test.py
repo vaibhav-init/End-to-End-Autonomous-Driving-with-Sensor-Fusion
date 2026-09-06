@@ -27,6 +27,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
+from driving_contract import future_speed_label
 from train_target_speed_transformer import (
     WindowedDetectionDataset,
     load_collection,
@@ -83,6 +84,9 @@ def main():
         MAX_TARGET_SPEED_KMH,
     )
     rows, sidecars = load_collection(args.data, label_col)
+    horizon = model_config.get("label_horizon_frames")
+    if horizon:
+        rows[label_col] = future_speed_label(rows, int(horizon))
     rows = select_rows(rows, label_col, max_speed_kmh, 3.0, 1.0 - 1e-9, args.seed)
     if args.limit and len(rows) > args.limit:
         rows = rows.sample(n=args.limit, random_state=args.seed).sort_index()

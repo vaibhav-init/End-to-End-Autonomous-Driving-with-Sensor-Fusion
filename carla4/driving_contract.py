@@ -48,3 +48,30 @@ def obstacle_relevant(distance_m, speed_mps, closing_mps, max_range_m=RADAR_RANG
     window = min(float(max_range_m) * 0.95, float(relevance_window_m(speed_mps, closing_mps)))
     return float(distance_m) < window
 
+
+def future_speed_label(df, horizon_frames, speed_col="ego_speed_now", group_col="episode_id"):
+    """Mean ego speed over the next ``horizon_frames`` frames, per episode.
+
+    The collector stores this at a 10-frame (0.5 s) horizon, which makes the
+    label almost equal to the current speed (at most ~2.5 m/s below it under
+    full braking) and trains controllers that only ever nudge the speed. A
+    longer horizon labels the approach to a stopped car with the speed the
+    teacher will actually be at, so the model learns to command the drop.
+    Same arithmetic as collect_throttle_brake_data.compute_segmented_speed_label.
+    """
+    import numpy as np
+    import pandas as pd
+
+    horizon = int(horizon_frames)
+
+    def one(segment):
+        future = [segment[speed_col].shift(-step) for step in range(1, horizon + 1)]
+        return pd.concat(future, axis=1).mean(axis=1)
+
+    if group_col not in df.columns:
+        return one(df)
+    labels = pd.Series(np.nan, index=df.index, dtype=np.float64)
+    for _, indices in df.groupby(group_col, sort=False).groups.items():
+        labels.loc[indices] = one(df.loc[indices])
+    return labels
+

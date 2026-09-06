@@ -84,9 +84,9 @@ stage_train() {
   done
   for d in clean ghost; do
     python3 -u train_throttle_brake.py --data dataset_$d --config dataset_$d/dataset_config.json \
-      --output model_mlp_$d > logs/train_mlp_$d.log 2>&1 || code=1
-    python3 -u train_target_speed_transformer.py --data dataset_$d --output model_tf_$d \
-      > logs/train_tf_$d.log 2>&1 || code=1
+      --label-horizon "${LABEL_HORIZON:-40}" --output model_mlp_$d > logs/train_mlp_$d.log 2>&1 || code=1
+    python3 -u train_target_speed_transformer.py --data dataset_$d --label-horizon "${LABEL_HORIZON:-40}" \
+      --output model_tf_$d > logs/train_tf_$d.log 2>&1 || code=1
   done
   for m in model_mlp_clean model_mlp_ghost model_tf_clean model_tf_ghost; do
     python3 acceptance_test.py --model-dir $m --background-from dataset_ghost > logs/accept_$m.log 2>&1; echo "ACCEPT_${m}_EXIT=$?" >> "$LOG"

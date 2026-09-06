@@ -17,6 +17,7 @@ import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from driving_contract import (
+    future_speed_label,
     MAX_STOPPED_FRACTION,
     MAX_TARGET_SPEED_KMH,
     NATIVE_RADAR_POINTS_PER_SECOND,
@@ -112,6 +113,9 @@ def main():
     parser.add_argument("--config", default=DATASET_CONFIG_PATH)
     parser.add_argument("--output", default=MODEL_DIR, help="Directory to save model artifacts")
     parser.add_argument("--validation-fraction", type=float, default=0.2)
+    parser.add_argument("--label-horizon", type=int, default=None,
+                        help="recompute the label as the mean ego speed over this many future frames "
+                             "(default: the collector's stored 10-frame label)")
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument(
         "--max-speed-kmh",
@@ -180,6 +184,9 @@ def main():
         if dataset_config
         else "teacher_target_speed"
     )
+    if args.label_horizon:
+        df[label_col] = future_speed_label(df, args.label_horizon)
+        print(f"  Relabelled with a {args.label_horizon}-frame future-speed horizon")
 
     if label_col not in df.columns:
         raise RuntimeError(f"Expected label column '{label_col}' in dataset")
@@ -449,6 +456,7 @@ def main():
     model_config = {
         "feature_cols": feature_cols,
         "label_col": label_col,
+        "label_horizon_frames": args.label_horizon,
         "town": dataset_config.get("town") if dataset_config else None,
         "history_frames": dataset_config.get("history_frames") if dataset_config else None,
         "base_feature_cols": dataset_config.get("base_feature_cols") if dataset_config else None,

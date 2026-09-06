@@ -35,6 +35,7 @@ from driving_contract import (
 )
 from radar.detection_log import detections_by_frame, load_detection_log, sidecar_path
 from train_throttle_brake import ensure_episode_ids, episode_aware_split
+from driving_contract import future_speed_label
 from transformer_controller import (
     CHECKPOINT_NAME,
     MODEL_TYPE,
@@ -229,6 +230,8 @@ def main():
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3.0e-4)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
+    parser.add_argument("--label-horizon", type=int, default=None,
+                        help="recompute the label as the mean ego speed over this many future frames")
     parser.add_argument("--brake-weight", type=float, default=4.0,
                         help="extra loss weight for windows whose label is well below the ego speed")
     parser.add_argument("--early-stop-patience", type=int, default=15)
@@ -270,6 +273,9 @@ def main():
     print("TARGET-SPEED TRANSFORMER TRAINER")
     print("=" * 64)
     rows, sidecars = load_collection(args.data, label_col)
+    if args.label_horizon:
+        rows[label_col] = future_speed_label(rows, args.label_horizon)
+        print(f"  Relabelled with a {args.label_horizon}-frame future-speed horizon")
     rows = select_rows(
         rows, label_col, max_speed_kmh, args.speed_tolerance_kmh,
         args.max_stopped_fraction, args.split_seed,
@@ -351,6 +357,7 @@ def main():
         "model_type": MODEL_TYPE,
         "checkpoint": CHECKPOINT_NAME,
         "label_col": label_col,
+        "label_horizon_frames": args.label_horizon,
         "feature_cols": [],
         "base_feature_cols": dataset_config.get("base_feature_cols"),
         "history_frames": args.window_frames,
