@@ -61,7 +61,7 @@ stage_train() {
       > logs/train_tf_$d.log 2>&1 || code=1
   done
   for m in model_mlp_clean model_mlp_ghost model_tf_clean model_tf_ghost; do
-    python3 acceptance_test.py --model-dir $m > logs/accept_$m.log 2>&1; echo "ACCEPT_${m}_EXIT=$?" >> "$LOG"
+    python3 acceptance_test.py --model-dir $m --background-from dataset_ghost > logs/accept_$m.log 2>&1; echo "ACCEPT_${m}_EXIT=$?" >> "$LOG"
   done
   for m in model_tf_clean model_tf_ghost; do
     python3 -u counterfactual_ghost_test.py --model-dir $m --data dataset_ghost \

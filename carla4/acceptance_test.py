@@ -14,6 +14,7 @@ speed must drop below current speed. The other cases are reported for context
 and never fail the run.
 """
 
+import glob
 import argparse
 import json
 import os
@@ -87,35 +88,108 @@ def build_history(ego_speed, gap, obstacle_speed, history_frames, fps):
     return frames
 
 
-def build_scans(ego_speed, gap, obstacle_speed, window_frames, fps):
-    """The transformer's view of the same approach: one detection per scan.
+class ProbeBackground:
+    """Static background scans sampled from a real collection's sidecar.
 
-    A lone direct point at the walked-back gap in each scan, oldest first,
-    so the model sees the same closing geometry the scalar model sees.
+    The transformer's point features are frame-relative (amplitude against the
+    frame median, local density), so a probe made of one lone point per scan
+    is far outside the distribution it trained on. With a collection given,
+    each probe scan reuses the non-road-user points of a random logged scan
+    and the probe car takes the collection's typical road-user SNR.
     """
 
+    _DYNAMIC_TAGS = frozenset((12, 13, 14, 15, 16, 17, 18, 19, 21))
+
+    def __init__(self, dataset_dir, seed=0):
+        from radar.detection_log import detections_by_frame, load_detection_log, sidecar_path
+
+        self.rng = np.random.default_rng(seed)
+        self.scans = []
+        self.car_snr_db = 30.0
+        if not dataset_dir:
+            return
+        for csv in sorted(glob.glob(os.path.join(dataset_dir, "*.csv"))):
+            path = sidecar_path(csv)
+            if not os.path.exists(path):
+                continue
+            log = load_detection_log(path)
+            det = log["detections"]
+            direct = det["source"] == b"direct"
+            dynamic = np.isin(det["semantic_tag"], list(self._DYNAMIC_TAGS))
+            road_users = det[direct & dynamic]
+            if road_users.size:
+                self.car_snr_db = float(np.median(road_users["snr_db"]))
+            by_frame = detections_by_frame(det)
+            frames = sorted(by_frame)
+            for frame in frames[:: max(1, len(frames) // 200)]:
+                records = by_frame[frame]
+                keep = records[
+                    (records["source"] == b"direct")
+                    & ~np.isin(records["semantic_tag"], list(self._DYNAMIC_TAGS))
+                ]
+                if keep.size:
+                    self.scans.append(keep)
+        print(
+            f"  probe background: {len(self.scans)} logged scans from {dataset_dir}, "
+            f"road-user SNR {self.car_snr_db:.1f} dB"
+        )
+
+    def points(self, ego_speed):
+        if not self.scans:
+            return []
+        scan = self.scans[int(self.rng.integers(len(self.scans)))]
+        points = []
+        for rec in scan:
+            points.append(
+                RadarDetection(
+                    distance_m=float(rec["distance_m"]),
+                    azimuth_rad=float(rec["azimuth_rad"]),
+                    # Statics close at the ego speed of the probe, not the
+                    # speed the logged ego happened to have.
+                    relative_velocity_mps=float(ego_speed),
+                    snr_db=float(rec["snr_db"]),
+                    source="direct",
+                    truth_object_id=int(rec["truth_object_id"]),
+                    semantic_tag=int(rec["semantic_tag"]),
+                )
+            )
+        return points
+
+
+def build_scans(ego_speed, gap, obstacle_speed, window_frames, fps, background=None):
+    """The transformer's view of the same approach.
+
+    Oldest first: a ten-point car cluster at the walked-back gap in each scan,
+    on top of a logged static background when one is given, so the model sees
+    the same closing geometry the scalar model sees inside a realistic scan.
+    """
+    from radar.extended_target import expand_detection
+
     frames = build_history(ego_speed, gap, obstacle_speed, window_frames, fps)
+    rng = np.random.default_rng(1)
+    car_snr = background.car_snr_db if background is not None else 30.0
     scans = []
     for lag, frame in zip(range(window_frames - 1, -1, -1), frames):
-        if gap is None:
-            scans.append((lag / fps, ()))
-            continue
-        scans.append(
-            (
-                lag / fps,
-                (
-                    RadarDetection(
-                        distance_m=frame["distance"],
-                        azimuth_rad=0.0,
-                        relative_velocity_mps=frame["relative_velocity"],
-                        snr_db=30.0,
-                        source="direct",
-                        truth_object_id=1,
-                        semantic_tag=14,
-                    ),
-                ),
+        points = list(background.points(ego_speed)) if background is not None else []
+        if gap is not None:
+            car = RadarDetection(
+                distance_m=frame["distance"],
+                azimuth_rad=0.0,
+                relative_velocity_mps=frame["relative_velocity"],
+                snr_db=car_snr,
+                source="direct",
+                truth_object_id=1,
+                semantic_tag=14,
             )
-        )
+            points.extend(
+                expand_detection(
+                    car, rng, mean_points=10.0, range_resolution_m=0.15,
+                    doppler_resolution_mps=0.087, azimuth_resolution_rad=0.0314,
+                    minimum_range_m=1.0, maximum_range_m=RADAR_RANGE_M,
+                    footprint_scale=1.3,
+                )
+            )
+        scans.append((lag / fps, tuple(points)))
     return scans
 
 
@@ -124,6 +198,10 @@ def main():
         description="Probe a trained model's braking response"
     )
     parser.add_argument("--model-dir", default="model_throttle_brake")
+    parser.add_argument(
+        "--background-from", default=None,
+        help="collection directory whose logged static scans back the transformer probe",
+    )
     args = parser.parse_args()
 
     with open(os.path.join(args.model_dir, "model_config.json"), "r", encoding="utf-8") as fh:
@@ -136,8 +214,10 @@ def main():
         window_frames = int(config["window_frames"])
         max_points = int(config["max_points"])
 
+        background = ProbeBackground(args.background_from) if args.background_from else None
+
         def predict(ego_speed, gap, obstacle_speed):
-            scans = build_scans(ego_speed, gap, obstacle_speed, window_frames, fps)
+            scans = build_scans(ego_speed, gap, obstacle_speed, window_frames, fps, background)
             window = build_window_tokens(scans, ego_speed, 0.0, max_points)
             return predict_target_speed(model, window, device="cpu")
     else:
