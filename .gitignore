@@ -5,3 +5,8 @@ __pycache__
 /carla4/model_*/
 /carla4/radar_validation_*/
 /carla4/scenarios/results*/
+
+# Markdown docs stay local and out of the pushed repo. The vendored PCLA tree
+# is third-party and is left exactly as shipped.
+*.md
+!PCLA/**/*.md
