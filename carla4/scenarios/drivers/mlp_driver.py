@@ -25,7 +25,7 @@ import numpy as np
 import torch
 
 from .base import Driver
-from .longitudinal import HybridStateMachineController, PIDSpeedController
+from .longitudinal import obstacle_relevant, HybridStateMachineController, PIDSpeedController
 from .steering import BasicAgentSteering
 
 # carla4/ (two levels up) holds the shared perception + model modules
@@ -309,10 +309,13 @@ class MLPDriver(Driver):
         else:
             target_speed_pred = BOOTSTRAP_TARGET_SPEED_MPS
 
-        # Hybrid override (same as deployment): cruise on open road. Only
-        # fires with nothing detected, so a ghost still reaches the model
-        # unmodified.
-        if self.cruise_floor and obstacle_detected < 0.5:
+        # Hybrid override (same as deployment): cruise on open road, where
+        # "open" means no target inside the stopping-distance relevance
+        # window (driving_contract.obstacle_relevant). A ghost inside the
+        # window still reaches the model unmodified.
+        if self.cruise_floor and not obstacle_relevant(
+            dist_state["distance"], speed, dist_state["relative_velocity"], RADAR_RANGE
+        ):
             target_speed_pred = max(target_speed_pred, CRUISE_SPEED_MPS)
 
         # Launch assist: help the car pull away from a standstill on clear road.

@@ -29,7 +29,7 @@ from radar_provenance import check_radar_provenance, print_provenance_warnings
 from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS
 from speed_model import TargetSpeedMLP, flatten_history
 from weather_utils import WEATHER_MODES, apply_weather
-from driving_contract import (
+from driving_contract import (obstacle_relevant, 
     MAX_TARGET_SPEED_KMH,
     NATIVE_RADAR_POINTS_PER_SECOND,
     RADAR_RANGE_M,
@@ -706,7 +706,9 @@ def main():
             # mixed red-light stops and cruising, so it learns a confused average.
             # This hybrid approach: ML handles obstacles, simple rule handles open
             # road. Red light check prevents trying to drive through a red.
-            if obstacle_detected < 0.5:
+            if not obstacle_relevant(
+                dist_state["distance"], speed, dist_state["relative_velocity"], radar_range
+            ):
                 target_speed_pred = max(target_speed_pred, CRUISE_SPEED_MPS)
             target_speed_pred = min(
                 max(0.0, target_speed_pred),

@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from metrics import longitudinal_cost_metrics  # noqa: E402
+from metrics import peak_deceleration_mps2, longitudinal_cost_metrics  # noqa: E402
 
 # Sim rate used by the scenarios (carla4/scenarios/config.py FPS); used to turn
 # reaction step counts into seconds.
@@ -77,7 +77,7 @@ def per_run_metrics(df):
     min_ttc = float(ttc.min()) if not ttc.empty else np.nan
 
     # Strongest deceleration (most negative acceleration), reported as positive m/s^2
-    peak_decel = float(max(0.0, -df["ego_accel_mps2"].min()))
+    peak_decel = peak_deceleration_mps2(df)
 
     # Reaction latency: explicit critical event -> first hard brake after it.
     reaction_s = np.nan

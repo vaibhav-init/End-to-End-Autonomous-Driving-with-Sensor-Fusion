@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from metrics import longitudinal_cost_metrics  # noqa: E402
+from metrics import peak_deceleration_mps2, longitudinal_cost_metrics  # noqa: E402
 
 FPS = 20
 OBSTACLE_PRESENT_MAX_M = 100.0
@@ -123,7 +123,7 @@ def analyze_single_run(csv_path):
             )
 
     # Peak deceleration (most negative acceleration → reported positive)
-    peak_decel = float(max(0.0, -df["ego_accel_mps2"].min()))
+    peak_decel = peak_deceleration_mps2(df)
 
     # Time to stop: critical event → ego speed < 1 km/h
     time_to_stop_s = float("nan")

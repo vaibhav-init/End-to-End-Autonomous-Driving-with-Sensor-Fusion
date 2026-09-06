@@ -206,7 +206,7 @@ class TransformerDriver(Driver):
         else:
             target_speed = BOOTSTRAP_TARGET_SPEED_MPS
 
-        detected = obstacle_in_corridor(current, self.max_range)
+        detected = obstacle_in_corridor(current, self.max_range, speed)
         if self.cruise_floor and not detected:
             target_speed = max(target_speed, CRUISE_SPEED_MPS)
         if (self._frame < LAUNCH_ASSIST_FRAMES and speed < LAUNCH_HOLD_SPEED_MPS

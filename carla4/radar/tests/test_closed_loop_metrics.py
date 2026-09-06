@@ -19,6 +19,8 @@ from metrics import (  # noqa: E402
     phantom_brake_mask,
     rising_edges,
     stopping_envelope_m,
+    brake_episodes,
+    peak_deceleration_mps2,
 )
 from radar.detection_log import (  # noqa: E402
     DetectionLog,
@@ -129,6 +131,47 @@ class DetectionLogTest(unittest.TestCase):
         self.assertEqual(by_frame[100]["source"].tolist(), [b"direct", b"ghost"])
         self.assertEqual(int(by_frame[100]["truth_parent_object_id"][1]), 7)
 
+
+
+
+class EpisodeAndRelevanceTest(unittest.TestCase):
+    def test_chattering_pulses_merge_into_one_episode(self):
+        # 1-frame brake pulses every other frame for a second: one decision.
+        mask = np.zeros(60, dtype=bool)
+        mask[10:30:2] = True
+        self.assertEqual(len(brake_episodes(mask, fps=20)), 1)
+        # Two bursts a full second apart stay two events; a 2-frame blip alone is dropped.
+        mask = np.zeros(80, dtype=bool)
+        mask[10:16] = True
+        mask[40:46] = True
+        mask[70:72] = True
+        self.assertEqual(len(brake_episodes(mask, fps=20)), 2)
+
+    def test_peak_deceleration_ignores_spawn_spikes(self):
+        df = pd.DataFrame({"ego_accel_mps2": [-27.0, -2.0, -6.5, 0.0]})
+        self.assertAlmostEqual(peak_deceleration_mps2(df), 12.0)
+
+    def test_relevance_window_matches_the_drivers_intent(self):
+        from driving_contract import obstacle_relevant
+
+        # Stopped car 90 m ahead at 55 km/h: relevant (window ~93 m).
+        self.assertTrue(obstacle_relevant(90.0, 55.0 / 3.6, 55.0 / 3.6))
+        # Car pulling away 40 m ahead while the ego is stopped: not relevant.
+        self.assertFalse(obstacle_relevant(40.0, 0.0, -11.5))
+        # Guardrail cell 83 m ahead at 5 m/s: not relevant.
+        self.assertFalse(obstacle_relevant(83.0, 5.0, 5.0))
+        # Nothing beyond the sensor range is ever relevant.
+        self.assertFalse(obstacle_relevant(99.0, 30.0, 30.0, max_range_m=100.0))
+
+    def test_corridor_check_uses_per_point_relevance(self):
+        from types import SimpleNamespace
+        from transformer_controller import obstacle_in_corridor
+
+        far_static = SimpleNamespace(distance_m=83.0, azimuth_rad=0.0, relative_velocity_mps=5.0, snr_db=30.0, source="direct")
+        self.assertTrue(obstacle_in_corridor([far_static], 100.0))
+        self.assertFalse(obstacle_in_corridor([far_static], 100.0, ego_speed_mps=5.0))
+        near = SimpleNamespace(distance_m=20.0, azimuth_rad=0.0, relative_velocity_mps=5.0, snr_db=30.0, source="ghost")
+        self.assertTrue(obstacle_in_corridor([far_static, near], 100.0, ego_speed_mps=5.0))
 
 if __name__ == "__main__":
     unittest.main()

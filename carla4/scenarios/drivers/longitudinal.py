@@ -8,6 +8,11 @@ the only thing that differs is how the target speed was chosen.
 """
 
 import math
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from driving_contract import obstacle_relevant, relevance_window_m  # noqa: E402,F401
 
 
 class PIDSpeedController:

@@ -174,22 +174,28 @@ def build_window_tokens(scans, ego_speed_mps, ego_accel_mps2, max_points):
     return {"tokens": tokens, "mask": mask, "sources": source_codes, "point_count": count}
 
 
-def obstacle_in_corridor(scan, max_range_m):
+def obstacle_in_corridor(scan, max_range_m, ego_speed_mps=None):
     """Whether any point of the current scan sits in the ego corridor.
 
     Drives the cruise floor. Ghost points count as detected, so the floor can
-    never mask a reaction to a ghost, exactly as in the scalar driver.
+    never mask a reaction to a ghost, exactly as in the scalar driver. With
+    ``ego_speed_mps`` given, a point only counts inside the stopping-distance
+    relevance window for its own closing speed (driving_contract), the same
+    rule the scalar driver applies to its selected target.
     """
 
-    r, az, _vr, _snr, _src = _scan_columns(scan)
+    r, az, vr, _snr, _src = _scan_columns(scan)
     if r.size == 0:
         return False
     forward = r * np.cos(az)
     lateral = np.abs(r * np.sin(az))
     half_width = PATH_HALF_WIDTH_M + PATH_WIDTH_GROWTH_PER_M * np.maximum(forward, 0.0)
-    return bool(
-        np.any((forward > 1.0) & (r < max_range_m * 0.95) & (lateral <= half_width))
-    )
+    limit = np.full(r.shape, float(max_range_m) * 0.95)
+    if ego_speed_mps is not None:
+        from driving_contract import relevance_window_m
+
+        limit = np.minimum(limit, relevance_window_m(float(ego_speed_mps), vr))
+    return bool(np.any((forward > 1.0) & (r < limit) & (lateral <= half_width)))
 
 
 def default_model_kwargs():

@@ -12,7 +12,7 @@ export CARLA_ROOT="${CARLA_ROOT:-/storage/CARLA_0.9.16}"
 OV="${OV:-artifacts/rgd_calibration_v7s/calibrated_overrides.json}"
 RADAR="--radar-backend realistic --radar-profile rgd_regime_v1 --radar-config $OV"
 SEED="${SEED:-42}"
-COLLECT_S="${COLLECT_S:-900}"
+COLLECT_S="${COLLECT_S:-1800}"
 LOG=logs/closed_loop_pipeline.log
 mkdir -p logs
 
@@ -54,6 +54,9 @@ stage_collect() {
 
 stage_train() {
   local code=0
+  for m in model_mlp_clean model_mlp_ghost model_tf_clean model_tf_ghost; do
+    [ -d "$m" ] && mv "$m" "${m}_prev_$(date +%H%M)"
+  done
   for d in clean ghost; do
     python3 -u train_throttle_brake.py --data dataset_$d --config dataset_$d/dataset_config.json \
       --output model_mlp_$d > logs/train_mlp_$d.log 2>&1 || code=1

@@ -18,30 +18,34 @@ Definitions are deliberately simple and stated once, here, so every driver
 and every arm is scored the same way.
 """
 
+import os
+import sys
+
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from driving_contract import (  # noqa: E402
+    COMFORT_DECEL_MPS2,
+    HARD_MARGIN_M,
+    REACTION_TIME_S,
+    stopping_envelope_m,
+)
 
 
 FPS = 20
 BRAKE_THRESHOLD = 0.3            # brake command counted as braking
 OBSTACLE_PRESENT_MAX_M = 100.0   # GT distance below this => an actor is logged
-COMFORT_DECEL_MPS2 = 3.0         # deceleration a legitimate brake may assume
-REACTION_TIME_S = 1.0            # allowance added to the envelope
-HARD_MARGIN_M = 8.0              # braking inside this gap is always legitimate
 MOVING_SPEED_MPS = 0.5           # jerk is measured only while moving
 ACCEL_SMOOTH_FRAMES = 5
-
-
-def stopping_envelope_m(speed_mps, closing_mps):
-    """Distance inside which braking for a closing in-path actor is justified."""
-
-    speed = np.maximum(np.asarray(speed_mps, dtype=np.float64), 0.0)
-    closing = np.maximum(np.asarray(closing_mps, dtype=np.float64), 0.0)
-    return (
-        speed * REACTION_TIME_S
-        + closing * closing / (2.0 * COMFORT_DECEL_MPS2)
-        + HARD_MARGIN_M
-    )
+# CARLA vehicles cannot exceed this; larger logged values are spawn/teleport
+# artefacts and collision spikes, not controller output.
+ACCEL_CLIP_MPS2 = 12.0
+# A brake episode: pulses closer than EPISODE_MERGE_S apart are one event
+# (a PID chattering around zero is one decision, not fifty), and episodes
+# shorter than EPISODE_MIN_S are ignored.
+EPISODE_MERGE_S = 0.5
+EPISODE_MIN_S = 0.15
 
 
 def _column(df, name, default):
@@ -74,6 +78,30 @@ def phantom_brake_mask(df, threshold=BRAKE_THRESHOLD):
     return (brake > threshold) & ~legitimate_brake_mask(df)
 
 
+def brake_episodes(mask, fps=FPS, merge_s=EPISODE_MERGE_S, min_s=EPISODE_MIN_S):
+    """(start, end) frame pairs of merged braking episodes."""
+
+    mask = np.asarray(mask, dtype=bool)
+    if mask.size == 0:
+        return []
+    starts = np.flatnonzero(mask & ~np.concatenate(([False], mask[:-1])))
+    ends = np.flatnonzero(mask & ~np.concatenate((mask[1:], [False]))) + 1
+    merged = []
+    gap = int(round(merge_s * fps))
+    for start, end in zip(starts, ends):
+        if merged and start - merged[-1][1] <= gap:
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+    minimum = max(1, int(round(min_s * fps)))
+    return [(a, b) for a, b in merged if b - a >= minimum]
+
+
+def peak_deceleration_mps2(df):
+    accel = np.clip(_column(df, "ego_accel_mps2", 0.0), -ACCEL_CLIP_MPS2, ACCEL_CLIP_MPS2)
+    return float(max(0.0, -accel.min())) if accel.size else 0.0
+
+
 def rising_edges(mask):
     """Count events: runs of consecutive True frames."""
 
@@ -90,7 +118,7 @@ def distance_travelled_km(df, fps=FPS):
 
 
 def jerk_rms_mps3(df, fps=FPS, smooth_frames=ACCEL_SMOOTH_FRAMES):
-    accel = _column(df, "ego_accel_mps2", 0.0)
+    accel = np.clip(_column(df, "ego_accel_mps2", 0.0), -ACCEL_CLIP_MPS2, ACCEL_CLIP_MPS2)
     speed = _column(df, "gt_ego_speed_kmh", 0.0) / 3.6
     if accel.size < smooth_frames + 2:
         return float("nan")
@@ -114,9 +142,10 @@ def longitudinal_cost_metrics(df, fps=FPS):
     phantom = phantom_brake_mask(df)
     brake = _column(df, "brake", 0.0) > BRAKE_THRESHOLD
     distance_km = distance_travelled_km(df, fps)
-    events = rising_edges(phantom)
+    events = len(brake_episodes(phantom, fps))
     return {
         "brake_frames": int(brake.sum()),
+        "brake_episodes": len(brake_episodes(brake, fps)),
         "phantom_brake_frames": int(phantom.sum()),
         "phantom_brake_events": events,
         "phantom_brake_per_km": (
