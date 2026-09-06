@@ -1323,3 +1323,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # libcarla can abort the interpreter during finalization when a sensor
+    # callback thread is still alive ("PyGILState_Release ... must be
+    # current"), turning a completed, saved run into a non-zero exit. The
+    # CSV, sidecar and config are written by then; skip finalization.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
