@@ -184,7 +184,7 @@ def build_scans(ego_speed, gap, obstacle_speed, window_frames, fps, background=N
             points.extend(
                 expand_detection(
                     car, rng, mean_points=10.0, range_resolution_m=0.15,
-                    doppler_resolution_mps=0.087, azimuth_resolution_rad=0.0314,
+                    doppler_resolution_mps=0.087, azimuth_resolution_rad=lambda _az: 0.0314,
                     minimum_range_m=1.0, maximum_range_m=RADAR_RANGE_M,
                     footprint_scale=1.3,
                 )
