@@ -42,8 +42,13 @@ except ImportError:
     print("WARNING: BasicAgent not available; using fallback")
     BasicAgent = None
 
-from ground_truth_logger import GroundTruthLogger, compute_vehicle_speed, distance_between
-from drivers import make_driver
+from ground_truth_logger import (
+    GroundTruthLogger,
+    actor_in_ego_path,
+    compute_vehicle_speed,
+    distance_between,
+)
+from drivers import DRIVER_NAMES, make_driver
 from staging import GapKeepController
 from spawn_utils import get_highway_spawns
 from scenario_weather import set_weather_condition
@@ -52,7 +57,7 @@ from config import (
     S4_NPC_SPEED_KMH, S4_NPC_AHEAD_M, S4_CUT_IN_TRIGGER_STEP,
     FOG_LADDER, RANDOM_SEEDS, SCENARIO_DURATION_S, FOG_SETTLE_STEPS,
 )
-from radar import add_radar_arguments
+from radar import add_radar_arguments, radar_kwargs_from_args
 
 
 
@@ -147,10 +152,7 @@ def cleanup_actor(actor):
 
 def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  driver_name="mlp", model_dir=None, pcla_agent="tfv6_visiononly",
-                 radar_backend=None, radar_profile=None,
-                 radar_config_path=None, radar_seed=None,
-                 radar_ghost_detector=None, radar_ghost_threshold=None,
-                 radar_ghost_device="cpu",
+                 radar_kwargs=None,
                  stage_approach=True, stage_gap=8.0,
                  cutin_stop=True,
                  scenario_id=4, safety_rules=False):
@@ -212,18 +214,14 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
         world.tick()
 
     # Pluggable longitudinal driver; steering is delegated to BasicAgent inside it
+    radar_kwargs = dict(radar_kwargs or {})
+    radar_kwargs.setdefault("radar_seed", seed)
     driver = make_driver(
         driver_name,
         model_dir=model_dir,
         pcla_agent=pcla_agent,
-        radar_backend=radar_backend,
-        radar_profile=radar_profile,
-        radar_config_path=radar_config_path,
-        radar_seed=seed if radar_seed is None else radar_seed,
-        radar_ghost_detector=radar_ghost_detector,
-        radar_ghost_threshold=radar_ghost_threshold,
-        radar_ghost_device=radar_ghost_device,
         safety_rules=safety_rules,
+        **radar_kwargs,
     )
     driver.setup(world, ego, carla_map, client)
 
@@ -460,6 +458,13 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 collision=collision_occurred[0],
                 ego_accel=accel,
                 radar_diagnostics=driver.diagnostics(),
+                # Before the cut-in the NPC is beside the ego, not ahead of it,
+                # so braking for it would be a phantom brake; the corridor
+                # test answers that per tick rather than by scenario phase.
+                npc_in_path=(
+                    actor_in_ego_path(ego, npc) if npc and npc.is_alive else None
+                ),
+                detections=driver.latest_detections(),
             )
 
             if collision_occurred[0]:
@@ -524,10 +529,10 @@ def main():
             "driver (ablation arm). Off by default so the model decides."
         ),
     )
-    parser.add_argument("--driver", choices=["pcla", "mlp"], default="mlp",
+    parser.add_argument("--driver", choices=list(DRIVER_NAMES), default="mlp",
                         help="Longitudinal control source")
     parser.add_argument("--model-dir", default="../model_throttle_brake",
-                        help="MLP model directory (for --driver mlp)")
+                        help="model directory (for --driver mlp or transformer)")
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
     add_radar_arguments(parser)
@@ -590,13 +595,9 @@ def main():
                                       args.output, driver_name=args.driver,
                                       model_dir=args.model_dir,
                                       pcla_agent=args.pcla_agent,
-                                      radar_backend=args.radar_backend,
-                                      radar_profile=args.radar_profile,
-                                      radar_config_path=args.radar_config,
-                                      radar_seed=args.radar_seed,
-                                      radar_ghost_detector=args.radar_ghost_detector,
-                                      radar_ghost_threshold=args.radar_ghost_threshold,
-                                      radar_ghost_device=args.radar_ghost_device,
+                                      radar_kwargs=radar_kwargs_from_args(
+                                          args, seed=seed
+                                      ),
                                       safety_rules=args.safety_rules,
                                       stage_approach=args.stage_approach,
                                       stage_gap=args.stage_gap,

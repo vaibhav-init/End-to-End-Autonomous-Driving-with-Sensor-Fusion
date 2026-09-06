@@ -62,10 +62,21 @@ def summarise(directory):
         ghost_near = fraction(ghost_mask & (frame["distance_t-0"] < 30.0))
 
     print(f"  dataset          {csv_path}")
-    for key in ("town", "radar_backend", "radar_profile", "weather_mode",
+    for key in ("town", "teacher", "radar_backend", "radar_profile", "weather_mode",
                 "leading_distance_m", "ignore_lights_pct", "scenarios"):
         if config.get(key) is not None:
             print(f"  {key:16s} {config[key]}")
+    injection = config.get("radar_ghost_injection") or {}
+    if injection:
+        print(
+            f"  {'multipath':16s} {injection.get('multipath_mode')} "
+            f"(rate x{injection.get('ghost_rate_scale', 1.0):g}, "
+            f"snr {injection.get('ghost_snr_offset_db', 0.0):+g} dB)"
+        )
+    if config.get("radar_ghost_oracle"):
+        print(f"  {'ghost filter':16s} oracle")
+    sidecar = os.path.join(directory, "data.detections.npz")
+    print(f"  {'detections':16s} {'present' if os.path.exists(sidecar) else 'absent (scalar-only)'}")
     print(f"  rows             {total:,}")
     print(f"  target detected  {detected:.3f}")
     print(f"  braking (moving) {braking:.3f}")

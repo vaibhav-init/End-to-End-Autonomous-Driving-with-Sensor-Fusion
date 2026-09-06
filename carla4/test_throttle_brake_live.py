@@ -22,11 +22,13 @@ from radar import (
     add_radar_arguments,
     create_front_radar,
     describe_radar_configuration,
+    radar_overrides_from_args,
     resolve_realistic_radar_config,
 )
+from radar_provenance import check_radar_provenance, print_provenance_warnings
 from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS
 from speed_model import TargetSpeedMLP, flatten_history
-from weather_utils import apply_random_fog
+from weather_utils import WEATHER_MODES, apply_weather
 from driving_contract import (
     MAX_TARGET_SPEED_KMH,
     NATIVE_RADAR_POINTS_PER_SECOND,
@@ -397,8 +399,15 @@ def main():
         default=None,
         help="Optional runtime ceiling; cannot exceed the model's training ceiling",
     )
+    parser.add_argument(
+        "--weather",
+        choices=WEATHER_MODES,
+        default="clear",
+        help="clear (default) or fog_ladder; fog costs render time and radar barely notices it",
+    )
     add_radar_arguments(parser)
     args = parser.parse_args()
+    radar_overrides = radar_overrides_from_args(args)
 
     # Resolve model paths
     if args.model is None:
@@ -431,7 +440,6 @@ def main():
         )
     )
     runtime_radar_config = None
-    runtime_radar_metadata = None
     if args.radar_backend == "realistic":
         embedded_config = (
             None
@@ -444,6 +452,7 @@ def main():
             profile_name=args.radar_profile,
             config_path=args.radar_config,
             config=embedded_config,
+            overrides=radar_overrides,
         )
         runtime_radar_metadata = describe_radar_configuration(
             backend="realistic",
@@ -453,6 +462,14 @@ def main():
             config=runtime_radar_config,
             ghost_detector_path=args.radar_ghost_detector,
             ghost_threshold=args.radar_ghost_threshold,
+            ghost_oracle=args.radar_ghost_oracle,
+        )
+    else:
+        runtime_radar_metadata = describe_radar_configuration(
+            backend=args.radar_backend,
+            range_m=radar_range,
+            fps=FPS,
+            points_per_second=radar_points_per_second,
         )
     trained_max_speed_kmh = min(
         float(model_config.get("max_target_speed_kmh", MAX_TARGET_SPEED_KMH)),
@@ -494,63 +511,35 @@ def main():
     print(f"  Feature count:  {len(feature_cols)}")
     print(f"  Radar range:    {radar_range:.0f}m")
     print(f"  Radar sampling: {radar_points_per_second} points/s")
-    if runtime_radar_metadata is not None:
+    if args.radar_backend == "realistic":
         print(f"  Radar profile:  {runtime_radar_metadata['radar_profile']}")
         print(
             "  Radar config ID:"
             f" {runtime_radar_metadata['radar_config_signature']}"
         )
+        injection = runtime_radar_metadata["radar_ghost_injection"]
+        print(
+            f"  Multipath:      {injection['multipath_mode']} "
+            f"(rate x{injection['ghost_rate_scale']:g}, "
+            f"snr {injection['ghost_snr_offset_db']:+g} dB)"
+        )
+        if args.radar_ghost_oracle:
+            print("  Ghost filter:   ORACLE (ground-truth ceiling)")
     print(f"  Speed ceiling:  {runtime_max_speed_kmh:.1f}km/h")
     trained_town = model_config.get("town")
     if trained_town and trained_town != args.town:
         print(
             f"  WARNING: model data used {trained_town}, runtime uses {args.town}."
         )
-    if args.radar_backend != trained_radar_backend:
+    if model_config.get("model_type", "mlp") != "mlp":
         raise RuntimeError(
-            "Sensor distribution mismatch: model data used radar backend "
-            f"'{trained_radar_backend}', runtime requested "
-            f"'{args.radar_backend}'. Recollect/retrain or select the trained "
-            "backend."
+            "This live test drives the scalar MLP only; evaluate a transformer "
+            "through scenarios/run_all.py --driver transformer."
         )
-    trained_radar_signature = model_config.get("radar_config_signature")
-    if (
-        args.radar_backend == "realistic"
-        and trained_radar_signature
-        != runtime_radar_metadata["radar_config_signature"]
-    ):
-        raise RuntimeError(
-            "Realistic radar configuration mismatch: model data used "
-            f"{trained_radar_signature!r}, runtime requested "
-            f"{runtime_radar_metadata['radar_config_signature']!r}."
-        )
-    trained_ghost_signature = model_config.get(
-        "radar_ghost_detector_signature"
+    # Sensor mismatch raises; ghost-injection and filter differences print.
+    print_provenance_warnings(
+        check_radar_provenance(model_config, runtime_radar_metadata)
     )
-    runtime_ghost_signature = (
-        runtime_radar_metadata.get("radar_ghost_detector_signature")
-        if runtime_radar_metadata is not None
-        else None
-    )
-    if trained_ghost_signature != runtime_ghost_signature:
-        raise RuntimeError(
-            "Radar ghost-detector mismatch: model data used "
-            f"{trained_ghost_signature!r}, runtime requested "
-            f"{runtime_ghost_signature!r}. Pass the detector used during "
-            "collection, or recollect and retrain."
-        )
-    trained_ghost_threshold = model_config.get("radar_ghost_threshold")
-    runtime_ghost_threshold = (
-        runtime_radar_metadata.get("radar_ghost_threshold")
-        if runtime_radar_metadata is not None
-        else None
-    )
-    if trained_ghost_threshold != runtime_ghost_threshold:
-        raise RuntimeError(
-            "Radar ghost rejection threshold differs from training data: "
-            f"trained={trained_ghost_threshold!r}, "
-            f"runtime={runtime_ghost_threshold!r}."
-        )
     print("=" * 76)
 
     client = carla.Client(args.host, args.port)
@@ -623,12 +612,13 @@ def main():
         ghost_detector_path=args.radar_ghost_detector,
         ghost_threshold=args.radar_ghost_threshold,
         ghost_device=args.radar_ghost_device,
+        ghost_oracle=args.radar_ghost_oracle,
     )
     print(f"  Distance source: Front radar ({args.radar_backend})")
 
     npc_ids = spawn_background_traffic(world, client, tm, args.vehicles)
     walker_ids, ctrl_ids = spawn_background_pedestrians(world, args.pedestrians)
-    current_weather_name = apply_random_fog(world)
+    current_weather_name = apply_weather(world, args.weather)
     print(f"  Weather:        {current_weather_name}")
 
     for _ in range(40):
@@ -761,8 +751,8 @@ def main():
             ):
                 spawn_requested.clear()
                 if maybe_spawn_scenario(world, ego, carla_map, scenario_state):
-                    current_weather_name = apply_random_fog(world)
-                    print(f"  Fog preset -> {current_weather_name}")
+                    current_weather_name = apply_weather(world, args.weather)
+                    print(f"  Weather -> {current_weather_name}")
                     next_auto_scenario_time = time.time() + 25.0
             elif spawn_requested.is_set():
                 spawn_requested.clear()

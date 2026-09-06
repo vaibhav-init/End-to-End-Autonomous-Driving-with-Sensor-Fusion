@@ -28,7 +28,9 @@ from radar import (
     create_front_radar,
     describe_radar_configuration,
     radar_diagnostics_row,
+    radar_overrides_from_args,
 )
+from radar.detection_log import DetectionLog, sidecar_path
 from driving_contract import (
     MAX_TARGET_SPEED_KMH,
     NATIVE_RADAR_POINTS_PER_SECOND,
@@ -77,6 +79,77 @@ _SCENARIOS_DIR = os.path.join(
 )
 if _SCENARIOS_DIR not in sys.path:
     sys.path.insert(0, _SCENARIOS_DIR)
+
+from ground_truth_logger import nearest_in_path_actor  # noqa: E402
+from staging import GapKeepController, SpeedController  # noqa: E402
+
+# Who drives the ego while the radar records. The autopilot is the known-good
+# configuration and almost never brakes hard, which is why the shipped model
+# never learned to. The privileged gap-keeper reads ground-truth positions of
+# whatever is in the ego's path and brakes to hold a gap behind it, so its
+# labels contain the decelerations the controller has to learn.
+TEACHERS = ("autopilot", "gapkeep")
+GAPKEEP_FOLLOW_GAP_M = 12.0
+GAPKEEP_DETECT_RANGE_M = 70.0
+
+
+class PrivilegedTeacher:
+    """Cruise on open road; gap-keep on the nearest ground-truth in-path actor.
+
+    Steering comes from BasicAgent, the same lateral controller the scenario
+    drivers use, so the student later drives the geometry it was taught on.
+    Everything this class reads is privileged simulator state; the radar row
+    recorded alongside is the student's view of the same moment.
+    """
+
+    def __init__(self, ego, world, cruise_kmh, dt,
+                 follow_gap_m=GAPKEEP_FOLLOW_GAP_M,
+                 detect_range_m=GAPKEEP_DETECT_RANGE_M):
+        # Imported here: it pulls CARLA's agents package off CARLA_ROOT, which
+        # only has to exist when this teacher is actually chosen.
+        from drivers.steering import BasicAgentSteering
+
+        self._steering_class = BasicAgentSteering
+        self.world = world
+        self.cruise_mps = float(cruise_kmh) / 3.6
+        self.dt = float(dt)
+        self.follow_gap_m = float(follow_gap_m)
+        self.detect_range_m = float(detect_range_m)
+        self.steering = None
+        self.cruise = None
+        self.gapkeep = None
+        self.last_gap_m = None
+        self.attach(ego)
+
+    def attach(self, ego):
+        """(Re)bind to the ego; called again after a respawn."""
+
+        self.steering = self._steering_class(
+            ego, self.world.get_map(), target_speed=self.cruise_mps * 3.6
+        )
+        self.cruise = SpeedController(self.cruise_mps, self.dt)
+        self.gapkeep = GapKeepController(
+            self.follow_gap_m, self.dt, max_speed_mps=self.cruise_mps
+        )
+
+    def step(self, ego, ego_speed_mps):
+        """Return (VehicleControl, commanded target speed m/s)."""
+
+        lead, gap = nearest_in_path_actor(self.world, ego)
+        self.last_gap_m = gap
+        if lead is not None and gap is not None and gap < self.detect_range_m:
+            velocity = lead.get_velocity()
+            lead_speed = math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
+            target = self.gapkeep.desired_speed(gap, lead_speed)
+            throttle, brake = self.gapkeep.run_step(gap, ego_speed_mps, lead_speed)
+        else:
+            target = self.cruise_mps
+            throttle, brake = self.cruise.run_step(ego_speed_mps)
+        steer = self.steering.get_steer()
+        return (
+            carla.VehicleControl(throttle=float(throttle), steer=float(steer), brake=float(brake)),
+            float(target),
+        )
 
 
 def follow_ego_with_spectator(world, ego):
@@ -523,10 +596,24 @@ def main():
             "so pass a free one rather than waiting it out (default: 8000)"
         ),
     )
+    parser.add_argument(
+        "--teacher",
+        choices=TEACHERS,
+        default="autopilot",
+        help=(
+            "who drives while the radar records. autopilot is the known-good "
+            "configuration but rarely brakes hard; gapkeep is a privileged "
+            "ground-truth gap-keeper that brakes to hold "
+            f"{GAPKEEP_FOLLOW_GAP_M:g} m behind whatever is in the ego's path, "
+            "so its labels contain the decelerations the controller must learn "
+            "(default: autopilot)"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR)
     add_radar_arguments(parser)
     args = parser.parse_args()
+    radar_overrides = radar_overrides_from_args(args)
     if not 0.0 < args.max_speed_kmh <= MAX_TARGET_SPEED_KMH:
         parser.error(
             f"--max-speed-kmh must be in (0, {MAX_TARGET_SPEED_KMH:g}]"
@@ -565,9 +652,12 @@ def main():
         config_path=args.radar_config,
         ghost_detector_path=args.radar_ghost_detector,
         ghost_threshold=args.radar_ghost_threshold,
+        overrides=radar_overrides,
+        ghost_oracle=args.radar_ghost_oracle,
     )
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, "data.csv")
+    detections_path = sidecar_path(csv_path)
     config_path = os.path.join(args.output, "dataset_config.json")
     # Recorded so the deployed driver can match how the data was collected.
     if os.path.exists(config_path):
@@ -578,6 +668,7 @@ def main():
             "max_target_speed_kmh": args.max_speed_kmh,
             "history_frames": args.history,
             "label_horizon": args.label_horizon,
+            "teacher": args.teacher,
         }
         expected.update(
             {
@@ -613,6 +704,18 @@ def main():
     if args.radar_backend == "realistic":
         print(f"  Radar profile:   {radar_metadata['radar_profile']}")
         print(f"  Radar config ID: {radar_metadata['radar_config_signature']}")
+        injection = radar_metadata["radar_ghost_injection"]
+        print(
+            f"  Multipath:       {injection['multipath_mode']} "
+            f"(rate x{injection['ghost_rate_scale']:g}, "
+            f"snr {injection['ghost_snr_offset_db']:+g} dB)"
+        )
+        if args.radar_ghost_oracle:
+            print("  Ghost filter:    ORACLE (ground-truth ceiling)")
+        elif args.radar_ghost_detector:
+            print(f"  Ghost filter:    {args.radar_ghost_detector}")
+        print(f"  Detections:      {detections_path}")
+    print(f"  Teacher:         {args.teacher}")
     print(f"  Duration:        {args.duration}s")
     print(f"  History frames:  {args.history}")
     print(f"  Label horizon:   {args.label_horizon}")
@@ -689,16 +792,25 @@ def main():
         raise RuntimeError("Failed to spawn ego vehicle")
 
     port = tm.get_port()
-    configure_ego_autopilot(
-        ego,
-        tm,
-        port,
-        max_speed_kmh=args.max_speed_kmh,
-        leading_distance_m=args.leading_distance_m,
-        ignore_lights_pct=args.ignore_lights_pct,
-    )
-
-    print("  Teacher: CARLA autopilot")
+    teacher = None
+    if args.teacher == "autopilot":
+        configure_ego_autopilot(
+            ego,
+            tm,
+            port,
+            max_speed_kmh=args.max_speed_kmh,
+            leading_distance_m=args.leading_distance_m,
+            ignore_lights_pct=args.ignore_lights_pct,
+        )
+        print("  Teacher: CARLA autopilot")
+    else:
+        ego.set_autopilot(False, port)
+        world.tick()
+        teacher = PrivilegedTeacher(ego, world, args.max_speed_kmh, 1.0 / FPS)
+        print(
+            f"  Teacher: privileged gap-keeper (cruise {args.max_speed_kmh:.0f} km/h, "
+            f"gap {GAPKEEP_FOLLOW_GAP_M:g} m, detect {GAPKEEP_DETECT_RANGE_M:g} m)"
+        )
 
     retimed, red_min, red_max = set_traffic_light_red_time(
         world, args.traffic_light_red_s
@@ -725,7 +837,19 @@ def main():
         ghost_detector_path=args.radar_ghost_detector,
         ghost_threshold=args.radar_ghost_threshold,
         ghost_device=args.radar_ghost_device,
+        ghost_oracle=args.radar_ghost_oracle,
+        overrides=radar_overrides,
     )
+    if args.radar_backend == "realistic":
+        # Assert the config actually in use, not the one requested: a silently
+        # dropped keyword once produced a whole run on the wrong profile.
+        live = radar.realistic_config
+        assert live.multipath_mode == radar_metadata["radar_ghost_injection"]["multipath_mode"]
+        print(
+            f"  Radar in use:    {live.profile_name} multipath={live.multipath_mode} "
+            f"points/object={live.points_per_object_mean:g}"
+        )
+    detection_log = DetectionLog()
     current_weather_name = apply_weather(world, args.weather)
     print(f"  Weather:         {current_weather_name}")
 
@@ -862,9 +986,11 @@ def main():
                 print(f"\n  Switching scenario -> {scenario}")
                 print(f"  Fog preset -> {current_weather_name}")
                 if scenario in ("car_following", "lead_decelerating"):
-                    tm.auto_lane_change(ego, False)
+                    if teacher is None:
+                        tm.auto_lane_change(ego, False)
                 else:
-                    tm.auto_lane_change(ego, True)
+                    if teacher is None:
+                        tm.auto_lane_change(ego, True)
                     cleanup_actor(lead_actor)
                     lead_actor = None
                 if scenario != "emergency":
@@ -952,7 +1078,8 @@ def main():
                             emergency_actor.apply_control(carla.VehicleControl(brake=1.0))
                             emergency_count += 1
                             emergency_stopped_frames = 0
-                            tm.auto_lane_change(ego, False)
+                            if teacher is None:
+                                tm.auto_lane_change(ego, False)
                             print(
                                 f"  Emergency obstacle #{emergency_count} spawned at "
                                 f"{speed * 3.6:.1f} km/h"
@@ -975,7 +1102,8 @@ def main():
                         cleanup_actor(emergency_actor)
                         emergency_actor = None
                         emergency_stopped_frames = 0
-                        tm.auto_lane_change(ego, True)
+                        if teacher is None:
+                            tm.auto_lane_change(ego, True)
                         print("  Emergency obstacle removed")
 
             if scenario == "cut_in":
@@ -998,6 +1126,7 @@ def main():
             radar.update_ego_speed(speed)
             radar_state = radar.get()
             radar_diagnostics = radar_diagnostics_row(radar)
+            detection_log.append_radar(radar, frame)
             if radar_state["relative_velocity"] > 0.1:
                 ttc = min(radar_state["distance"] / radar_state["relative_velocity"], 10.0)
             else:
@@ -1032,6 +1161,12 @@ def main():
                     leading_distance_m=args.leading_distance_m,
                     ignore_lights_pct=args.ignore_lights_pct,
                 )
+                if teacher is not None:
+                    # safe_respawn_ego re-enables the autopilot; hand the ego
+                    # back to the privileged teacher on the new route.
+                    ego.set_autopilot(False, port)
+                    world.tick()
+                    teacher.attach(ego)
                 feature_history.clear()
                 prev_speed = 0.0
                 lead_last_change_frame = frame
@@ -1039,6 +1174,12 @@ def main():
                 active_episode_id = f"base_{segment_counter:04d}_{scenario}"
                 print(f"  Ego safely respawned after confirmed stall ({respawn_count})")
                 continue
+
+            teacher_command_speed = ""
+            if teacher is not None:
+                teacher_control, teacher_command_speed = teacher.step(ego, speed)
+                ego.apply_control(teacher_control)
+                teacher_command_speed = round(teacher_command_speed, 4)
 
             base_features = {
                 "ego_speed": round(speed, 4),
@@ -1060,8 +1201,12 @@ def main():
                         "weather": current_weather_name,
                         "episode_id": active_episode_id,
                         "ego_speed_now": round(speed, 4),
+                        # Whatever drove the ego this frame; the column names
+                        # predate the second teacher and are kept for the
+                        # training and inspection scripts.
                         "autopilot_throttle": round(control.throttle, 4),
                         "autopilot_brake": round(control.brake, 4),
+                        "teacher_command_speed": teacher_command_speed,
                     }
                 )
                 row.update(radar_diagnostics)
@@ -1101,9 +1246,12 @@ def main():
                 )
                 df = df.dropna(subset=["teacher_target_speed"]).reset_index(drop=True)
                 df.to_csv(csv_path, index=False)
+                if detection_log.frame_count:
+                    detection_log.save(detections_path)
 
                 config = {
                     "town": args.town,
+                    "teacher": args.teacher,
                     "fps": FPS,
                     "max_target_speed_kmh": args.max_speed_kmh,
                     "weather_interval_s": args.weather_interval_s,
@@ -1133,6 +1281,12 @@ def main():
                 print(f"  Respawns:           {respawn_count}")
                 print(f"  Scenario coverage:  {scenario_counts}")
                 print(f"  Dataset:            {csv_path}")
+                if detection_log.frame_count:
+                    print(
+                        f"  Detections:         {detections_path} "
+                        f"({detection_log.point_count:,} points over "
+                        f"{detection_log.frame_count:,} frames)"
+                    )
                 print(f"  Config:             {config_path}")
                 print("=" * 72)
         except KeyboardInterrupt:

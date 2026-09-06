@@ -42,6 +42,10 @@ from radar import (  # noqa: E402
     realistic_radar_config_signature,
     resolve_realistic_radar_config,
 )
+from radar_provenance import (  # noqa: E402
+    check_radar_provenance,
+    print_provenance_warnings,
+)
 from driving_contract import (  # noqa: E402
     MAX_TARGET_SPEED_KMH,
     NATIVE_RADAR_POINTS_PER_SECOND,
@@ -74,11 +78,16 @@ class MLPDriver(Driver):
         radar_ghost_detector=None,
         radar_ghost_threshold=None,
         radar_ghost_device="cpu",
+        radar_ghost_oracle=False,
+        radar_overrides=None,
         safety_rules=False,
         cruise_floor=True,
         **_ignored,
     ):
         self.model_dir = model_dir
+        self.radar_ghost_oracle = bool(radar_ghost_oracle)
+        self.radar_overrides = dict(radar_overrides or {})
+        self._last_target_speed = None
         # The hardcoded emergency-brake overrides are OFF by default: they
         # fire on <30 m closing or TTC<3 s, which is every hazard in S1/S2/S4,
         # so with them on the rules drive and the model does not. Enable them
@@ -162,13 +171,11 @@ class MLPDriver(Driver):
         self.model.eval()
 
         self.max_range = float(model_config.get("radar_range_m", RADAR_RANGE))
-        if self.radar_backend != trained_radar_backend:
-            raise RuntimeError(
-                "Sensor distribution mismatch: model data used radar backend "
-                f"'{trained_radar_backend}', runtime requested "
-                f"'{self.radar_backend}'."
-            )
         if self.radar_backend == "realistic":
+            # The trained sensor is the default; a profile or config path on
+            # the command line replaces it, and the runtime ghost knobs apply
+            # on top of either. Ghost knobs sit outside the signature, so a
+            # clean-trained model can be deployed with ghosts on.
             embedded_config = (
                 None
                 if self.radar_profile or self.radar_config_path
@@ -180,17 +187,8 @@ class MLPDriver(Driver):
                 profile_name=self.radar_profile,
                 config_path=self.radar_config_path,
                 config=embedded_config,
+                overrides=self.radar_overrides,
             )
-            requested_signature = realistic_radar_config_signature(
-                self.realistic_radar_config
-            )
-            trained_signature = model_config.get("radar_config_signature")
-            if trained_signature != requested_signature:
-                raise RuntimeError(
-                    "Realistic radar configuration mismatch: model data used "
-                    f"{trained_signature!r}, runtime requested "
-                    f"{requested_signature!r}."
-                )
             runtime_metadata = describe_radar_configuration(
                 backend="realistic",
                 range_m=self.max_range,
@@ -199,25 +197,21 @@ class MLPDriver(Driver):
                 config=self.realistic_radar_config,
                 ghost_detector_path=self.radar_ghost_detector,
                 ghost_threshold=self.radar_ghost_threshold,
+                ghost_oracle=self.radar_ghost_oracle,
             )
-            trained_ghost_signature = model_config.get(
-                "radar_ghost_detector_signature"
+        else:
+            runtime_metadata = describe_radar_configuration(
+                backend=self.radar_backend,
+                range_m=self.max_range,
+                fps=self.fps,
+                points_per_second=self.radar_points_per_second,
             )
-            requested_ghost_signature = runtime_metadata.get(
-                "radar_ghost_detector_signature"
-            )
-            if trained_ghost_signature != requested_ghost_signature:
-                raise RuntimeError(
-                    "Ghost-detector mismatch: model data used "
-                    f"{trained_ghost_signature!r}, runtime requested "
-                    f"{requested_ghost_signature!r}."
-                )
-            if model_config.get("radar_ghost_threshold") != runtime_metadata.get(
-                "radar_ghost_threshold"
-            ):
-                raise RuntimeError(
-                    "Ghost rejection threshold differs from training data."
-                )
+        # Sensor mismatch raises; ghost-injection and filter differences are
+        # the experiment and are printed, never hidden.
+        print_provenance_warnings(
+            check_radar_provenance(model_config, runtime_metadata),
+            prefix="  [mlp] ",
+        )
 
         self.radar = create_front_radar(
             ego,
@@ -231,6 +225,7 @@ class MLPDriver(Driver):
             ghost_detector_path=self.radar_ghost_detector,
             ghost_threshold=self.radar_ghost_threshold,
             ghost_device=self.radar_ghost_device,
+            ghost_oracle=self.radar_ghost_oracle,
         )
 
         self.steering = BasicAgentSteering(ego, carla_map)
@@ -258,6 +253,16 @@ class MLPDriver(Driver):
                 "  [mlp]   radar config:   "
                 f"{realistic_radar_config_signature(self.realistic_radar_config)}"
             )
+            print(
+                "  [mlp]   multipath:      "
+                f"{self.realistic_radar_config.multipath_mode} "
+                f"(rate x{self.realistic_radar_config.ghost_rate_scale:g}, "
+                f"snr {self.realistic_radar_config.ghost_snr_offset_db:+g} dB)"
+            )
+            if self.radar_ghost_oracle:
+                print("  [mlp]   ghost filter:   ORACLE (ground-truth ceiling)")
+            elif self.radar_ghost_detector:
+                print(f"  [mlp]   ghost filter:   {self.radar_ghost_detector}")
         print(f"  [mlp]   device:         {self.device}")
         print(f"  [mlp]   history_frames: {self.history_frames}")
         print(
@@ -319,6 +324,7 @@ class MLPDriver(Driver):
             max(0.0, target_speed_pred),
             self.max_target_speed_mps,
         )
+        self._last_target_speed = target_speed_pred
 
         # ── Optional hardcoded overrides (ablation arm; OFF by default) ──
         # These three rules fire on <30 m closing or TTC<3 s, which describes
@@ -378,7 +384,13 @@ class MLPDriver(Driver):
                     ],
                 }
             )
+        if self._last_target_speed is not None:
+            diagnostics["controller_target_speed_mps"] = self._last_target_speed
         return diagnostics
+
+    def latest_detections(self):
+        getter = getattr(self.radar, "get_detections", None)
+        return getter() if getter is not None else None
 
     def cleanup(self):
         if self.radar is not None:

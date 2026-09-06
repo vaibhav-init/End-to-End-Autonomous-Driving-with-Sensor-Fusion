@@ -145,6 +145,9 @@ class RadarTarget:
     snr_db: float
     point_count: int
     lateral_extent_m: float = 0.0
+    # Radial depth of the visible surface (10th to 90th range percentile).
+    # Feeds the extended-target point emission in the realistic backend.
+    radial_extent_m: float = 0.0
 
 
 def decode_semantic_lidar(raw_data):
@@ -346,7 +349,9 @@ def extract_targets(returns, config=None):
             continue
 
         target_ranges = ranges[indices]
-        distance = float(np.quantile(target_ranges, 0.10))
+        range_low, range_high = np.quantile(target_ranges, (0.10, 0.90))
+        distance = float(range_low)
+        radial_extent = max(0.0, float(range_high) - float(range_low))
 
         # Range represents the front scattering surface, but using that one
         # quantile's nearest LiDAR point for angle makes an extended vehicle
@@ -390,6 +395,7 @@ def extract_targets(returns, config=None):
                 snr_db=snr_db,
                 point_count=len(indices),
                 lateral_extent_m=float(lateral_extent),
+                radial_extent_m=radial_extent,
             )
         )
 

@@ -19,11 +19,25 @@ from .realistic_core import (
     IdealRadarTarget,
     RadarEnvironment,
     RealisticRadarModel,
+    ghost_injection_dict,
     load_realistic_radar_config,
     realistic_radar_config_dict,
     realistic_radar_config_signature,
 )
 from .multipath import extract_reflector_segments, generate_multipath_targets
+from .oracle_filter import OracleGhostFilter
+
+
+MULTIPATH_MODES = ("off", "probabilistic", "geometry")
+
+
+def _env_flag(name):
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name):
+    value = os.environ.get(name)
+    return float(value) if value not in (None, "") else None
 
 
 RADAR_BACKENDS = ("native", "cshenron", "realistic")
@@ -103,7 +117,87 @@ def add_radar_arguments(parser):
         default=os.environ.get("CARLA_RADAR_GHOST_DEVICE", "cpu"),
         help="PyTorch device for online ghost filtering (default: cpu)",
     )
+    parser.add_argument(
+        "--radar-ghost-oracle",
+        action="store_true",
+        default=_env_flag("CARLA_RADAR_GHOST_ORACLE"),
+        help=(
+            "reject every simulator-labelled ghost before tracking. The "
+            "ground-truth ceiling for any filter, never a method"
+        ),
+    )
+    # Runtime ghost-injection knobs. They sit outside the radar config
+    # signature so the same trained controller can be run with ghosts off,
+    # on, thinned or strengthened; the values are recorded with every
+    # dataset, model and result for provenance.
+    parser.add_argument(
+        "--radar-multipath-mode",
+        choices=MULTIPATH_MODES,
+        default=os.environ.get("CARLA_RADAR_MULTIPATH_MODE") or None,
+        help=(
+            "override the profile's multipath mode at runtime (default: "
+            "whatever the profile or the trained model's config says)"
+        ),
+    )
+    parser.add_argument(
+        "--radar-ghost-rate-scale",
+        type=float,
+        default=_env_float("CARLA_RADAR_GHOST_RATE_SCALE"),
+        help=(
+            "keep each geometry ghost path with this probability, in [0, 1]; "
+            "also scales the probabilistic ghost start rate (default: 1)"
+        ),
+    )
+    parser.add_argument(
+        "--radar-ghost-snr-offset-db",
+        type=float,
+        default=_env_float("CARLA_RADAR_GHOST_SNR_OFFSET_DB"),
+        help=(
+            "add this many dB to every ghost's SNR before detection; positive "
+            "makes ghosts more visible and persistent (default: 0)"
+        ),
+    )
     return parser
+
+
+def radar_overrides_from_args(args):
+    """The runtime ghost-injection overrides selected on the command line."""
+
+    overrides = {}
+    mode = getattr(args, "radar_multipath_mode", None)
+    if mode:
+        overrides["multipath_mode"] = mode
+    rate_scale = getattr(args, "radar_ghost_rate_scale", None)
+    if rate_scale is not None:
+        overrides["ghost_rate_scale"] = float(rate_scale)
+    snr_offset = getattr(args, "radar_ghost_snr_offset_db", None)
+    if snr_offset is not None:
+        overrides["ghost_snr_offset_db"] = float(snr_offset)
+    return overrides
+
+
+def radar_kwargs_from_args(args, seed=None):
+    """Everything a driver or collector needs to build the configured radar.
+
+    One dict instead of nine positional threads through every scenario
+    script. ``seed`` overrides ``--radar-seed`` when the caller pairs the
+    sensor seed with the scenario seed.
+    """
+
+    radar_seed = getattr(args, "radar_seed", None)
+    if radar_seed is None:
+        radar_seed = seed
+    return {
+        "radar_backend": getattr(args, "radar_backend", None),
+        "radar_profile": getattr(args, "radar_profile", None),
+        "radar_config_path": getattr(args, "radar_config", None),
+        "radar_seed": 42 if radar_seed is None else int(radar_seed),
+        "radar_ghost_detector": getattr(args, "radar_ghost_detector", None),
+        "radar_ghost_threshold": getattr(args, "radar_ghost_threshold", None),
+        "radar_ghost_device": getattr(args, "radar_ghost_device", "cpu"),
+        "radar_ghost_oracle": bool(getattr(args, "radar_ghost_oracle", False)),
+        "radar_overrides": radar_overrides_from_args(args),
+    }
 
 
 def _carla_module():
@@ -128,6 +222,7 @@ def resolve_realistic_radar_config(
     profile_name=None,
     config_path=None,
     config=None,
+    overrides=None,
 ):
     """Resolve the exact realistic configuration used at runtime."""
 
@@ -137,6 +232,7 @@ def resolve_realistic_radar_config(
         config=config,
         max_range_m=float(range_m),
         cycle_time_s=1.0 / max(float(fps), 1.0),
+        overrides=overrides,
     )
 
 
@@ -150,8 +246,16 @@ def describe_radar_configuration(
     config=None,
     ghost_detector_path=None,
     ghost_threshold=None,
+    overrides=None,
+    ghost_oracle=False,
 ):
-    """Return serializable metadata for dataset/model compatibility checks."""
+    """Return serializable metadata for dataset/model compatibility checks.
+
+    ``radar_config_signature`` identifies the sensor; ``radar_ghost_injection``
+    records what was injected into it. The two are kept apart on purpose so a
+    controller trained under one ghost setting can be evaluated under another
+    while the provenance of both stays in the metadata.
+    """
 
     backend = normalize_radar_backend(backend)
     metadata = {
@@ -167,6 +271,7 @@ def describe_radar_configuration(
             profile_name=profile_name,
             config_path=config_path,
             config=config,
+            overrides=overrides,
         )
         metadata.update(
             {
@@ -175,9 +280,26 @@ def describe_radar_configuration(
                     resolved
                 ),
                 "radar_config": realistic_radar_config_dict(resolved),
+                "radar_ghost_injection": ghost_injection_dict(resolved),
+                "radar_ghost_oracle": bool(ghost_oracle),
             }
         )
-        if ghost_detector_path:
+        if ghost_oracle and ghost_detector_path:
+            raise ValueError(
+                "Choose either the oracle ghost filter or a learned detector, "
+                "not both"
+            )
+        if ghost_oracle:
+            oracle = OracleGhostFilter()
+            metadata.update(
+                {
+                    "radar_ghost_detector": "oracle",
+                    "radar_ghost_detector_signature": oracle.signature,
+                    "radar_ghost_threshold": oracle.threshold,
+                    "radar_ghost_model": oracle.model_name,
+                }
+            )
+        elif ghost_detector_path:
             from .ghost_detection.runtime import checkpoint_metadata
 
             detector = checkpoint_metadata(
@@ -216,6 +338,8 @@ _LOGGED_DIAGNOSTIC_KEYS = (
     "rejected_detection_count",
     "delivered_detection_count",
     "delivered_source_scan_index",
+    "point_detection_count",
+    "ghost_point_count",
     "configured_latency_scans",
     "direct_detection_count",
     "dropped_direct_count",
@@ -727,8 +851,17 @@ class RealisticFrontRadar(CShenronFrontRadar):
         ghost_detector_path=None,
         ghost_threshold=None,
         ghost_device="cpu",
+        ghost_oracle=False,
+        overrides=None,
         **_ignored,
     ):
+        if _ignored:
+            # Every misspelled keyword used to vanish here; one run went out on
+            # the wrong profile that way. Unknown keywords are now an error.
+            raise TypeError(
+                "RealisticFrontRadar got unknown keyword(s): "
+                + ", ".join(sorted(_ignored))
+            )
         self.vehicle = vehicle
         self.world = world
         self._range = float(range_m)
@@ -743,6 +876,8 @@ class RealisticFrontRadar(CShenronFrontRadar):
         self._reflector_count = 0
         self._state = _empty_state(range_m)
         self._model_snapshot = {}
+        self._latest_points = ()
+        self._latest_points_scan = 0
         self._raw_return_count = 0
         self._semantic_tag_counts = {}
         self._reflector_snapshot = []
@@ -757,9 +892,17 @@ class RealisticFrontRadar(CShenronFrontRadar):
             profile_name=profile_name,
             config_path=config_path,
             config=config,
+            overrides=overrides,
         )
         detection_filter = None
-        if ghost_detector_path:
+        if ghost_oracle and ghost_detector_path:
+            raise ValueError(
+                "Choose either the oracle ghost filter or a learned detector, "
+                "not both"
+            )
+        if ghost_oracle:
+            detection_filter = OracleGhostFilter()
+        elif ghost_detector_path:
             from .ghost_detection.runtime import RuntimeGhostFilter
 
             detection_filter = RuntimeGhostFilter(
@@ -941,6 +1084,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
                         snr_db=target.snr_db,
                         point_count=target.point_count,
                         lateral_extent_m=target.lateral_extent_m,
+                        radial_extent_m=target.radial_extent_m,
                         parent_object_id=target.object_id,
                         path_length_m=2.0 * target.distance_m,
                         velocity_xy_mps=self._last_relative_velocity_xy,
@@ -964,6 +1108,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
                     relative_velocity_mps=path.relative_velocity_mps,
                     snr_db=path.snr_db,
                     lateral_extent_m=path.lateral_extent_m,
+                    radial_extent_m=path.radial_extent_m,
                     source="ghost",
                     parent_object_id=path.parent_object_id,
                     reflector_id=path.reflector_id,
@@ -981,6 +1126,7 @@ class RealisticFrontRadar(CShenronFrontRadar):
                 multipath_targets=multipath_targets,
             )
             model_snapshot = self.model.debug_snapshot()
+            points_scan, points = self.model.latest_points()
             state = {
                 "distance": selected.distance_m,
                 "relative_velocity": selected.relative_velocity_mps,
@@ -990,6 +1136,8 @@ class RealisticFrontRadar(CShenronFrontRadar):
                 self._timestamp = (
                     float(timestamp) if timestamp is not None else None
                 )
+                self._latest_points = points
+                self._latest_points_scan = int(points_scan)
                 self._ideal_target_count = len(ideal_targets)
                 self._reflector_count = len(reflectors)
                 self._raw_return_count = len(returns)
@@ -1020,6 +1168,23 @@ class RealisticFrontRadar(CShenronFrontRadar):
             "relative_velocity": float(relative_velocity),
             "obstacle_speed": max(0.0, ego_speed - relative_velocity),
         }
+
+    def get_detections(self):
+        """Point-level detections of the latest processed scan.
+
+        ``detections`` is a tuple of ``RadarDetection`` (immutable, shared by
+        reference). ``scan_index`` lets a consumer notice when two consecutive
+        ticks saw the same scan, which happens when the callback thread has
+        not finished the newest sweep by the time the main loop reads it.
+        """
+
+        with self._lock:
+            return {
+                "frame": self._frame,
+                "timestamp": self._timestamp,
+                "scan_index": self._latest_points_scan,
+                "detections": self._latest_points,
+            }
 
     def diagnostics(self):
         model_diagnostics = self.model.diagnostics()

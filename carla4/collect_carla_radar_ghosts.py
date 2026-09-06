@@ -135,6 +135,17 @@ def parse_args():
         help="mean expanded sub-points per detection when --expand-points",
     )
     parser.add_argument(
+        "--points-source",
+        choices=("sensor", "expand"),
+        default="sensor",
+        help=(
+            "sensor (default): write the point-level list the radar itself "
+            "emits, so a calibrated profile's points-per-object, footprint and "
+            "micro-Doppler settings reach the export; expand: the legacy "
+            "export-time expansion of the grouped detections"
+        ),
+    )
+    parser.add_argument(
         "--sequence-retries",
         type=int,
         default=1,
@@ -1099,25 +1110,42 @@ def collect_sequence(client, args, sequence_index):
                 + sequence_index * 10_007
                 + radar_frame
             )
-            for detection_index, detection in enumerate(detections):
-                if args.expand_points:
-                    expanded = _expand_detection_points(
-                        detection,
-                        frame_rng,
-                        args.points_per_detection,
-                    )
-                else:
-                    expanded = [detection]
-                for point_index, point in enumerate(expanded):
+            if args.points_source == "sensor":
+                # The radar's own point emission (delivered scan, one cycle of
+                # latency): calibrated points-per-object, footprint and
+                # micro-Doppler flow straight into the export.
+                for point_index, point in enumerate(
+                    snapshot.get("point_detections", ())
+                ):
                     rows.append(
                         _detection_row(
                             sequence_index,
                             radar_frame,
                             timestamp,
-                            (detection_index << 8) + point_index,
+                            point_index,
                             point,
                         )
                     )
+            else:
+                for detection_index, detection in enumerate(detections):
+                    if args.expand_points:
+                        expanded = _expand_detection_points(
+                            detection,
+                            frame_rng,
+                            args.points_per_detection,
+                        )
+                    else:
+                        expanded = [detection]
+                    for point_index, point in enumerate(expanded):
+                        rows.append(
+                            _detection_row(
+                                sequence_index,
+                                radar_frame,
+                                timestamp,
+                                (detection_index << 8) + point_index,
+                                point,
+                            )
+                        )
             diagnostics_summary = {
                 "last_frame": radar_frame,
                 "last_reflector_count": int(

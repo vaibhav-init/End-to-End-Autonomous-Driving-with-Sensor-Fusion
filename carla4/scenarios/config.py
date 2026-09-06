@@ -30,19 +30,30 @@ S4_CUT_IN_TRIGGER_STEP = 60       # step at which NPC begins lane change (S4) �
 #   2 = Dense Fog (0 visibility, cameras blind)
 #   3 = Clear Day (both drivers should work)
 #   4 = Night + Fog + Rain (worst-case for cameras)
+#
+# The pipeline is radar-only and the radar model charges 0.05 dB per 100 m of
+# fog at 77 GHz, so the ladder measures render cost, not sensing. Default to
+# clear day; pass --fog 1 2 3 4 explicitly for a camera-facing comparison.
 # ============================================================================
-FOG_LADDER = [1, 2, 3, 4]  # dark night → dense fog → clear → night+fog+rain
+FOG_LADDER = [3]
 
 # ============================================================================
 # Run configuration
 # ============================================================================
-RANDOM_SEEDS = [42]               # 1 seed
+# Ten paired seeds. One seed is a demo; the spread across seeds is the error
+# bar every closed-loop number needs. Each seed also seeds the radar, so a
+# ghosts-on and a ghosts-off run of the same seed are a matched pair.
+RANDOM_SEEDS = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
 SCENARIO_DURATION_S = {
     1: 30,     # S1: accelerate from 0, detect static obstacle, stop
     2: 35,     # S2: follow NPC, react to sudden brake
     3: 40,     # S3: follow NPC at constant speed, observe gap
     4: 35,     # S4: NPC cuts in from adjacent lane, react to close gap
+    5: 60,     # S5: ghost-exposure drive, no staged hazard; every brake is scored
 }
+S5_TARGET_SPEED_KMH = 50.0        # cruise the exposure drive settles to
+S5_ADJACENT_NPCS = 3              # parents for multipath in the neighbouring lanes
+S5_BACKGROUND_VEHICLES = 25       # traffic that supplies reflections elsewhere
 FOG_SETTLE_STEPS = 60             # ticks after applying fog before spawning
 
 # ============================================================================

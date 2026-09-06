@@ -51,7 +51,9 @@ from radar import (
     create_front_radar,
     describe_radar_configuration,
     radar_diagnostics_row,
+    radar_overrides_from_args,
 )
+from radar.detection_log import DetectionLog, sidecar_path
 from staging import GapKeepController, SpeedController
 from driving_contract import (
     MAX_TARGET_SPEED_KMH,
@@ -163,7 +165,8 @@ def spawn_scenario_npc(
     return None, None
 
 
-def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
+def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args,
+                detection_log=None):
     """Drive one staged episode with the ACC teacher; return (rows, frame_counter)."""
     rng = random.Random(seed)
     dt = 1.0 / FPS
@@ -221,6 +224,8 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         ghost_detector_path=args.radar_ghost_detector,
         ghost_threshold=args.radar_ghost_threshold,
         ghost_device=args.radar_ghost_device,
+        ghost_oracle=args.radar_ghost_oracle,
+        overrides=args.radar_overrides,
     )
     steering = BasicAgentSteering(ego, carla_map)
     cruise = SpeedController(cruise_mps, dt)
@@ -318,6 +323,8 @@ def run_episode(world, carla_map, tm, scenario, seed, frame_counter, args):
         radar.update_ego_speed(ego_speed)
         radar_state = radar.get()
         radar_diagnostics = radar_diagnostics_row(radar)
+        if detection_log is not None:
+            detection_log.append_radar(radar, frame_counter)
         history.append(build_base_features(ego_speed, accel, radar_state))
         if len(history) == args.history:
             row = flatten_history(history, BASE_FEATURE_COLS)
@@ -384,6 +391,7 @@ def main():
         if args.radar_backend == "native"
         else 240000
     )
+    args.radar_overrides = radar_overrides_from_args(args)
     radar_metadata = describe_radar_configuration(
         backend=args.radar_backend,
         range_m=RADAR_RANGE,
@@ -393,9 +401,13 @@ def main():
         config_path=args.radar_config,
         ghost_detector_path=args.radar_ghost_detector,
         ghost_threshold=args.radar_ghost_threshold,
+        overrides=args.radar_overrides,
+        ghost_oracle=args.radar_ghost_oracle,
     )
     os.makedirs(args.output, exist_ok=True)
     csv_path = os.path.join(args.output, args.out_name)
+    detections_path = sidecar_path(csv_path)
+    detection_log = DetectionLog()
     config_path = os.path.join(args.output, "dataset_config.json")
     existing_config = {}
     if os.path.exists(config_path):
@@ -435,6 +447,8 @@ def main():
             for key in (
                 "radar_ghost_detector_signature",
                 "radar_ghost_threshold",
+                "radar_ghost_injection",
+                "radar_ghost_oracle",
             ):
                 existing_value = existing_config.get(key)
                 requested_value = radar_metadata.get(key)
@@ -519,7 +533,8 @@ def main():
                 )
                 print(f"\n  [{scenario}] episode {ep + 1}/{args.episodes}")
                 rows, frame_counter = run_episode(
-                    world, carla_map, tm, scenario, seed, frame_counter, args)
+                    world, carla_map, tm, scenario, seed, frame_counter, args,
+                    detection_log=detection_log)
                 if rows:
                     ep_df = pd.DataFrame(rows)
                     # Label per episode so future-speed never leaks across episodes
@@ -536,6 +551,9 @@ def main():
         if episode_frames:
             df = pd.concat(episode_frames, ignore_index=True)
             df.to_csv(csv_path, index=False)
+            if detection_log.frame_count:
+                detection_log.save(detections_path)
+                print(f"  Detections: {detections_path} ({detection_log.point_count:,} points)")
             dataset_config = existing_config
             dataset_config.update({
                 "town": dataset_config.get("town", args.town),

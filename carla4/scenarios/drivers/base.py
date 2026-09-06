@@ -34,3 +34,12 @@ class Driver(ABC):
         """Return optional per-frame driver/sensor diagnostics."""
 
         return {}
+
+    def latest_detections(self):
+        """The driver's latest point-level radar scan, or None.
+
+        Drivers backed by the realistic radar return the dict from
+        ``get_detections`` so the scenario logger can write the sidecar.
+        """
+
+        return None

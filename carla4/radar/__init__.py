@@ -7,6 +7,7 @@ from .cshenron_core import (
     semantic_tag_name,
 )
 from .front_radar import (
+    MULTIPATH_MODES,
     RADAR_BACKENDS,
     CShenronFrontRadar,
     FrontRadar,
@@ -17,15 +18,20 @@ from .front_radar import (
     describe_radar_configuration,
     normalize_radar_backend,
     radar_diagnostics_row,
+    radar_kwargs_from_args,
+    radar_overrides_from_args,
     resolve_realistic_radar_config,
 )
 from .realistic_core import (
     DEFAULT_REALISTIC_RADAR_PROFILE,
+    GHOST_INJECTION_FIELDS,
     REALISTIC_RADAR_PROFILES,
     IdealRadarTarget,
+    RadarDetection,
     RadarEnvironment,
     RealisticRadarConfig,
     RealisticRadarModel,
+    ghost_injection_dict,
     load_realistic_radar_config,
     realistic_radar_config_signature,
 )
@@ -35,10 +41,13 @@ from .multipath import (
     extract_reflector_segments,
     generate_multipath_targets,
 )
+from .oracle_filter import OracleGhostFilter
 
 __all__ = [
     "DEFAULT_REALISTIC_RADAR_PROFILE",
     "CARLA_0916_SEMANTIC_TAGS",
+    "GHOST_INJECTION_FIELDS",
+    "MULTIPATH_MODES",
     "RADAR_BACKENDS",
     "REALISTIC_RADAR_PROFILES",
     "SEMANTIC_LIDAR_DTYPE",
@@ -47,6 +56,8 @@ __all__ = [
     "IdealRadarTarget",
     "NativeFrontRadar",
     "MultipathTarget",
+    "OracleGhostFilter",
+    "RadarDetection",
     "RadarEnvironment",
     "RealisticFrontRadar",
     "RealisticRadarConfig",
@@ -57,9 +68,12 @@ __all__ = [
     "describe_radar_configuration",
     "extract_reflector_segments",
     "generate_multipath_targets",
+    "ghost_injection_dict",
     "load_realistic_radar_config",
     "normalize_radar_backend",
     "radar_diagnostics_row",
+    "radar_kwargs_from_args",
+    "radar_overrides_from_args",
     "realistic_radar_config_signature",
     "resolve_realistic_radar_config",
     "semantic_material_name",

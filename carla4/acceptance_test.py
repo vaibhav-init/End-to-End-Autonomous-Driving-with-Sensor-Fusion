@@ -23,7 +23,14 @@ import numpy as np
 import torch
 
 from driving_contract import RADAR_RANGE_M
+from radar.realistic_core import RadarDetection
 from speed_model import TargetSpeedMLP, flatten_history
+from transformer_controller import (
+    MODEL_TYPE as TRANSFORMER_MODEL_TYPE,
+    build_window_tokens,
+    load_model as load_transformer,
+    predict_target_speed,
+)
 
 
 # name, ego speed m/s, gap m, obstacle speed m/s, is a pass/fail gate.
@@ -80,6 +87,38 @@ def build_history(ego_speed, gap, obstacle_speed, history_frames, fps):
     return frames
 
 
+def build_scans(ego_speed, gap, obstacle_speed, window_frames, fps):
+    """The transformer's view of the same approach: one detection per scan.
+
+    A lone direct point at the walked-back gap in each scan, oldest first,
+    so the model sees the same closing geometry the scalar model sees.
+    """
+
+    frames = build_history(ego_speed, gap, obstacle_speed, window_frames, fps)
+    scans = []
+    for lag, frame in zip(range(window_frames - 1, -1, -1), frames):
+        if gap is None:
+            scans.append((lag / fps, ()))
+            continue
+        scans.append(
+            (
+                lag / fps,
+                (
+                    RadarDetection(
+                        distance_m=frame["distance"],
+                        azimuth_rad=0.0,
+                        relative_velocity_mps=frame["relative_velocity"],
+                        snr_db=30.0,
+                        source="direct",
+                        truth_object_id=1,
+                        semantic_tag=14,
+                    ),
+                ),
+            )
+        )
+    return scans
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Probe a trained model's braking response"
@@ -89,42 +128,59 @@ def main():
 
     with open(os.path.join(args.model_dir, "model_config.json"), "r", encoding="utf-8") as fh:
         config = json.load(fh)
-    with open(os.path.join(args.model_dir, "scaler.pkl"), "rb") as fh:
-        scaler = pickle.load(fh)
-
-    feature_cols = config["feature_cols"]
-    base_cols = config["base_feature_cols"]
-    history_frames = int(config["history_frames"])
+    model_type = config.get("model_type", "mlp")
     fps = float(config.get("fps") or 20)
 
-    model = TargetSpeedMLP(input_dim=len(feature_cols))
-    model.load_state_dict(
-        torch.load(
-            os.path.join(args.model_dir, "target_speed_mlp.pt"),
-            map_location="cpu",
-            weights_only=True,
+    if model_type == TRANSFORMER_MODEL_TYPE:
+        model, _ = load_transformer(args.model_dir, device="cpu")
+        window_frames = int(config["window_frames"])
+        max_points = int(config["max_points"])
+
+        def predict(ego_speed, gap, obstacle_speed):
+            scans = build_scans(ego_speed, gap, obstacle_speed, window_frames, fps)
+            window = build_window_tokens(scans, ego_speed, 0.0, max_points)
+            return predict_target_speed(model, window, device="cpu")
+    else:
+        with open(os.path.join(args.model_dir, "scaler.pkl"), "rb") as fh:
+            scaler = pickle.load(fh)
+        feature_cols = config["feature_cols"]
+        base_cols = config["base_feature_cols"]
+        history_frames = int(config["history_frames"])
+        model = TargetSpeedMLP(input_dim=len(feature_cols))
+        model.load_state_dict(
+            torch.load(
+                os.path.join(args.model_dir, "target_speed_mlp.pt"),
+                map_location="cpu",
+                weights_only=True,
+            )
         )
-    )
-    model.eval()
+        model.eval()
+
+        def predict(ego_speed, gap, obstacle_speed):
+            history = build_history(ego_speed, gap, obstacle_speed, history_frames, fps)
+            row = flatten_history(history, base_cols)
+            vector = scaler.transform(
+                np.array([[row[col] for col in feature_cols]], dtype=np.float32)
+            )
+            with torch.no_grad():
+                return float(model(torch.tensor(vector.astype(np.float32)))[0])
 
     print("=" * 70)
     print("ACCEPTANCE TEST")
     print("=" * 70)
-    print(f"  model      {args.model_dir}")
+    print(f"  model      {args.model_dir} ({model_type})")
     print(f"  trained on {config.get('radar_backend')} / {config.get('radar_profile')}")
+    injection = config.get("radar_ghost_injection") or {}
+    if injection:
+        print(f"  multipath  {injection.get('multipath_mode')} during collection")
+    print(f"  teacher    {config.get('teacher', 'autopilot')}")
     print(f"  town       {config.get('town')}")
     print()
     print(f"  {'case':<32}{'ego km/h':>10}{'predicted':>11}   verdict")
 
     failures = []
     for name, ego_speed, gap, obstacle_speed, is_gate in CASES:
-        history = build_history(ego_speed, gap, obstacle_speed, history_frames, fps)
-        row = flatten_history(history, base_cols)
-        vector = scaler.transform(
-            np.array([[row[col] for col in feature_cols]], dtype=np.float32)
-        )
-        with torch.no_grad():
-            predicted = float(model(torch.tensor(vector.astype(np.float32)))[0])
+        predicted = predict(ego_speed, gap, obstacle_speed)
 
         if is_gate:
             passed = predicted < ego_speed

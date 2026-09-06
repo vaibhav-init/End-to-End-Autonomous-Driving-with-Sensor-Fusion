@@ -27,6 +27,8 @@ import os
 
 import numpy as np
 
+from .extended_target import expand_detection
+
 
 DEFAULT_REALISTIC_RADAR_PROFILE = "generic_lrr_v1"
 REALISTIC_RADAR_PROFILES = (
@@ -70,10 +72,13 @@ class RealisticRadarConfig:
     snr_fluctuation_std_db: float = 1.5
     error_correlation: float = 0.82
 
-    # Probability of detection and correlated dropout state.
+    # Probability of detection and correlated dropout state. The floor is zero
+    # on purpose: a non-zero floor manufactures detections that no link budget
+    # supports (the old 2% floor let -118 dB ghosts through). The logistic
+    # already tends to zero far below the midpoint.
     detection_snr_midpoint_db: float = 8.0
     detection_snr_slope: float = 0.55
-    min_detection_probability: float = 0.02
+    min_detection_probability: float = 0.0
     max_detection_probability: float = 0.995
     dropout_enter_probability: float = 0.012
     dropout_exit_probability: float = 0.35
@@ -124,6 +129,27 @@ class RealisticRadarConfig:
     # ghosts from real returns.
     multipath_fading_std_db: float = 4.0
     multipath_fading_correlation: float = 0.85
+
+    # Runtime ghost-injection knobs. Every ``multipath_*`` and ``ghost_*``
+    # field is excluded from the config signature (see
+    # ``realistic_radar_config_signature``), so a controller trained on a
+    # clean radar can be deployed with ghosts on, and ghost intensity can be
+    # swept, without the provenance gate refusing. ``ghost_rate_scale`` keeps
+    # each geometry path with that probability (and scales the probabilistic
+    # start rate); ``ghost_snr_offset_db`` shifts every ghost's SNR before
+    # detection, which is what sets how often ghosts are seen and confirmed.
+    ghost_rate_scale: float = 1.0
+    ghost_snr_offset_db: float = 0.0
+
+    # Extended-target point emission. The tracker still consumes one cluster
+    # per object; the point-level list that a point-set controller consumes
+    # spreads each cluster over the object's footprint with per-point SNR
+    # fluctuation and class-dependent micro-Doppler, the way CFAR output
+    # looks. ``points_per_object_mean`` is a prior until fitted from real data.
+    emit_extended_points: bool = True
+    points_per_object_mean: float = 8.0
+    point_footprint_scale: float = 1.0
+    micro_doppler_scale: float = 1.0
 
     # Weather is deliberately modest at 77 GHz.  Values represent additional
     # dB loss over 100 m at a normalized CARLA weather setting of 1.0.
@@ -196,6 +222,8 @@ class IdealRadarTarget:
     # radial component alone assumes purely head-on motion, which is exactly
     # wrong for a road user travelling along a reflecting surface.
     velocity_xy_mps: tuple = (0.0, 0.0)
+    # Radial depth of the visible surface, used to spread emitted points.
+    radial_extent_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -210,6 +238,7 @@ class RadarDetection:
     truth_object_id: int
     semantic_tag: int
     lateral_extent_m: float = 0.0
+    radial_extent_m: float = 0.0
     truth_parent_object_id: int = 0
     reflector_id: int = 0
     bounce_type: str = "direct"
@@ -346,6 +375,7 @@ def _validate_config(config):
             "profile_name",
             "multipath_mode",
             "multipath_enable_third_order",
+            "emit_extended_points",
         )
     )
     for name in numeric_fields:
@@ -370,6 +400,7 @@ def _validate_config(config):
         "multipath_reflector_cell_size_m",
         "multipath_reflector_min_length_m",
         "multipath_max_target_surface_distance_m",
+        "points_per_object_mean",
     )
     for name in positive:
         if getattr(config, name) <= 0.0:
@@ -406,11 +437,14 @@ def _validate_config(config):
         "multipath_second_order_loss_db",
         "multipath_third_order_loss_db",
         "multipath_max_ghosts_per_target",
+        "point_footprint_scale",
+        "micro_doppler_scale",
     )
     for name in non_negative:
         if getattr(config, name) < 0:
             raise ValueError(f"{name} must be non-negative")
     probabilities = (
+        "ghost_rate_scale",
         "min_detection_probability",
         "max_detection_probability",
         "dropout_enter_probability",
@@ -468,6 +502,8 @@ def _validate_config(config):
         )
     if not isinstance(config.multipath_enable_third_order, bool):
         raise ValueError("multipath_enable_third_order must be a boolean")
+    if not isinstance(config.emit_extended_points, bool):
+        raise ValueError("emit_extended_points must be a boolean")
     if config.multipath_reflector_min_points < 2:
         raise ValueError("multipath_reflector_min_points must be at least 2")
     if (
@@ -488,11 +524,13 @@ def load_realistic_radar_config(
     config=None,
     max_range_m=None,
     cycle_time_s=None,
+    overrides=None,
 ):
     """Load a built-in profile, embedded mapping, and optional JSON overrides.
 
     Precedence is: dataclass defaults, built-in profile or embedded ``config``,
-    external JSON override, then explicit runtime range/cycle values.
+    external JSON override, the ``overrides`` mapping (the runtime ghost
+    knobs from the command line), then explicit runtime range/cycle values.
     """
 
     if isinstance(config, RealisticRadarConfig):
@@ -520,6 +558,12 @@ def load_realistic_radar_config(
                 f"Embedded radar profile is '{embedded_profile}', but "
                 f"'{profile_name}' was requested."
             )
+    if overrides:
+        if not isinstance(overrides, dict):
+            raise TypeError("overrides must be a mapping")
+        values.update(
+            {key: value for key, value in overrides.items() if value is not None}
+        )
     if max_range_m is not None:
         values["max_range_m"] = float(max_range_m)
     if cycle_time_s is not None:
@@ -534,11 +578,52 @@ def realistic_radar_config_dict(config):
     return asdict(config)
 
 
-def realistic_radar_config_signature(config):
-    """Stable short identity used to prevent mixed sensor distributions."""
+def _is_ghost_injection_field(name):
+    return name.startswith(("multipath_", "ghost_")) or name in (
+        "max_active_ghosts",
+        "wet_road_ghost_multiplier",
+        "profile_name",
+    )
 
+
+# Fields that describe what is injected into the radar, not what the radar
+# is. They are recorded with every dataset and model (``ghost_injection_dict``)
+# but stay out of the signature, so clean-trained controllers can be deployed
+# against ghosts and ghost intensity can be swept at runtime. ``profile_name``
+# is a label, not physics, so it lives here too.
+GHOST_INJECTION_FIELDS = tuple(
+    sorted(
+        item.name
+        for item in fields(RealisticRadarConfig)
+        if _is_ghost_injection_field(item.name)
+    )
+)
+
+
+def ghost_injection_dict(config):
+    """The ghost-injection settings recorded alongside, but not in, the signature."""
+
+    values = realistic_radar_config_dict(config)
+    return {name: values[name] for name in GHOST_INJECTION_FIELDS}
+
+
+def realistic_radar_config_signature(config):
+    """Stable short identity of the *sensor*, excluding ghost injection.
+
+    Two configurations that differ only in multipath mode, ghost rate, ghost
+    SNR or reflector-fitting parameters share a signature: they are the same
+    radar with a different amount of ghosting, which is exactly the variable
+    the closed-loop study manipulates. Anything else (noise, resolution,
+    detection, tracker, selector, point emission) changes it.
+    """
+
+    values = realistic_radar_config_dict(config)
     payload = json.dumps(
-        realistic_radar_config_dict(config),
+        {
+            name: value
+            for name, value in values.items()
+            if name not in GHOST_INJECTION_FIELDS
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -562,6 +647,15 @@ class RealisticRadarModel:
         self.config = config or load_realistic_radar_config()
         _validate_config(self.config)
         self._rng = np.random.default_rng(int(seed))
+        # Ghosts draw from their own stream. With one shared generator, turning
+        # ghosts on shifts every subsequent draw, so the direct-target noise in
+        # a "ghosts on" run differs from the "ghosts off" run with the same
+        # seed and the two are no longer a matched pair. Keeping the streams
+        # apart is what makes clean-vs-ghost differences attributable.
+        self._ghost_rng = np.random.default_rng(
+            np.random.SeedSequence([int(seed) & 0xFFFFFFFF, 0x67686F73])
+        )
+        self._latest_points = ()
         self._capture_debug = bool(capture_debug)
         self._detection_filter = detection_filter
         self._scan_index = 0
@@ -641,11 +735,12 @@ class RealisticRadarModel:
             * logistic
         )
 
-    def _update_correlated_error(self, object_id):
+    def _update_correlated_error(self, object_id, rng=None):
+        rng = self._rng if rng is None else rng
         previous = self._error_state.get(object_id, np.zeros(4, dtype=np.float64))
         rho = self.config.error_correlation
         innovation_scale = math.sqrt(max(0.0, 1.0 - rho * rho))
-        updated = rho * previous + innovation_scale * self._rng.normal(size=4)
+        updated = rho * previous + innovation_scale * rng.normal(size=4)
         self._error_state[object_id] = updated
         return updated
 
@@ -670,27 +765,32 @@ class RealisticRadarModel:
         rho = float(np.clip(self.config.multipath_fading_correlation, 0.0, 0.999))
         previous = self._ghost_fading.get(object_id, 0.0)
         innovation_scale = math.sqrt(max(0.0, 1.0 - rho * rho))
-        updated = rho * previous + innovation_scale * float(self._rng.normal())
+        updated = rho * previous + innovation_scale * float(self._ghost_rng.normal())
         self._ghost_fading[object_id] = updated
         if len(self._ghost_fading) > 4096:
             self._ghost_fading.clear()
         return updated * float(self.config.multipath_fading_std_db)
 
     def _measure_target(self, target, environment, source="direct"):
-        error = self._update_correlated_error(target.object_id)
+        is_ghost = source == "ghost"
+        rng = self._ghost_rng if is_ghost else self._rng
+        error = self._update_correlated_error(target.object_id, rng)
         snr_db = (
             target.snr_db
             - self._attenuation_db(target.distance_m, environment)
             + error[3] * self.config.snr_fluctuation_std_db
         )
-        if source == "ghost":
-            snr_db += self._update_ghost_fading(target.object_id)
+        if is_ghost:
+            snr_db += (
+                self._update_ghost_fading(target.object_id)
+                + self.config.ghost_snr_offset_db
+            )
         probability = self._detection_probability(snr_db)
         if source == "direct" and self._update_dropout_state(target.object_id):
             probability *= self.config.dropout_detection_scale
         if self._interference_active:
             probability *= self.config.interference_detection_scale
-        if self._rng.random() >= probability:
+        if rng.random() >= probability:
             return None
 
         inverse_sqrt_snr = 10.0 ** (-max(snr_db, -20.0) / 20.0)
@@ -740,6 +840,7 @@ class RealisticRadarModel:
             truth_object_id=int(target.object_id),
             semantic_tag=int(target.semantic_tag),
             lateral_extent_m=max(0.0, float(target.lateral_extent_m)),
+            radial_extent_m=max(0.0, float(getattr(target, "radial_extent_m", 0.0))),
             truth_parent_object_id=int(target.parent_object_id),
             reflector_id=int(target.reflector_id),
             bounce_type=str(target.bounce_type),
@@ -826,19 +927,22 @@ class RealisticRadarModel:
         )
         start_probability = min(
             1.0,
-            self.config.ghost_start_probability * multiplier,
+            self.config.ghost_start_probability
+            * multiplier
+            * self.config.ghost_rate_scale,
         )
+        rng = self._ghost_rng
         active_parents = {ghost.parent_object_id for ghost in self._ghosts.values()}
         for target in sources:
             if len(self._ghosts) >= self.config.max_active_ghosts:
                 break
             if target.object_id in active_parents:
                 continue
-            if self._rng.random() >= start_probability:
+            if rng.random() >= start_probability:
                 continue
 
             range_bias = float(
-                self._rng.uniform(
+                rng.uniform(
                     self.config.ghost_min_range_bias_m,
                     self.config.ghost_max_range_bias_m,
                 )
@@ -858,7 +962,7 @@ class RealisticRadarModel:
                 # Ground/underbody multipath tends to remain near the direct
                 # target in angle, unlike a wall-reflected virtual target.
                 azimuth_bias = float(
-                    self._rng.normal(0.0, math.radians(0.7))
+                    rng.normal(0.0, math.radians(0.7))
                 )
 
             ghost_id = self._next_ghost_id
@@ -869,9 +973,9 @@ class RealisticRadarModel:
                 semantic_tag=target.semantic_tag,
                 range_bias_m=range_bias,
                 azimuth_bias_rad=azimuth_bias,
-                velocity_scale=float(self._rng.normal(1.0, 0.05)),
+                velocity_scale=float(rng.normal(1.0, 0.05)),
                 snr_loss_db=self.config.ghost_snr_loss_db
-                + float(self._rng.exponential(2.0)),
+                + float(rng.exponential(2.0)),
                 distance_m=target.distance_m + range_bias,
                 azimuth_rad=target.azimuth_rad + azimuth_bias,
                 relative_velocity_mps=target.relative_velocity_mps,
@@ -887,7 +991,7 @@ class RealisticRadarModel:
             ghost.age += 1
             if (
                 ghost.age > self.config.ghost_max_age_scans
-                or self._rng.random() > self.config.ghost_survival_probability
+                or self._ghost_rng.random() > self.config.ghost_survival_probability
             ):
                 expired.append(ghost_id)
                 continue
@@ -1241,7 +1345,10 @@ class RealisticRadarModel:
             self._spawn_ghosts(targets, environment)
             detections.extend(self._update_ghosts(targets, environment, dt))
         elif self.config.multipath_mode == "geometry":
+            rate_scale = float(self.config.ghost_rate_scale)
             for target in geometry_targets:
+                if rate_scale < 1.0 and self._ghost_rng.random() >= rate_scale:
+                    continue
                 detection = self._measure_target(
                     target,
                     environment,
@@ -1277,6 +1384,13 @@ class RealisticRadarModel:
 
         self._update_tracks(delivered, dt)
         selected = self._select_track(path_curvature_per_m)
+        # The point-level list a point-set consumer sees: the delivered
+        # clusters spread over their object footprints. The tracker above
+        # keeps working on clusters, as a production object-list stack does.
+        self._latest_points = tuple(self._expand_points(delivered))
+        ghost_point_count = sum(
+            point.source == "ghost" for point in self._latest_points
+        )
         confirmed_count = sum(track.confirmed for track in self._tracks.values())
         self._diagnostics = {
             "profile": self.config.profile_name,
@@ -1290,6 +1404,8 @@ class RealisticRadarModel:
             "rejected_detection_count": len(rejected),
             "delivered_detection_count": len(delivered),
             "delivered_source_scan_index": delivered_source_scan_index,
+            "point_detection_count": len(self._latest_points),
+            "ghost_point_count": ghost_point_count,
             "configured_latency_scans": self.config.latency_scans,
             "direct_detection_count": generated_counts["direct"],
             "ghost_detection_count": generated_counts["ghost"],
@@ -1344,6 +1460,9 @@ class RealisticRadarModel:
                 "delivered_detections": [
                     asdict(detection) for detection in delivered
                 ],
+                "point_detections": [
+                    asdict(point) for point in self._latest_points
+                ],
                 "tracks": [
                     {
                         "track_id": track.track_id,
@@ -1378,6 +1497,47 @@ class RealisticRadarModel:
             }
         return selected
 
+    def _expand_points(self, detections):
+        """Spread each delivered cluster over its object footprint.
+
+        Clutter is a single false cell and stays a single point. Direct and
+        ghost clusters draw from their own streams so the direct point list is
+        identical between a ghosts-on and a ghosts-off run of the same seed.
+        """
+
+        if not self.config.emit_extended_points:
+            return list(detections)
+        points = []
+        for detection in detections:
+            if detection.source == "clutter":
+                points.append(detection)
+                continue
+            rng = self._ghost_rng if detection.source == "ghost" else self._rng
+            points.extend(
+                expand_detection(
+                    detection,
+                    rng,
+                    mean_points=self.config.points_per_object_mean,
+                    range_resolution_m=self.config.range_resolution_m,
+                    doppler_resolution_mps=self.config.doppler_resolution_mps,
+                    azimuth_resolution_rad=self._azimuth_resolution_rad,
+                    minimum_range_m=self.config.minimum_forward_distance_m,
+                    maximum_range_m=self.config.max_range_m,
+                    footprint_scale=self.config.point_footprint_scale,
+                    micro_doppler_scale=self.config.micro_doppler_scale,
+                )
+            )
+        return points
+
+    def latest_points(self):
+        """Point-level detections delivered on the most recent cycle.
+
+        Returned as an immutable tuple of ``RadarDetection`` so callers can
+        keep a reference without copying; it is replaced, never mutated.
+        """
+
+        return self._scan_index, self._latest_points
+
     def diagnostics(self):
         """Return a shallow copy of the most recent sensor diagnostics."""
 
@@ -1397,6 +1557,7 @@ class RealisticRadarModel:
             "accepted_detections",
             "rejected_detections",
             "delivered_detections",
+            "point_detections",
             "tracks",
         ):
             result[key] = [

@@ -16,49 +16,19 @@ import math
 
 import numpy as np
 
+# The footprint and micro-Doppler tables live with the live sensor's
+# extended-target emission so the exporter and the sensor agree on them.
+from ..extended_target import (  # noqa: F401  (re-exported names)
+    CLASS_FOOTPRINT_M as _CLASS_FOOTPRINT_M,
+    MICRO_DOPPLER_AMPLITUDE as _MICRO_DOPPLER_AMPLITUDE,
+    class_id_for_semantic_tag,
+)
+
 
 # RGD-style resolution grid applied to every expanded point.
 RANGE_RESOLUTION_M = 0.15
 AZIMUTH_RESOLUTION_RAD = math.radians(1.8)
 DOPPLER_RESOLUTION_MPS = 0.087
-
-
-def class_id_for_semantic_tag(semantic_tag):
-    """Map CARLA semantic tags to Radar Ghost Dataset class ids."""
-
-    return {
-        12: 1,
-        13: 2,
-        19: 2,
-        14: 3,
-        21: 3,
-        15: 4,
-        16: 4,
-        17: 4,
-        18: 5,
-    }.get(int(semantic_tag), 3)
-
-
-# Physical footprint (radial depth m, lateral width m) per RGD class id.
-_CLASS_FOOTPRINT_M = {
-    1: (0.45, 0.50),   # pedestrian
-    2: (1.80, 0.70),   # cyclist / rider
-    3: (4.40, 1.80),   # car
-    4: (9.00, 2.50),   # truck / bus
-    5: (2.20, 0.90),   # motorcycle
-}
-
-# Micro-Doppler spread amplitude (m/s) per class. Pedestrian limbs swing the
-# per-point radial velocity by roughly +/-0.6-1.2 m/s around the torso mean;
-# vehicle superstructure/wheel returns vary only slightly. Ghost points
-# inherit their parent's spread, exactly as path physics dictates.
-_MICRO_DOPPLER_AMPLITUDE = {
-    1: (0.55, 0.65),
-    2: (0.35, 0.45),
-    3: (0.06, 0.10),
-    4: (0.05, 0.09),
-    5: (0.15, 0.25),
-}
 
 
 def _quantize(value, step):

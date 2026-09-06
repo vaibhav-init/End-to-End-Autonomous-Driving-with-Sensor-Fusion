@@ -16,6 +16,85 @@ Fields (from the thesis plan):
 import csv
 import os
 import math
+import sys
+
+_CARLA4_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _CARLA4_DIR not in sys.path:
+    sys.path.insert(0, _CARLA4_DIR)
+
+from radar.detection_log import DetectionLog, sidecar_path  # noqa: E402
+
+
+# Corridor used to decide whether a ground-truth actor is "in path". Matches
+# the radar selector's corridor (half width plus growth with range) so the
+# phantom-brake metric and the sensor agree on what counts as ahead.
+PATH_HALF_WIDTH_M = 1.8
+PATH_WIDTH_GROWTH_PER_M = 0.004
+PATH_MAX_FORWARD_M = 100.0
+
+
+def actor_in_ego_path(ego, actor):
+    """Whether ``actor`` sits ahead of the ego inside the driving corridor.
+
+    Uses transforms only, so it works on any road segment without map
+    queries. Lateral extent of the actor is included, as the selector does.
+    """
+
+    if ego is None or actor is None or not actor.is_alive:
+        return False
+    ego_transform = ego.get_transform()
+    forward = ego_transform.get_forward_vector()
+    right = ego_transform.get_right_vector()
+    delta = actor.get_location() - ego_transform.location
+    longitudinal = delta.x * forward.x + delta.y * forward.y
+    lateral = delta.x * right.x + delta.y * right.y
+    if not 0.0 < longitudinal < PATH_MAX_FORWARD_M:
+        return False
+    half_width = PATH_HALF_WIDTH_M + PATH_WIDTH_GROWTH_PER_M * longitudinal
+    try:
+        extent = float(actor.bounding_box.extent.y)
+    except (AttributeError, RuntimeError):
+        extent = 0.9
+    return abs(lateral) - extent <= half_width
+
+
+def nearest_in_path_actor(world, ego, type_filters=("vehicle.*", "walker.pedestrian.*")):
+    """Privileged nearest in-path actor ahead of the ego, or None.
+
+    Returns ``(actor, distance_m)``. Used by the exposure scenario, where any
+    vehicle in the traffic may become the legitimate reason to brake, and by
+    the privileged collection teacher.
+    """
+
+    best = None
+    best_distance = float("inf")
+    ego_transform = ego.get_transform()
+    forward = ego_transform.get_forward_vector()
+    right = ego_transform.get_right_vector()
+    for pattern in type_filters:
+        for actor in world.get_actors().filter(pattern):
+            if actor.id == ego.id:
+                continue
+            try:
+                delta = actor.get_location() - ego_transform.location
+            except RuntimeError:
+                continue
+            longitudinal = delta.x * forward.x + delta.y * forward.y
+            if not 0.0 < longitudinal < PATH_MAX_FORWARD_M:
+                continue
+            lateral = delta.x * right.x + delta.y * right.y
+            half_width = PATH_HALF_WIDTH_M + PATH_WIDTH_GROWTH_PER_M * longitudinal
+            try:
+                extent = float(actor.bounding_box.extent.y)
+            except (AttributeError, RuntimeError):
+                extent = 0.5
+            if abs(lateral) - extent > half_width:
+                continue
+            distance = math.sqrt(delta.x ** 2 + delta.y ** 2)
+            if distance < best_distance:
+                best = actor
+                best_distance = distance
+    return best, (best_distance if best is not None else None)
 
 
 class GroundTruthLogger:
@@ -32,6 +111,7 @@ class GroundTruthLogger:
         "gt_npc_speed_kmh",
         "gt_distance_to_npc_m",
         "gt_relative_velocity",
+        "gt_npc_in_path",
         "gt_tl_state",
         "throttle",
         "brake",
@@ -73,10 +153,13 @@ class GroundTruthLogger:
         "radar_selected_source",
         "radar_selected_confidence",
         "radar_selected_azimuth_deg",
+        "radar_point_detection_count",
+        "radar_ghost_point_count",
         "radar_distance_m",
         "radar_relative_velocity_mps",
         "radar_obstacle_speed_mps",
         "radar_last_error",
+        "controller_target_speed_mps",
     ]
 
     def __init__(
@@ -104,6 +187,10 @@ class GroundTruthLogger:
         self._rows = 0
         self._collision_count = 0
         self._min_distance = float("inf")
+        # Per-scan detection lists go to a sidecar next to the CSV; see
+        # radar/detection_log.py. Written on close() only if anything arrived.
+        self._detections = DetectionLog()
+        self.detections_path = sidecar_path(self.filepath)
 
     def log(
         self,
@@ -120,10 +207,25 @@ class GroundTruthLogger:
         tl_state=0,
         ego_accel=0.0,
         radar_diagnostics=None,
+        npc_in_path=None,
+        detections=None,
     ):
-        """Record one tick of ground truth data."""
+        """Record one tick of ground truth data.
+
+        ``npc_in_path`` is the ground-truth answer to "is the logged actor a
+        legitimate reason to brake"; the phantom-brake metric depends on it.
+        ``detections`` is the driver's latest point-level scan (a dict from
+        ``get_detections``) and lands in the sidecar.
+        """
         if distance_to_npc is not None:
             self._min_distance = min(self._min_distance, distance_to_npc)
+        if detections is not None:
+            self._detections.append(
+                step,
+                detections.get("timestamp"),
+                detections.get("scan_index", 0),
+                detections.get("detections", ()),
+            )
 
         # Compute TTC safely
         rel_vel = relative_velocity if relative_velocity is not None else 0.0
@@ -156,6 +258,9 @@ class GroundTruthLogger:
             "gt_npc_speed_kmh": round(npc_speed_kmh, 4) if npc_speed_kmh is not None else "",
             "gt_distance_to_npc_m": round(dist, 4),
             "gt_relative_velocity": round(rel_vel, 4),
+            "gt_npc_in_path": (
+                "" if npc_in_path is None else int(bool(npc_in_path))
+            ),
             "gt_tl_state": tl_state,
             "throttle": round(throttle, 4),
             "brake": round(brake, 4),
@@ -235,6 +340,10 @@ class GroundTruthLogger:
             "radar_selected_azimuth_deg": radar.get(
                 "selected_azimuth_deg", ""
             ),
+            "radar_point_detection_count": radar.get(
+                "point_detection_count", ""
+            ),
+            "radar_ghost_point_count": radar.get("ghost_point_count", ""),
             "radar_distance_m": radar.get("controller_distance_m", ""),
             "radar_relative_velocity_mps": radar.get(
                 "controller_relative_velocity_mps", ""
@@ -243,6 +352,9 @@ class GroundTruthLogger:
                 "controller_obstacle_speed_mps", ""
             ),
             "radar_last_error": radar.get("last_error", ""),
+            "controller_target_speed_mps": radar.get(
+                "controller_target_speed_mps", ""
+            ),
         }
         self._writer.writerow(row)
         self._rows += 1
@@ -262,6 +374,11 @@ class GroundTruthLogger:
     def close(self):
         if self._file and not self._file.closed:
             self._file.close()
+            if self._detections.frame_count:
+                try:
+                    self._detections.save(self.detections_path)
+                except OSError as exc:
+                    print(f"  [logger] could not write {self.detections_path}: {exc}")
 
     def __del__(self):
         self.close()

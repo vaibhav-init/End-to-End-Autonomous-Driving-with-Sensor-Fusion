@@ -24,6 +24,9 @@ import sys
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from metrics import longitudinal_cost_metrics  # noqa: E402
+
 # Sim rate used by the scenarios (carla4/scenarios/config.py FPS); used to turn
 # reaction step counts into seconds.
 FPS = 20
@@ -92,6 +95,11 @@ def per_run_metrics(df):
                 (pre_event["brake"] > BRAKE_REACTION_THRESHOLD).mean()
             )
 
+    ghost_selected_fraction = np.nan
+    if "radar_selected_source" in df.columns:
+        source = df["radar_selected_source"].astype(str)
+        ghost_selected_fraction = float((source == "ghost").mean())
+
     return {
         "collided": collided,
         "min_dist_m": min_dist,
@@ -99,6 +107,9 @@ def per_run_metrics(df):
         "peak_decel_mps2": peak_decel,
         "reaction_s": reaction_s,
         "pre_event_brake_fraction": pre_event_brake_fraction,
+        "ghost_selected_fraction": ghost_selected_fraction,
+        # The false-positive side of the trade-off; see metrics.py.
+        **longitudinal_cost_metrics(df, fps=FPS),
     }
 
 
@@ -205,12 +216,23 @@ def build_summary(df):
         mean_peak_decel=("peak_decel_mps2", "mean"),
         mean_reaction_s=("reaction_s", "mean"),
         mean_pre_event_brake_fraction=("pre_event_brake_fraction", "mean"),
+        phantom_brake_events=("phantom_brake_events", "sum"),
+        distance_km=("distance_km", "sum"),
+        mean_jerk_rms_mps3=("jerk_rms_mps3", "mean"),
+        std_jerk_rms_mps3=("jerk_rms_mps3", "std"),
+        mean_ghost_selected_fraction=("ghost_selected_fraction", "mean"),
     ).reset_index()
     summary["collision_rate"] = summary["n_collisions"] / summary["n_runs"]
+    summary["phantom_brake_per_km"] = summary["phantom_brake_events"] / summary[
+        "distance_km"
+    ].replace(0.0, np.nan)
     cols = ["driver", "scenario", "fog", "n_runs", "n_collisions",
             "collision_rate", "mean_min_dist_m", "mean_min_ttc_s",
             "mean_peak_decel", "mean_reaction_s",
-            "mean_pre_event_brake_fraction"]
+            "mean_pre_event_brake_fraction",
+            "phantom_brake_events", "distance_km", "phantom_brake_per_km",
+            "mean_jerk_rms_mps3", "std_jerk_rms_mps3",
+            "mean_ghost_selected_fraction"]
     return summary[cols].sort_values(["scenario", "fog", "driver"])
 
 

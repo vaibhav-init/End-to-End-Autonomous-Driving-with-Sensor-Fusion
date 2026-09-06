@@ -89,6 +89,7 @@ class MultipathTarget:
     bounce_order: int
     reflection_point_xy_m: tuple
     lateral_extent_m: float = 0.0
+    radial_extent_m: float = 0.0
 
 
 def _zigzag(value):
@@ -466,6 +467,9 @@ def generate_multipath_targets(targets, reflectors, config):
                             float(reflection_point[1]),
                         ),
                         lateral_extent_m=float(target.lateral_extent_m),
+                        radial_extent_m=float(
+                            getattr(target, "radial_extent_m", 0.0) or 0.0
+                        ),
                     )
                 )
 

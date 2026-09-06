@@ -26,6 +26,9 @@ import sys
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from metrics import longitudinal_cost_metrics  # noqa: E402
+
 FPS = 20
 OBSTACLE_PRESENT_MAX_M = 100.0
 BRAKE_THRESHOLD = 0.3  # brake > this = "reacting"
@@ -140,11 +143,32 @@ def analyze_single_run(csv_path):
     ttc = ttc[(ttc > 0) & (ttc < 900)]
     min_ttc = float(ttc.min()) if not ttc.empty else float("nan")
 
+    cost = longitudinal_cost_metrics(df, fps=FPS)
+    ghost_selected = "—"
+    if "radar_selected_source" in df.columns:
+        ghost_selected = round(
+            100.0 * float((df["radar_selected_source"].astype(str) == "ghost").mean()),
+            1,
+        )
+
     return {
         "scenario": scenario,
         "fog": fog,
         "seed": seed,
         "collided": collided,
+        "phantom_events": cost["phantom_brake_events"],
+        "phantom_per_km": (
+            round(cost["phantom_brake_per_km"], 2)
+            if not np.isnan(cost["phantom_brake_per_km"])
+            else "—"
+        ),
+        "distance_km": round(cost["distance_km"], 3),
+        "jerk_rms": (
+            round(cost["jerk_rms_mps3"], 2)
+            if not np.isnan(cost["jerk_rms_mps3"])
+            else "—"
+        ),
+        "ghost_selected_pct": ghost_selected,
         "stopping_dist_m": round(stopping_dist, 1),
         "speed_at_closest_kmh": round(speed_at_closest, 1),
         "collision_speed_kmh": round(collision_speed, 1) if not np.isnan(collision_speed) else "—",
@@ -183,7 +207,9 @@ def load_all_runs(runs):
 SCENARIO_NAMES = {
     1: "S1: Lead Vehicle Stopped",
     2: "S2: Lead Vehicle Decelerating",
+    3: "S3: Lead Vehicle Constant Speed",
     4: "S4: Cut-In from Adjacent Lane",
+    5: "S5: Ghost-Exposure Drive",
 }
 
 WEATHER_NAMES = {
@@ -220,13 +246,13 @@ def print_results(results):
                 continue
 
             print(f"\n  Driver: {driver.upper()}")
-            print(f"  {'─' * 88}")
-            print(f"  {'Weather':<16} {'Collision':<11} {'Stop Dist':<11} "
-                  f"{'React Time':<12} {'Pre-Brake':<11} {'Peak Decel':<12} {'Time→Stop':<11} "
-                  f"{'Min TTC'}")
-            print(f"  {'─' * 88}")
+            print(f"  {'─' * 118}")
+            print(f"  {'Weather':<14} {'Seed':<5} {'Collision':<9} {'Stop Dist':<10} "
+                  f"{'React':<8} {'Pre-Brake':<10} {'PeakDecel':<10} {'T→Stop':<8} "
+                  f"{'MinTTC':<8} {'Phantom/km':<11} {'Jerk':<7} {'Ghost%'}")
+            print(f"  {'─' * 118}")
 
-            for r in sorted(runs, key=lambda x: -x["fog"]):
+            for r in sorted(runs, key=lambda x: (-x["fog"], x["seed"])):
                 weather = WEATHER_NAMES.get(r["fog"], f"fog={r['fog']}")
                 collision_str = "💥 YES" if r["collided"] else "✅ No"
                 pre_brake = (
@@ -234,13 +260,16 @@ def print_results(results):
                     if r["pre_event_brake_pct"] != "—"
                     else "—"
                 )
-                print(f"  {weather:<16} {collision_str:<11} "
-                      f"{r['stopping_dist_m']:>6.1f}m    "
-                      f"{str(r['reaction_time_s']):>7}s    "
-                      f"{pre_brake:>7}    "
-                      f"{r['peak_decel_mps2']:>6.1f}m/s²   "
-                      f"{str(r['time_to_stop_s']):>7}s    "
-                      f"{str(r['min_ttc_s']):>6}s")
+                print(f"  {weather:<14} {r['seed']:<5d} {collision_str:<9} "
+                      f"{r['stopping_dist_m']:>6.1f}m   "
+                      f"{str(r['reaction_time_s']):>6}s "
+                      f"{pre_brake:>9} "
+                      f"{r['peak_decel_mps2']:>6.1f}m/s² "
+                      f"{str(r['time_to_stop_s']):>6}s "
+                      f"{str(r['min_ttc_s']):>6}s "
+                      f"{str(r['phantom_per_km']):>10} "
+                      f"{str(r['jerk_rms']):>6} "
+                      f"{str(r['ghost_selected_pct']):>6}")
 
             # Averages
             avg_stop = np.nanmean([r["stopping_dist_m"] for r in runs])
@@ -268,11 +297,24 @@ def print_results(results):
                 if not np.isnan(avg_pre_brake)
                 else "—"
             )
-            print(f"  {'─' * 88}")
+            total_phantom = sum(r["phantom_events"] for r in runs)
+            total_km = sum(r["distance_km"] for r in runs)
+            phantom_per_km = (
+                f"{total_phantom / total_km:.2f}" if total_km > 1e-6 else "—"
+            )
+            jerk_values = [r["jerk_rms"] for r in runs if r["jerk_rms"] != "—"]
+            jerk_str = (
+                f"{np.mean(jerk_values):.2f}±{np.std(jerk_values):.2f}"
+                if jerk_values
+                else "—"
+            )
+            print(f"  {'─' * 118}")
             print(
-                f"  {'AVERAGE':<16} {n_collisions}/{len(runs)} hits  "
-                f"{avg_stop:>6.1f}m    {avg_react_str:>8}    "
-                f"{avg_pre_str:>7}    {avg_decel:>6.1f}m/s²"
+                f"  {'AVERAGE':<20} {n_collisions}/{len(runs)} hits  "
+                f"{avg_stop:>6.1f}m   {avg_react_str:>7} "
+                f"{avg_pre_str:>9} {avg_decel:>6.1f}m/s²   "
+                f"phantom {total_phantom} events over {total_km:.2f} km "
+                f"= {phantom_per_km}/km   jerk {jerk_str} m/s³"
             )
 
     # Cross-driver comparison
