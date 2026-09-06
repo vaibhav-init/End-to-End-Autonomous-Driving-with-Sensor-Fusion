@@ -43,9 +43,14 @@ ACCEL_SCALE_MPS2 = 5.0
 # Same corridor as the radar selector, used for the cruise floor only.
 PATH_HALF_WIDTH_M = 1.8
 PATH_WIDTH_GROWTH_PER_M = 0.004
-# Share of the point budget held for older scans so the age channel stays
-# informative when one dense scan could fill the budget alone.
-CONTEXT_RESERVE_FRACTION = 0.25
+# Point budget order. Lateral bands (metres from the ego axis) fill the
+# budget in turn, every scan of the window inside each band, newest first:
+# 0-2 m is the ego lane, up to CONTEXT_HALF_WIDTH_M covers both neighbouring
+# lanes, where the parent of a mirrored ghost sits. Points farther out
+# (guardrails, buildings) only take leftover budget. Geometry and age only:
+# the selection never reads a source label.
+LATERAL_BAND_M = 2.0
+CONTEXT_HALF_WIDTH_M = 8.0
 
 SOURCE_CODES = {"ego": 0, "direct": 1, "ghost": 2, "clutter": 3, "other": 4}
 
@@ -82,11 +87,20 @@ def _scan_columns(scan):
     )
 
 
-def _evenly(indices, count):
-    if len(indices) <= count:
-        return indices
-    positions = np.linspace(0, len(indices) - 1, count, dtype=np.int64)
-    return indices[positions]
+def _select_points(r, az, age, max_points):
+    """Indices of the points that fit the budget, in their original order."""
+
+    if r.size <= max_points:
+        return np.arange(r.size)
+    lateral = np.abs(r * np.sin(az))
+    band = np.minimum(
+        np.floor(lateral / LATERAL_BAND_M),
+        CONTEXT_HALF_WIDTH_M / LATERAL_BAND_M,
+    ).astype(np.int64)
+    band[lateral > CONTEXT_HALF_WIDTH_M] = 1_000
+    # lexsort: last key is primary -> band, then age (newest first), then range.
+    order = np.lexsort((r, age, band))
+    return np.sort(order[:max_points])
 
 
 def build_window_tokens(scans, ego_speed_mps, ego_accel_mps2, max_points):
@@ -130,17 +144,7 @@ def build_window_tokens(scans, ego_speed_mps, ego_accel_mps2, max_points):
     age = np.concatenate(ages)
     src = np.concatenate(sources)
 
-    # Budget: current scan first, but never let it starve the context.
-    indices = np.arange(r.size)
-    current = indices[age <= 1.0e-6]
-    context = indices[age > 1.0e-6]
-    if r.size > max_points:
-        reserve = min(len(context), int(round(max_points * CONTEXT_RESERVE_FRACTION)))
-        current_budget = max(1, max_points - reserve)
-        current = _evenly(current, current_budget)
-        context = _evenly(context, max_points - len(current))
-        indices = np.concatenate((context, current))
-        indices.sort()
+    indices = _select_points(r, az, age, max_points)
     r, az, vr, snr, age, src = (
         r[indices], az[indices], vr[indices], snr[indices], age[indices], src[indices]
     )
@@ -318,6 +322,20 @@ class ScanHistory:
                 "detections": tuple(scan.get("detections", ())),
             }
         )
+        # Cover the same time span the offline builder covers: window_frames
+        # simulator frames, i.e. (window_frames - 1) / fps seconds back from
+        # the latest scan. A 10 Hz radar in a 20 Hz loop yields half as many
+        # scans as frames; counting scans would double the window at
+        # inference relative to training.
+        latest = self._scans[-1]["timestamp"]
+        if latest is not None:
+            span_s = (self.window_frames - 0.5) / self.fps
+            self._scans = [
+                scan
+                for scan in self._scans
+                if scan["timestamp"] is None
+                or float(latest) - float(scan["timestamp"]) <= span_s
+            ]
         if len(self._scans) > self.window_frames:
             del self._scans[: len(self._scans) - self.window_frames]
         return True

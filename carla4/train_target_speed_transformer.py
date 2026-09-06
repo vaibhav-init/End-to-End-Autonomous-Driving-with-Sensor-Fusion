@@ -209,7 +209,7 @@ def main():
                         help="dataset_config.json (default: <data>/dataset_config.json)")
     parser.add_argument("--output", default="model_transformer")
     parser.add_argument("--window-frames", type=int, default=10)
-    parser.add_argument("--max-points", type=int, default=128)
+    parser.add_argument("--max-points", type=int, default=256)
     parser.add_argument("--d-model", type=int, default=64)
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--layers", type=int, default=2)

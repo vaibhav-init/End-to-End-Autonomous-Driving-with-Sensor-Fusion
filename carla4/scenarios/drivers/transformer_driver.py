@@ -98,7 +98,7 @@ class TransformerDriver(Driver):
         self.max_range = RADAR_RANGE_M
         self.max_target_speed_mps = MAX_TARGET_SPEED_KMH / 3.6
         self.window_frames = 10
-        self.max_points = 128
+        self.max_points = 256
         self.history = None
         self.steering = None
         self.controller = None
@@ -119,7 +119,7 @@ class TransformerDriver(Driver):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model, self.model_config = load_model(self.model_dir, device=self.device)
         self.window_frames = int(self.model_config.get("window_frames", 10))
-        self.max_points = int(self.model_config.get("max_points", 128))
+        self.max_points = int(self.model_config.get("max_points", 256))
         self.max_range = float(self.model_config.get("radar_range_m", RADAR_RANGE_M))
         self.max_target_speed_mps = (
             min(float(self.model_config.get("max_target_speed_kmh", MAX_TARGET_SPEED_KMH)),
