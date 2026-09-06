@@ -222,6 +222,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--worker-timeout-s",
+        type=float,
+        default=None,
+        help=(
+            "kill a sequence worker that has not exited after this many "
+            "seconds and count the sequence as failed (default: 120 s + 8x "
+            "the warmup+capture time). A worker whose cleanup blocks on a "
+            "synchronous-mode RPC otherwise stalls the whole run"
+        ),
+    )
+    parser.add_argument(
         "--sequence-retries",
         type=int,
         default=1,
@@ -1464,6 +1475,17 @@ def collect_sequence(client, args, sequence_index):
                 **aggregate,
             }
     finally:
+        # Leave synchronous mode first: with nobody ticking, sensor and actor
+        # destruction block inside the RPC and the worker never exits (seen
+        # after a failed placement validation: all threads parked, no CSV).
+        try:
+            traffic_manager.set_synchronous_mode(False)
+        except RuntimeError:
+            pass
+        try:
+            world.apply_settings(original_settings)
+        except RuntimeError:
+            pass
         if radar is not None:
             radar.cleanup()
         for controller_id in walker_controller_ids:
@@ -1480,9 +1502,41 @@ def collect_sequence(client, args, sequence_index):
             client.apply_batch(
                 [carla.command.DestroyActor(actor_id) for actor_id in destroy_ids]
             )
-        traffic_manager.set_synchronous_mode(False)
-        world.apply_settings(original_settings)
     return np.asarray(rows, dtype=RADAR_DTYPE), diagnostics_summary
+
+
+def _reset_world_after_killed_worker(args):
+    """Return CARLA to asynchronous mode and drop a dead worker's actors."""
+
+    carla = _carla_module()
+    try:
+        client = carla.Client(args.host, args.port)
+        client.set_timeout(30.0)
+        world = client.get_world()
+        settings = world.get_settings()
+        settings.synchronous_mode = False
+        settings.fixed_delta_seconds = None
+        world.apply_settings(settings)
+        leftovers = [
+            actor
+            for actor in world.get_actors()
+            if actor.type_id.split(".")[0]
+            in ("sensor", "vehicle", "walker", "controller")
+        ]
+        for actor in leftovers:
+            if actor.type_id.startswith("sensor"):
+                try:
+                    actor.stop()
+                except RuntimeError:
+                    pass
+        if leftovers:
+            client.apply_batch_sync(
+                [carla.command.DestroyActor(actor.id) for actor in leftovers],
+                True,
+            )
+        print(f"  reset CARLA to asynchronous mode; destroyed {len(leftovers)} leftover actors")
+    except RuntimeError as error:
+        print(f"  could not reset CARLA after the killed worker: {error}")
 
 
 def _add_point_statistics(counts, radar_data, diagnostics):
@@ -1764,8 +1818,21 @@ def _run_supervisor(args):
                 "--worker-index",
                 str(sequence_index),
             ]
-            result = subprocess.run(command)
-            return_code = int(result.returncode)
+            timeout_s = (
+                float(args.worker_timeout_s)
+                if args.worker_timeout_s is not None
+                else 120.0 + 8.0 * (float(args.warmup) + float(args.duration))
+            )
+            try:
+                result = subprocess.run(command, timeout=timeout_s)
+                return_code = int(result.returncode)
+            except subprocess.TimeoutExpired:
+                print(
+                    f"Sequence {sequence_index + 1}/{args.sequences}: worker "
+                    f"did not exit within {timeout_s:.0f} s; killed"
+                )
+                return_code = -9
+                _reset_world_after_killed_worker(args)
             if return_code == 0 and summary_path.is_file():
                 completed_indices.add(sequence_index)
                 break
