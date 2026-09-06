@@ -176,6 +176,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--allow-range-fallback",
+        action="store_true",
+        help=(
+            "if no placement satisfies the range/gap/azimuth gates, accept any "
+            "geometry instead of failing the sequence. Off by default: a "
+            "cyclist placed at 53 m is not an RGD-regime sequence"
+        ),
+    )
+    parser.add_argument(
         "--surface-distance-target",
         type=float,
         default=2.0,
@@ -865,6 +874,7 @@ def _configure_controlled_target(
     surface_distance_target_m=None,
     motion_direction="tangent",
     exclude_reflectors=(),
+    allow_fallback=False,
 ):
     """Put a CARLA actor into geometry known to produce physical paths."""
 
@@ -893,6 +903,14 @@ def _configure_controlled_target(
         or surface_distance_max_m is not None
         or type2_azimuth_max_rad is not None
     )
+    if not candidates and constrained and not allow_fallback:
+        raise RuntimeError(
+            "No controlled placement inside the requested geometry band "
+            f"(range {range_min_m:.0f}-{range_max_m} m, surface <= "
+            f"{surface_distance_max_m} m) among {len(reflectors)} reflectors; "
+            "the sequence is skipped rather than exported off-regime "
+            "(--allow-range-fallback overrides)."
+        )
     if not candidates and constrained:
         print(
             f"  no placement inside range {range_min_m:.0f}-"
@@ -1226,6 +1244,7 @@ def collect_sequence(client, args, sequence_index):
             type2_azimuth_max_rad=math.radians(args.type2_azimuth_max_deg),
             surface_distance_target_m=args.surface_distance_target,
             motion_direction=args.motion_direction,
+            allow_fallback=bool(args.allow_range_fallback),
         )
         controlled_plan = _configure_controlled_target(
             radar,
