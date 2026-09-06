@@ -167,6 +167,27 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--surface-distance-target",
+        type=float,
+        default=2.0,
+        help=(
+            "preferred target-to-reflector distance in metres; among equally "
+            "robust placements the closest gap wins. The second-order ghost "
+            "trails its parent by about this gap (real: ~1.7 m)"
+        ),
+    )
+    parser.add_argument(
+        "--motion-direction",
+        choices=("tangent", "radial"),
+        default="tangent",
+        help=(
+            "walk the controlled target along the reflector (tangent) or "
+            "along the radar line of sight (radial). Real ghost/parent "
+            "Doppler ratios near 0.9 need the object moving parallel to the "
+            "surface; radial motion into an oblique wall gives ~0.5"
+        ),
+    )
+    parser.add_argument(
         "--type2-azimuth-max-deg",
         type=float,
         default=40.0,
@@ -267,7 +288,7 @@ def _cmto_label(detection, main_object_ids=None):
 
 
 def _detection_row(sequence_id, frame, timestamp, index, detection,
-                   main_object_ids=None):
+                   main_object_ids=None, amplitude_gain=1.0):
     distance = float(detection["distance_m"])
     # Convert CARLA x-forward/y-right to the real dataset's y-left convention.
     azimuth = -float(detection["azimuth_rad"])
@@ -293,7 +314,7 @@ def _detection_row(sequence_id, frame, timestamp, index, detection,
         distance,
         azimuth,
         -float(detection["relative_velocity_mps"]),
-        float(snr_db_to_amplitude(detection["snr_db"])),
+        float(snr_db_to_amplitude(detection["snr_db"])) * float(amplitude_gain),
         identifier,
         _cmto_label(detection, main_object_ids),
         parent_id,
@@ -631,6 +652,8 @@ def _controlled_target_candidates(
     range_max_m=None,
     surface_distance_max_m=None,
     type2_azimuth_max_rad=None,
+    surface_distance_target_m=None,
+    motion_direction="tangent",
 ):
     """Yield target positions whose path is accepted by the production solver.
 
@@ -728,15 +751,16 @@ def _controlled_target_candidates(
                     config,
                 )
                 robust_count += int(bool(nearby_paths))
-            # The main object walks toward and away from the stationary ego
-            # (radial motion, parallel to the radar line of sight), so the
-            # motion robustness probe must stress the radial direction, not
-            # the reflector tangent. Radial motion is what changes the
-            # range-Doppler geometry the ghost inherits.
+            # Probe the geometry along the line the object will actually
+            # walk. Real ghost/parent Doppler ratios (~0.9 second order,
+            # ~0.8 third order) only come out of motion parallel to the
+            # reflector; radial motion into an oblique wall mirrors the
+            # velocity and halves the ghost Doppler.
             radial_unit = target_xy / max(
                 float(np.linalg.norm(target_xy)),
                 1.0e-9,
             )
+            motion_unit = tangent if motion_direction == "tangent" else radial_unit
             motion_amplitude = 0.75
             for candidate_amplitude in (1.5, 2.5, 4.0):
                 endpoint_paths = [
@@ -745,7 +769,7 @@ def _controlled_target_candidates(
                             _probe_target(
                                 actor_id,
                                 target_xy
-                                + sign * candidate_amplitude * radial_unit,
+                                + sign * candidate_amplitude * motion_unit,
                                 semantic_tag,
                             )
                         ],
@@ -763,13 +787,18 @@ def _controlled_target_candidates(
                     for path in paths
                 }
             )
-            # Among equally robust placements prefer the smallest surface
-            # gap: the type-1 ghost trails its parent by about the gap, and
-            # the real offset is ~1.6 m.
+            # Among equally robust placements prefer the gap closest to the
+            # requested one: the type-1 ghost trails its parent by about the
+            # gap, and the real offset is ~1.7 m.
+            gap_penalty = (
+                abs(surface_distance - float(surface_distance_target_m))
+                if surface_distance_target_m is not None
+                else surface_distance
+            )
             score = (
                 robust_count,
                 len(path_families),
-                -surface_distance,
+                -gap_penalty,
                 motion_amplitude,
                 min(float(path.snr_db) for path in paths),
                 min(float(reflector.length_m), 20.0),
@@ -783,6 +812,7 @@ def _controlled_target_candidates(
                 "path_families": path_families,
                 "robust_count": robust_count,
                 "motion_amplitude_m": motion_amplitude,
+                "motion_unit_sensor": np.asarray(motion_unit, dtype=np.float64),
             }
 
 
@@ -797,6 +827,8 @@ def _configure_controlled_target(
     range_max_m=None,
     surface_distance_max_m=None,
     type2_azimuth_max_rad=None,
+    surface_distance_target_m=None,
+    motion_direction="tangent",
 ):
     """Put a CARLA actor into geometry known to produce physical paths."""
 
@@ -815,6 +847,8 @@ def _configure_controlled_target(
                 range_max_m=range_max_m,
                 surface_distance_max_m=surface_distance_max_m,
                 type2_azimuth_max_rad=type2_azimuth_max_rad,
+                surface_distance_target_m=surface_distance_target_m,
+                motion_direction=motion_direction,
             )
         )
     constrained = (
@@ -884,19 +918,23 @@ def _configure_controlled_target(
         else float(sensor_transform.location.z) - 0.65
     )
 
-    # Motion direction: the unit vector from the ego sensor toward the
-    # target in sensor coordinates, rotated into world coordinates. The
-    # target walks along this line (toward and away from the ego), so the
-    # whole walking speed projects onto the radial-velocity axis and the
-    # measured Doppler equals the configured walking speed.
+    # Motion direction: the candidate's probed unit vector (reflector
+    # tangent by default, or the sensor-to-target line) in sensor
+    # coordinates, rotated into world coordinates. Only the projection onto
+    # the line of sight reaches the Doppler axis, so the expected mean |vr|
+    # is the walking speed times |cos| of the angle to the line of sight.
     target_range = max(float(np.linalg.norm(target_xy)), 1.0e-9)
     radial_sensor = np.asarray(target_xy, dtype=np.float64) / target_range
+    motion_sensor = np.asarray(candidate["motion_unit_sensor"], dtype=np.float64)
     motion_dir_world = np.array(
         (
-            cosine * radial_sensor[0] - sine * radial_sensor[1],
-            sine * radial_sensor[0] + cosine * radial_sensor[1],
+            cosine * motion_sensor[0] - sine * motion_sensor[1],
+            sine * motion_sensor[0] + cosine * motion_sensor[1],
         ),
         dtype=np.float64,
+    )
+    expected_radial_speed = float(target_speed_mps) * abs(
+        float(np.dot(motion_sensor, radial_sensor))
     )
     tangent = np.asarray(reflector.tangent_xy, dtype=np.float64)
     tangent_world = np.array(
@@ -927,6 +965,8 @@ def _configure_controlled_target(
         "semantic_tag": int(semantic_tag),
         "target_type": str(target_type),
         "target_speed_mps": float(target_speed_mps),
+        "expected_radial_speed_mps": expected_radial_speed,
+        "motion_direction": str(motion_direction),
         "amplitude_m": float(candidate["motion_amplitude_m"]),
         # Triangular (constant-speed) profile: with period = 4*amplitude/speed
         # the target walks at exactly the configured speed between the two
@@ -978,9 +1018,8 @@ def _update_controlled_target(plan, step, fps):
         float(plan["amplitude_m"]),
         float(plan["period_s"]),
     )
-    # Radial motion: the target walks toward and away from the ego along the
-    # radar line of sight, so the full walking speed projects onto the
-    # radial-velocity axis and the measured Doppler is v_r = v * cos(0) = v.
+    # Back-and-forth motion along the planned direction; the Doppler the
+    # radar sees is the projection onto the line of sight.
     location_xy = plan["base_world_xy"] + offset * plan["motion_dir_world"]
     velocity_xy = speed * plan["motion_dir_world"]
     # All target types are driven kinematically: the exact transform keeps
@@ -1144,6 +1183,11 @@ def collect_sequence(client, args, sequence_index):
             range_max_m=args.target_range_max,
             surface_distance_max_m=args.surface_distance_max,
             type2_azimuth_max_rad=math.radians(args.type2_azimuth_max_deg),
+            surface_distance_target_m=args.surface_distance_target,
+            motion_direction=args.motion_direction,
+        )
+        amplitude_gain = 10.0 ** (
+            float(getattr(radar.realistic_config, "amplitude_gain_db", 0.0)) / 20.0
         )
         main_object_ids = (
             {int(controlled_target.id)} if args.label_scope == "main" else None
@@ -1162,6 +1206,8 @@ def collect_sequence(client, args, sequence_index):
             f"reflector tag={controlled_plan['reflector_tag']}, "
             f"surface gap="
             f"{controlled_plan['target_surface_distance_m']:.1f} m; "
+            f"motion={controlled_plan['motion_direction']} "
+            f"(expected |vr| {controlled_plan['expected_radial_speed_mps']:.2f} m/s); "
             f"camera={args.camera_view}"
         )
         controlled_step = _validate_controlled_target(
@@ -1261,6 +1307,7 @@ def collect_sequence(client, args, sequence_index):
                             point_index,
                             point,
                             main_object_ids=main_object_ids,
+                            amplitude_gain=amplitude_gain,
                         )
                     )
             else:
@@ -1282,6 +1329,7 @@ def collect_sequence(client, args, sequence_index):
                                 (detection_index << 8) + point_index,
                                 point,
                                 main_object_ids=main_object_ids,
+                                amplitude_gain=amplitude_gain,
                             )
                         )
             diagnostics_summary = {
@@ -1299,7 +1347,12 @@ def collect_sequence(client, args, sequence_index):
                 "weather_index": weather_index,
                 "target_type": args.target_type,
                 "target_semantic_tag": int(semantic_tag),
-                "target_speed_mps_expected": float(target_speed_mps),
+                "target_speed_mps_expected": float(
+                    (controlled_plan or {}).get(
+                        "expected_radial_speed_mps", target_speed_mps
+                    )
+                ),
+                "motion_direction": (controlled_plan or {}).get("motion_direction"),
                 "radar_fps": int(args.fps),
                 "radar_fov_deg": float(
                     radar.realistic_config.horizontal_fov_deg
@@ -1506,11 +1559,9 @@ def _verification_block(counts):
     measured = float(counts.get("direct_target_speed_mean_mps", 0.0))
     measured_max = float(counts.get("direct_target_speed_max_mps", 0.0))
     if expected_speed > 0.0:
-        # Motion runs along the radar line of sight (radial), so the full
-        # walking speed projects onto the radial-velocity axis. The
-        # triangular profile keeps |speed| at the configured value except at
-        # the instantaneous reversal, so the mean |vr| should sit close to
-        # the configured walking speed.
+        # The expected value is the walking speed projected onto the line of
+        # sight. The triangular profile keeps |speed| constant except at the
+        # instantaneous reversal, so the mean |vr| should sit close to it.
         check(
             "direct target speed plausible",
             0.1 * expected_speed <= measured <= 1.6 * expected_speed,

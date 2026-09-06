@@ -239,6 +239,34 @@ class ExtendedPointsTest(unittest.TestCase):
         self.assertGreater(ghost_points, 0)
         self.assertLess(ghost_points, direct_points / 4)
 
+    def test_static_clusters_expand_with_their_own_mean(self):
+        config = replace(
+            load_realistic_radar_config("geometry_multipath_v1"),
+            points_per_object_mean=20.0,
+            expand_static_points=True,
+            static_points_per_cluster_mean=3.0,
+            min_detection_probability=1.0,
+            max_detection_probability=1.0,
+            dropout_enter_probability=0.0,
+            interference_enter_probability=0.0,
+            false_alarms_per_scan=0.0,
+            latency_scans=0,
+        )
+        model = RealisticRadarModel(config, seed=12)
+        wall = replace(direct_target(object_id=-500, distance_m=12.0), semantic_tag=4)
+        wall_points = 0
+        for scan in range(40):
+            model.step([direct_target(), wall], timestamp_s=scan * 0.05)
+            _, points = model.latest_points()
+            wall_points += sum(p.semantic_tag == 4 and p.source == "direct" for p in points)
+        # Three points per cell on average, not the road-user twenty.
+        self.assertGreater(wall_points, 40 * 2)
+        self.assertLess(wall_points, 40 * 5)
+        with self.assertRaises(ValueError):
+            load_realistic_radar_config(
+                "geometry_multipath_v1", overrides={"static_points_per_cluster_mean": 0.5}
+            )
+
     def test_emission_can_be_switched_off(self):
         config = replace(
             load_realistic_radar_config("ideal_target_list_v1"),

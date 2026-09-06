@@ -158,6 +158,11 @@ class RealisticRadarConfig:
     points_per_object_mean: float = 8.0
     point_footprint_scale: float = 1.0
     micro_doppler_scale: float = 1.0
+    # Points per delivered static range/angle cell when
+    # ``expand_static_points`` is set (1 keeps one point per cell). Real scans
+    # carry ~300 background points against ~130 C-Shenron cells; fitted by
+    # calibration.
+    static_points_per_cluster_mean: float = 1.0
 
     # Road-user amplitude relative to infrastructure. The C-Shenron-derived
     # surface model returns pedestrians and cars tens of dB above walls and
@@ -165,6 +170,14 @@ class RealisticRadarConfig:
     # median. Applied to every dynamic road-user ideal target before the
     # multipath solver, so ghosts inherit it. Fitted by calibration.
     road_user_snr_offset_db: float = 0.0
+
+    # Absolute scale of the exported linear amplitude, in dB on the 20*log10
+    # scale: exporters write 10**(snr_db/20) * 10**(amplitude_gain_db/20).
+    # The Radar Ghost Dataset stores raw magnitudes near 1e7; a real-trained
+    # detector with an absolute-amplitude feature only sees the synthetic
+    # scans if the frame median lands in the same place. Fitted by
+    # calibration; the controller path never reads it.
+    amplitude_gain_db: float = 0.0
 
     # Weather is deliberately modest at 77 GHz.  Values represent additional
     # dB loss over 100 m at a normalized CARLA weather setting of 1.0.
@@ -523,6 +536,8 @@ def _validate_config(config):
         raise ValueError("emit_extended_points must be a boolean")
     if not isinstance(config.expand_static_points, bool):
         raise ValueError("expand_static_points must be a boolean")
+    if config.static_points_per_cluster_mean < 1.0:
+        raise ValueError("static_points_per_cluster_mean must be at least 1")
     if config.multipath_reflector_min_points < 2:
         raise ValueError("multipath_reflector_min_points must be at least 2")
     if (
@@ -1530,8 +1545,11 @@ class RealisticRadarModel:
         for detection in detections:
             is_ghost = detection.source == "ghost"
             static = detection.semantic_tag not in self._DYNAMIC_TAGS
+            static_mean = float(self.config.static_points_per_cluster_mean)
             if detection.source == "clutter" or (
-                static and not is_ghost and not self.config.expand_static_points
+                static
+                and not is_ghost
+                and (not self.config.expand_static_points or static_mean <= 1.0)
             ):
                 points.append(detection)
                 continue
@@ -1539,6 +1557,8 @@ class RealisticRadarModel:
             mean_points = self.config.points_per_object_mean
             if is_ghost:
                 mean_points *= self.config.ghost_points_scale
+            elif static:
+                mean_points = static_mean
             points.extend(
                 expand_detection(
                     detection,

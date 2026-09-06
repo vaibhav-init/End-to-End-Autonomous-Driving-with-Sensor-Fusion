@@ -98,6 +98,8 @@ def derive_overrides(stats, base_profile, synthetic_stats=None, base_overrides=N
     base_overrides = dict(base_overrides or {})
     overrides = {}
     notes = {}
+    # Closed-loop corrections that must win over the direct fits below.
+    relative = {}
 
     real_rel_amp = stats["real_rel_amp_db"]
     ghost_rel_amp = stats["ghost_rel_amp_db"]
@@ -121,6 +123,42 @@ def derive_overrides(stats, base_profile, synthetic_stats=None, base_overrides=N
                 f"previous {previous:+.2f} dB + (real ghost-minus-real median gap {real_gap:+.2f} dB "
                 f"- synthetic gap {syn_gap:+.2f} dB)"
             )
+        real_fm = stats["frame_median_amp_db"]
+        syn_fm = synthetic_stats["frame_median_amp_db"]
+        if real_fm.size >= 10 and syn_fm.size >= 10:
+            previous = float(base_overrides.get("amplitude_gain_db", 0.0))
+            residual = float(np.median(real_fm)) - float(np.median(syn_fm))
+            overrides["amplitude_gain_db"] = float(round(previous + residual, 2))
+            notes["amplitude_gain_db"] = (
+                f"previous {previous:+.2f} dB + (real frame-median amplitude {np.median(real_fm):.2f} dB "
+                f"- synthetic {np.median(syn_fm):.2f} dB), 20log10 of the stored linear amplitude"
+            )
+        real_bg = stats["background_per_frame"]
+        syn_bg = synthetic_stats["background_per_frame"]
+        if real_bg.size >= 10 and syn_bg.size >= 10 and float(np.mean(syn_bg)) > 0.0:
+            previous = float(base_overrides.get("static_points_per_cluster_mean", 1.0))
+            value = previous * float(np.mean(real_bg)) / float(np.mean(syn_bg))
+            overrides["static_points_per_cluster_mean"] = float(np.clip(round(value, 3), 1.0, 20.0))
+            overrides["expand_static_points"] = bool(overrides["static_points_per_cluster_mean"] > 1.0)
+            notes["static_points_per_cluster_mean"] = (
+                f"previous {previous:.3f} x (mean unlabelled points per scan: real {np.mean(real_bg):.1f} "
+                f"/ synthetic {np.mean(syn_bg):.1f})"
+            )
+        for stat_key, knob, default, lower, upper in (
+            ("object_range_spread_m", "point_footprint_scale", 1.0, 0.2, 5.0),
+            ("object_doppler_std_mps", "micro_doppler_scale", 1.0, 0.1, 5.0),
+            ("ghost_fading_std_db", "multipath_fading_std_db", float(base.multipath_fading_std_db), 0.0, 12.0),
+        ):
+            real_values = stats[stat_key]
+            syn_values = synthetic_stats[stat_key]
+            if real_values.size >= 10 and syn_values.size >= 10 and float(np.median(syn_values)) > 1.0e-9:
+                previous = float(base_overrides.get(knob, default))
+                ratio = float(np.median(real_values)) / float(np.median(syn_values))
+                relative[knob] = (
+                    float(np.clip(round(previous * ratio, 3), lower, upper)),
+                    f"previous {previous:.3f} x (real median {stat_key} {np.median(real_values):.3f} "
+                    f"/ synthetic {np.median(syn_values):.3f})",
+                )
 
     cluster_points = stats["ghost_cluster_points"]
     object_points = stats["object_points"]
@@ -227,6 +265,9 @@ def derive_overrides(stats, base_profile, synthetic_stats=None, base_overrides=N
             f"median lag-1 autocorrelation of per-scan ghost amplitude over {lag1.size} runs "
             f"(prior {base.multipath_fading_correlation:.2f})"
         )
+    for knob, (value, note) in relative.items():
+        overrides[knob] = value
+        notes[knob] = note
     return overrides, notes
 
 
@@ -265,7 +306,10 @@ def main():
             base_overrides = json.load(handle)
     overrides, notes = derive_overrides(stats, args.base_profile, synthetic_stats, base_overrides)
     # Carry forward relative knobs that this round could not refit.
-    for key in ("ghost_rate_scale", "road_user_snr_offset_db", "ghost_snr_offset_db"):
+    for key in (
+        "ghost_rate_scale", "road_user_snr_offset_db", "ghost_snr_offset_db",
+        "amplitude_gain_db", "static_points_per_cluster_mean", "expand_static_points",
+    ):
         if key in base_overrides and key not in overrides:
             overrides[key] = base_overrides[key]
             notes[key] = "carried forward from --base-overrides (not refit this round)"

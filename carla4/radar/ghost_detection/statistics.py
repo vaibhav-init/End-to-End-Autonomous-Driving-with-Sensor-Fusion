@@ -119,6 +119,11 @@ def sequence_statistics(sequence, amplitude_mode="auto", parent_mode="auto"):
         "real_per_frame": [],
         "ghost_per_frame": [],
         "ghost_fraction_per_frame": [],
+        # Unlabelled points per scan (infrastructure and clutter) and the
+        # absolute frame-median amplitude: the two numbers that place the
+        # synthetic background where a real-trained detector expects it.
+        "background_per_frame": [],
+        "frame_median_amp_db": [],
         "real_rel_amp_db": [],
         "ghost_rel_amp_db": [],
         "real_abs_amp_db": amp_db[real],
@@ -158,6 +163,8 @@ def sequence_statistics(sequence, amplitude_mode="auto", parent_mode="auto"):
         labeled = len(f_real) + len(f_ghost)
         stats["ghost_fraction_per_frame"].append(len(f_ghost) / labeled if labeled else np.nan)
         frame_median = float(np.median(amp_db[idx])) if len(idx) else 0.0
+        stats["background_per_frame"].append(len(idx) - labeled)
+        stats["frame_median_amp_db"].append(frame_median)
         stats["real_rel_amp_db"].extend((amp_db[f_real] - frame_median).tolist())
         stats["ghost_rel_amp_db"].extend((amp_db[f_ghost] - frame_median).tolist())
 

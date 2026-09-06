@@ -35,6 +35,8 @@ COMPARED = [
     ("real_per_frame", "labelled real points per scan", 1.0),
     ("ghost_per_frame", "labelled ghost points per scan", 1.0),
     ("ghost_fraction_per_frame", "ghost share of labelled points", 1.0),
+    ("background_per_frame", "unlabelled points per scan", 1.0),
+    ("frame_median_amp_db", "frame median amplitude [dB, absolute]", 1.0),
     ("real_rel_amp_db", "real amplitude rel. frame median [dB]", 1.0),
     ("ghost_rel_amp_db", "ghost amplitude rel. frame median [dB]", 1.0),
     ("real_range_m", "real point range [m]", 1.0),
