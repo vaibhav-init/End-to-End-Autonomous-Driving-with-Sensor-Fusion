@@ -1118,6 +1118,8 @@ def main():
                         emergency_gap_m = emergency_actor.get_location().distance(ego.get_location())
                     except RuntimeError:
                         emergency_gap_m = 999.0
+                    if frame - last_emergency_frame < 10:
+                        emergency_gap_m = 999.0
                     if speed < 0.3 or (emergency_gap_m < 10.0 and speed < 2.0):
                         emergency_stopped_frames += 1
                     else:
@@ -1125,12 +1127,17 @@ def main():
                     # The ego may have passed the obstacle (adjacent lane,
                     # lane change); an obstacle behind the ego or older than
                     # 25 s is released so the next event can happen.
-                    try:
-                        forward = ego.get_transform().get_forward_vector()
-                        offset = emergency_actor.get_location() - ego.get_location()
-                        obstacle_behind = (forward.x * offset.x + forward.y * offset.y) < -2.0
-                    except RuntimeError:
-                        obstacle_behind = True
+                    # A freshly spawned actor reports a zero transform until
+                    # the next tick in synchronous mode, which reads as
+                    # "behind the ego"; give it ten frames before judging.
+                    obstacle_behind = False
+                    if frame - last_emergency_frame >= 10:
+                        try:
+                            forward = ego.get_transform().get_forward_vector()
+                            offset = emergency_actor.get_location() - ego.get_location()
+                            obstacle_behind = (forward.x * offset.x + forward.y * offset.y) < -2.0
+                        except RuntimeError:
+                            obstacle_behind = True
                     obstacle_stale = frame - last_emergency_frame > 25 * FPS
 
                     if (
