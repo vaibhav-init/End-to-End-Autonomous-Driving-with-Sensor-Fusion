@@ -171,9 +171,9 @@ def parse_args():
         type=float,
         default=40.0,
         help=(
-            "largest accepted |azimuth| of the mirrored (type-2) path. Real "
-            "type-2 ghosts appear ~17 deg off the parent; a guardrail beside "
-            "the ego puts them at 60+ deg"
+            "largest accepted |ghost - parent| azimuth of the mirrored "
+            "(type-2) path. Real type-2 ghosts appear ~16 deg off the parent; "
+            "a guardrail beside the ego puts them at 60+ deg"
         ),
     )
     parser.add_argument(
@@ -618,6 +618,10 @@ def _probe_target(actor_id, target_xy_m, semantic_tag=14):
     )
 
 
+def _wrap_angle(angle_rad):
+    return (float(angle_rad) + math.pi) % (2.0 * math.pi) - math.pi
+
+
 def _controlled_target_candidates(
     reflector,
     actor_id,
@@ -695,9 +699,14 @@ def _controlled_target_candidates(
             )
             if not paths:
                 continue
+            # Ghost-to-parent azimuth offset, the statistic the calibration
+            # compares (real second-order type-2 ghosts sit ~16 deg off
+            # their parent).
             if type2_azimuth_max_rad is not None and any(
                 path.bounce_type == "type2"
-                and abs(float(path.azimuth_rad)) > float(type2_azimuth_max_rad)
+                and abs(
+                    _wrap_angle(float(path.azimuth_rad) - target_azimuth)
+                ) > float(type2_azimuth_max_rad)
                 for path in paths
             ):
                 continue
@@ -754,9 +763,13 @@ def _controlled_target_candidates(
                     for path in paths
                 }
             )
+            # Among equally robust placements prefer the smallest surface
+            # gap: the type-1 ghost trails its parent by about the gap, and
+            # the real offset is ~1.6 m.
             score = (
                 robust_count,
                 len(path_families),
+                -surface_distance,
                 motion_amplitude,
                 min(float(path.snr_db) for path in paths),
                 min(float(reflector.length_m), 20.0),
