@@ -114,14 +114,34 @@ class StatisticsTest(unittest.TestCase):
         for key, value in overrides.items():
             self.assertTrue(isinstance(value, (int, float)), key)
 
-    def test_ghost_rate_scale_needs_a_synthetic_reference(self):
+    def test_relative_fits_correct_the_base_overrides(self):
         real = merge_statistics([sequence_statistics(_sequence(frames=8, seed=s)) for s in range(3)])
-        # Synthetic reference with three ghost clusters per object: real has one.
+        # Synthetic reference with three ghost clusters per object (real has
+        # one), road users 20 dB brighter than in the real data and ghosts
+        # 4 dB weaker relative to their parents.
         synthetic = sequence_statistics(_sequence(frames=8, seed=9))
         synthetic["ghost_clusters_per_object"] = np.full(24, 3.0)
-        overrides, notes = derive_overrides(real, "rgd_regime_v1", synthetic)
-        self.assertAlmostEqual(overrides["ghost_rate_scale"], 1.0 / 3.0, places=3)
-        self.assertIn("ghost_rate_scale", notes)
+        synthetic["real_rel_amp_db"] = real["real_rel_amp_db"] + 20.0
+        synthetic["ghost_rel_amp_db"] = real["ghost_rel_amp_db"] + 16.0
+        # Pad to the minimum sample counts the fits require.
+        synthetic["real_rel_amp_db"] = np.tile(synthetic["real_rel_amp_db"], 3)
+        synthetic["ghost_rel_amp_db"] = np.tile(synthetic["ghost_rel_amp_db"], 6)
+        real["real_rel_amp_db"] = np.tile(real["real_rel_amp_db"], 3)
+        real["ghost_rel_amp_db"] = np.tile(real["ghost_rel_amp_db"], 6)
+        base = {"ghost_rate_scale": 0.5, "road_user_snr_offset_db": -10.0, "ghost_snr_offset_db": 1.0}
+        overrides, notes = derive_overrides(real, "rgd_regime_v1", synthetic, base)
+        self.assertAlmostEqual(overrides["ghost_rate_scale"], 0.5 / 3.0, places=3)
+        self.assertAlmostEqual(overrides["road_user_snr_offset_db"], -30.0, delta=0.05)
+        # real gap - synthetic gap = (g - r) - ((g+16) - (r+20)) = +4 dB
+        self.assertAlmostEqual(overrides["ghost_snr_offset_db"], 5.0, delta=0.05)
+        for key in ("ghost_rate_scale", "road_user_snr_offset_db", "ghost_snr_offset_db"):
+            self.assertIn(key, notes)
+
+    def test_without_reference_relative_knobs_are_absent(self):
+        real = merge_statistics([sequence_statistics(_sequence(frames=8, seed=s)) for s in range(3)])
+        overrides, _ = derive_overrides(real, "rgd_regime_v1")
+        for key in ("ghost_rate_scale", "road_user_snr_offset_db", "ghost_snr_offset_db"):
+            self.assertNotIn(key, overrides)
 
 
 if __name__ == "__main__":

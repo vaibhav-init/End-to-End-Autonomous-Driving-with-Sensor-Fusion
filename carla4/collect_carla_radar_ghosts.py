@@ -157,6 +157,26 @@ def parse_args():
         help="farthest accepted controlled-target range in metres",
     )
     parser.add_argument(
+        "--surface-distance-max",
+        type=float,
+        default=4.5,
+        help=(
+            "largest accepted target-to-reflector distance in metres. Real "
+            "second-order ghosts sit ~1.7 m behind their parent, which needs "
+            "the walker within a few metres of the surface"
+        ),
+    )
+    parser.add_argument(
+        "--type2-azimuth-max-deg",
+        type=float,
+        default=40.0,
+        help=(
+            "largest accepted |azimuth| of the mirrored (type-2) path. Real "
+            "type-2 ghosts appear ~17 deg off the parent; a guardrail beside "
+            "the ego puts them at 60+ deg"
+        ),
+    )
+    parser.add_argument(
         "--points-source",
         choices=("sensor", "expand"),
         default="sensor",
@@ -605,6 +625,8 @@ def _controlled_target_candidates(
     semantic_tag=14,
     range_min_m=0.0,
     range_max_m=None,
+    surface_distance_max_m=None,
+    type2_azimuth_max_rad=None,
 ):
     """Yield target positions whose path is accepted by the production solver.
 
@@ -640,6 +662,10 @@ def _controlled_target_candidates(
             config.multipath_max_target_surface_distance_m
         ):
             continue
+        if surface_distance_max_m is not None and surface_distance > float(
+            surface_distance_max_m
+        ):
+            continue
         for reflection_offset in reflection_offsets:
             desired_tangent = line_tangent_coordinate + reflection_offset
             target_xy = (
@@ -668,6 +694,12 @@ def _controlled_target_candidates(
                 config,
             )
             if not paths:
+                continue
+            if type2_azimuth_max_rad is not None and any(
+                path.bounce_type == "type2"
+                and abs(float(path.azimuth_rad)) > float(type2_azimuth_max_rad)
+                for path in paths
+            ):
                 continue
 
             # The target extractor observes a vehicle surface rather than its
@@ -750,6 +782,8 @@ def _configure_controlled_target(
     target_type="vehicle",
     range_min_m=0.0,
     range_max_m=None,
+    surface_distance_max_m=None,
+    type2_azimuth_max_rad=None,
 ):
     """Put a CARLA actor into geometry known to produce physical paths."""
 
@@ -766,13 +800,23 @@ def _configure_controlled_target(
                 semantic_tag,
                 range_min_m=range_min_m,
                 range_max_m=range_max_m,
+                surface_distance_max_m=surface_distance_max_m,
+                type2_azimuth_max_rad=type2_azimuth_max_rad,
             )
         )
-    if not candidates and (range_min_m > 0.0 or range_max_m is not None):
+    constrained = (
+        range_min_m > 0.0
+        or range_max_m is not None
+        or surface_distance_max_m is not None
+        or type2_azimuth_max_rad is not None
+    )
+    if not candidates and constrained:
         print(
-            f"  no placement inside the {range_min_m:.0f}-"
-            f"{'any' if range_max_m is None else f'{range_max_m:.0f}'} m range "
-            "band; falling back to any range (the scene will not match RGD geometry)"
+            f"  no placement inside range {range_min_m:.0f}-"
+            f"{'any' if range_max_m is None else f'{range_max_m:.0f}'} m, "
+            f"surface <= {surface_distance_max_m}, type-2 azimuth <= "
+            f"{'any' if type2_azimuth_max_rad is None else f'{math.degrees(type2_azimuth_max_rad):.0f} deg'}; "
+            "falling back to any geometry (the scene will not match RGD)"
         )
         for reflector in reflectors:
             candidates.extend(
@@ -1085,6 +1129,8 @@ def collect_sequence(client, args, sequence_index):
             args.target_type,
             range_min_m=args.target_range_min,
             range_max_m=args.target_range_max,
+            surface_distance_max_m=args.surface_distance_max,
+            type2_azimuth_max_rad=math.radians(args.type2_azimuth_max_deg),
         )
         main_object_ids = (
             {int(controlled_target.id)} if args.label_scope == "main" else None

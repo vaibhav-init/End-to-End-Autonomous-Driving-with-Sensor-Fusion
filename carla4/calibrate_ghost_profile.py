@@ -80,18 +80,47 @@ def _implied_micro_doppler_std(class_id):
     return math.sqrt(0.5 * amplitude * amplitude + MICRO_DOPPLER_NOISE_MPS ** 2)
 
 
-def derive_overrides(stats, base_profile, synthetic_stats=None):
+def derive_overrides(stats, base_profile, synthetic_stats=None, base_overrides=None):
     """Map measured statistics onto profile parameters, with derivations.
 
-    ``synthetic_stats`` is an optional synthetic collection made with
-    ``ghost_rate_scale`` 1. Ghost clusters per real object per scan in the
-    two domains then give the rate scale directly; without it the target
-    value is only reported.
+    Direct fits (points per object, footprint, micro-Doppler, fading,
+    bounce loss, ghost points per cluster) come from the real data alone.
+
+    Relative fits need a synthetic reference collected with
+    ``base_overrides`` (the overrides that produced it): ghost rate,
+    road-user amplitude and ghost amplitude are then corrected by the
+    real-minus-synthetic residual on top of the base values, so each
+    collect-and-refit round moves the synthetic distribution toward the
+    real one instead of restarting from the priors.
     """
 
     base = load_realistic_radar_config(base_profile)
+    base_overrides = dict(base_overrides or {})
     overrides = {}
     notes = {}
+
+    real_rel_amp = stats["real_rel_amp_db"]
+    ghost_rel_amp = stats["ghost_rel_amp_db"]
+    if synthetic_stats is not None:
+        syn_real_rel = synthetic_stats["real_rel_amp_db"]
+        syn_ghost_rel = synthetic_stats["ghost_rel_amp_db"]
+        if real_rel_amp.size >= 100 and syn_real_rel.size >= 100:
+            previous = float(base_overrides.get("road_user_snr_offset_db", 0.0))
+            residual = float(np.median(real_rel_amp)) - float(np.median(syn_real_rel))
+            overrides["road_user_snr_offset_db"] = float(np.clip(round(previous + residual, 2), -80.0, 40.0))
+            notes["road_user_snr_offset_db"] = (
+                f"previous {previous:+.2f} dB + (real labelled-real amplitude rel. frame median "
+                f"{np.median(real_rel_amp):+.2f} dB - synthetic {np.median(syn_real_rel):+.2f} dB)"
+            )
+        if ghost_rel_amp.size >= 100 and syn_ghost_rel.size >= 100 and real_rel_amp.size and syn_real_rel.size:
+            previous = float(base_overrides.get("ghost_snr_offset_db", 0.0))
+            real_gap = float(np.median(ghost_rel_amp)) - float(np.median(real_rel_amp))
+            syn_gap = float(np.median(syn_ghost_rel)) - float(np.median(syn_real_rel))
+            overrides["ghost_snr_offset_db"] = float(np.clip(round(previous + (real_gap - syn_gap), 2), -40.0, 40.0))
+            notes["ghost_snr_offset_db"] = (
+                f"previous {previous:+.2f} dB + (real ghost-minus-real median gap {real_gap:+.2f} dB "
+                f"- synthetic gap {syn_gap:+.2f} dB)"
+            )
 
     cluster_points = stats["ghost_cluster_points"]
     object_points = stats["object_points"]
@@ -107,11 +136,12 @@ def derive_overrides(stats, base_profile, synthetic_stats=None):
     if synthetic_stats is not None and real_rate.size >= 20:
         synthetic_rate = synthetic_stats["ghost_clusters_per_object"]
         if synthetic_rate.size >= 20 and float(np.mean(synthetic_rate)) > 0.0:
-            scale = float(np.mean(real_rate)) / float(np.mean(synthetic_rate))
+            previous = float(base_overrides.get("ghost_rate_scale", 1.0))
+            scale = previous * float(np.mean(real_rate)) / float(np.mean(synthetic_rate))
             overrides["ghost_rate_scale"] = float(np.clip(round(scale, 3), 0.01, 1.0))
             notes["ghost_rate_scale"] = (
-                f"mean ghost clusters per real object per scan: real {np.mean(real_rate):.3f} / "
-                f"synthetic at scale 1 {np.mean(synthetic_rate):.3f}"
+                f"previous {previous:.3f} x (mean ghost clusters per real object per scan: "
+                f"real {np.mean(real_rate):.3f} / synthetic {np.mean(synthetic_rate):.3f})"
             )
 
     object_points = stats["object_points"]
@@ -213,19 +243,32 @@ def main():
                         help="prepared synthetic set collected with ghost_rate_scale 1 "
                              "(the smoke sequence); enables the ghost_rate_scale fit")
     parser.add_argument("--synthetic-split", default="train")
+    parser.add_argument("--base-overrides", default=None,
+                        help="the overrides JSON the synthetic reference was collected with; "
+                             "relative fits are corrections on top of it")
     args = parser.parse_args()
     if args.split in ("val", "test"):
         parser.error("fit on train only; val/test are for the fidelity check")
+    if args.synthetic and not args.base_overrides:
+        parser.error("--synthetic needs --base-overrides (the JSON that produced it)")
 
     stats, sequences, manifest = load_split(args.data, args.split, args.amplitude)
     meta = stats["_meta"]
     summaries = summarize_statistics(stats)
     synthetic_stats = None
+    base_overrides = {}
     if args.synthetic:
         synthetic_stats, _n, _m = load_split(
             args.synthetic, args.synthetic_split, args.amplitude, "class"
         )
-    overrides, notes = derive_overrides(stats, args.base_profile, synthetic_stats)
+        with open(args.base_overrides, "r", encoding="utf-8") as handle:
+            base_overrides = json.load(handle)
+    overrides, notes = derive_overrides(stats, args.base_profile, synthetic_stats, base_overrides)
+    # Carry forward relative knobs that this round could not refit.
+    for key in ("ghost_rate_scale", "road_user_snr_offset_db", "ghost_snr_offset_db"):
+        if key in base_overrides and key not in overrides:
+            overrides[key] = base_overrides[key]
+            notes[key] = "carried forward from --base-overrides (not refit this round)"
     overrides["profile_name"] = f"{args.base_profile}_rgd_calibrated"
 
     labeled = meta["real_points"] + meta["ghost_points"]

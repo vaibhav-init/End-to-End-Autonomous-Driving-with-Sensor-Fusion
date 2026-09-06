@@ -187,6 +187,35 @@ class FrontRadarTest(unittest.TestCase):
         self.assertAlmostEqual(radar.get()["distance"], 25.0, delta=1.0)
         self.assertIsNone(radar.diagnostics()["last_error"])
 
+    def test_road_user_snr_offset_reaches_the_target_list(self):
+        ego = FakeActor(1, FakeVector(), FakeVector(10.0, 0.0, 0.0))
+        lead = FakeActor(77, FakeVector(25.0, 0.0, 0.0), FakeVector(5.0, 0.0, 0.0))
+        fake_carla = SimpleNamespace(
+            Location=lambda **kwargs: SimpleNamespace(**kwargs),
+            Transform=lambda *args, **kwargs: SimpleNamespace(args=args, kwargs=kwargs),
+        )
+        returns = np.zeros(3, dtype=SEMANTIC_LIDAR_DTYPE)
+        returns[0] = (25.0, -0.2, 0.0, 1.0, 77, 14)
+        returns[1] = (25.0, 0.0, 0.1, 1.0, 77, 14)
+        returns[2] = (25.0, 0.2, -0.1, 1.0, 77, 14)
+        measurement = SimpleNamespace(raw_data=returns.tobytes(), frame=5, timestamp=1.0)
+        snr = {}
+        for offset in (0.0, -20.0):
+            config = load_realistic_radar_config(
+                "ideal_target_list_v1",
+                overrides={"road_user_snr_offset_db": offset, "emit_extended_points": False},
+            )
+            with patch("radar.front_radar._carla_module", return_value=fake_carla):
+                radar = RealisticFrontRadar(
+                    ego, FakeWorld((ego, lead)), range_m=100.0, fps=20,
+                    config=config, capture_debug=True,
+                )
+            radar.update_ego_speed(10.0)
+            radar._on_semantic_lidar(measurement)
+            snr[offset] = radar.debug_snapshot()["delivered_detections"][0]["snr_db"]
+            radar.cleanup()
+        self.assertAlmostEqual(snr[0.0] - snr[-20.0], 20.0, places=6)
+
     def test_realistic_adapter_preserves_contract_without_carla_install(self):
         ego = FakeActor(1, FakeVector(), FakeVector(10.0, 0.0, 0.0))
         lead = FakeActor(

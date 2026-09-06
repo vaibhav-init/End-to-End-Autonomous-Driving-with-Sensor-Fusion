@@ -159,6 +159,13 @@ class RealisticRadarConfig:
     point_footprint_scale: float = 1.0
     micro_doppler_scale: float = 1.0
 
+    # Road-user amplitude relative to infrastructure. The C-Shenron-derived
+    # surface model returns pedestrians and cars tens of dB above walls and
+    # guardrails; measured radar shows labelled road users at the frame
+    # median. Applied to every dynamic road-user ideal target before the
+    # multipath solver, so ghosts inherit it. Fitted by calibration.
+    road_user_snr_offset_db: float = 0.0
+
     # Weather is deliberately modest at 77 GHz.  Values represent additional
     # dB loss over 100 m at a normalized CARLA weather setting of 1.0.
     rain_attenuation_db_per_100m: float = 1.0
