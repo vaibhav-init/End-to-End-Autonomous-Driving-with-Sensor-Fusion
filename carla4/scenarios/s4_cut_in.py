@@ -24,6 +24,10 @@ import math
 import os
 import random
 import sys
+
+# Traffic-manager RPC port; 8000 collides with other users' services on a
+# shared box, so run_all.py forwards --tm-port through this variable.
+TM_PORT = int(os.environ.get("CARLA_TM_PORT", "8000"))
 import time
 
 import carla
@@ -237,7 +241,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     print(f"  NPC spawned in {direction_str} lane, {npc_ahead_m:.0f}m ahead")
 
     # NPC on Traffic Manager at constant speed in adjacent lane
-    tm = client.get_trafficmanager(8000)
+    tm = client.get_trafficmanager(TM_PORT)
     tm_port = tm.get_port()
     npc.set_autopilot(True, tm_port)
     tm.set_desired_speed(npc, S4_NPC_SPEED_KMH)
@@ -564,7 +568,7 @@ def main():
     settings.fixed_delta_seconds = 1.0 / FPS
     world.apply_settings(settings)
 
-    tm = client.get_trafficmanager(8000)
+    tm = client.get_trafficmanager(TM_PORT)
     tm.set_synchronous_mode(True)
     world.tick()
 

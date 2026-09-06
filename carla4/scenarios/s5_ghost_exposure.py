@@ -33,6 +33,10 @@ import argparse
 import os
 import random
 import sys
+
+# Traffic-manager RPC port; 8000 collides with other users' services on a
+# shared box, so run_all.py forwards --tm-port through this variable.
+TM_PORT = int(os.environ.get("CARLA_TM_PORT", "8000"))
 import time
 
 import carla
@@ -123,7 +127,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     for _ in range(FOG_SETTLE_STEPS):
         world.tick()
 
-    tm = client.get_trafficmanager(8000)
+    tm = client.get_trafficmanager(TM_PORT)
     tm.set_random_device_seed(seed)
     ego_bp = world.get_blueprint_library().find("vehicle.tesla.model3")
     ego = None
@@ -301,7 +305,7 @@ def main():
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = 1.0 / FPS
     world.apply_settings(settings)
-    tm = client.get_trafficmanager(8000)
+    tm = client.get_trafficmanager(TM_PORT)
     tm.set_synchronous_mode(True)
     world.tick()
 

@@ -590,7 +590,7 @@ def main():
     parser.add_argument(
         "--tm-port",
         type=int,
-        default=8000,
+        default=int(os.environ.get("CARLA_TM_PORT", "8000")),
         help=(
             "Traffic Manager RPC port. A killed run keeps the default bound, "
             "so pass a free one rather than waiting it out (default: 8000)"
@@ -607,6 +607,15 @@ def main():
             f"{GAPKEEP_FOLLOW_GAP_M:g} m behind whatever is in the ego's path, "
             "so its labels contain the decelerations the controller must learn "
             "(default: autopilot)"
+        ),
+    )
+    parser.add_argument(
+        "--emergency-interval-s",
+        type=float,
+        default=8.0,
+        help=(
+            "seconds between emergency obstacle spawns while in the emergency "
+            "phase (each spawn is one hard-braking-at-speed event)"
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -1054,7 +1063,7 @@ def main():
                 if (
                     emergency_actor is None
                     and speed > 5.0
-                    and frame - last_emergency_frame > 18 * FPS
+                    and frame - last_emergency_frame > args.emergency_interval_s * FPS
                 ):
                     spawn_requested.set()
                     last_emergency_frame = frame
@@ -1093,12 +1102,21 @@ def main():
                     except RuntimeError:
                         emergency_actor = None
 
-                    if speed < 0.3:
+                    # Release once the ego has come to rest OR has sat close
+                    # behind the obstacle for two seconds. The gap-keeping
+                    # teacher creeps at a few tenths of a metre per second and
+                    # never crossed the 0.3 m/s bar, so one obstacle used to
+                    # block the whole phase and the run yielded one event.
+                    try:
+                        emergency_gap_m = emergency_actor.get_location().distance(ego.get_location())
+                    except RuntimeError:
+                        emergency_gap_m = 999.0
+                    if speed < 0.3 or (emergency_gap_m < 10.0 and speed < 2.0):
                         emergency_stopped_frames += 1
                     else:
                         emergency_stopped_frames = 0
 
-                    if emergency_stopped_frames >= FPS:
+                    if emergency_stopped_frames >= 2 * FPS or (speed < 0.3 and emergency_stopped_frames >= FPS):
                         cleanup_actor(emergency_actor)
                         emergency_actor = None
                         emergency_stopped_frames = 0

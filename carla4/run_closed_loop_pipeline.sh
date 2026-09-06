@@ -9,6 +9,8 @@
 # Every stage appends STAGE_<name>_EXIT=<code> to logs/closed_loop_pipeline.log.
 set -u
 export CARLA_ROOT="${CARLA_ROOT:-/storage/CARLA_0.9.16}"
+# 8000 is taken by another user's service on the shared box.
+export CARLA_TM_PORT="${CARLA_TM_PORT:-8050}"
 OV="${OV:-artifacts/rgd_calibration_v7s/calibrated_overrides.json}"
 RADAR="--radar-backend realistic --radar-profile rgd_regime_v1 --radar-config $OV"
 SEED="${SEED:-42}"
@@ -50,6 +52,29 @@ stage_collect() {
   code=$?; [ $code -eq 0 ] && gate_collection dataset_ghost >> logs/collect_ghost.log 2>&1; code=$?
   python3 inspect_dataset.py dataset_clean dataset_ghost >> logs/collect_ghost.log 2>&1
   mark collect_ghost $code; return $code
+}
+
+stage_supplement() {
+  # Emergency-only driving: a stopped car appears 55-75 m ahead every few
+  # seconds at speed, the teacher brakes hard. The rotating collection
+  # yielded one such event per 30 minutes, which is why the models did
+  # not brake for a stopped car at 10 m. Appended to both paired sets.
+  local code=0
+  for d in clean ghost; do
+    local mode=off; [ $d = ghost ] && mode=geometry
+    python3 -u collect_throttle_brake_data.py --teacher gapkeep --scenarios emergency \
+      --duration "${SUPPLEMENT_S:-600}" --seed "$((SEED + 7))" --output dataset_${d}_emerg \
+      $RADAR --radar-multipath-mode $mode > logs/collect_${d}_emerg.log 2>&1 || code=1
+    if [ $code -eq 0 ] && [ -f dataset_${d}_emerg/data.csv ]; then
+      cp dataset_${d}_emerg/data.csv dataset_$d/data_emergency.csv
+      cp dataset_${d}_emerg/data.detections.npz dataset_$d/data_emergency.detections.npz
+      python3 inspect_dataset.py dataset_${d}_emerg >> logs/collect_${d}_emerg.log 2>&1
+    else
+      code=1
+    fi
+    mark supplement_$d $code; [ $code -ne 0 ] && return $code
+  done
+  return 0
 }
 
 stage_train() {
@@ -103,6 +128,7 @@ stage_arms() {
 case "${1:-all}" in
   smoke) stage_smoke ;;
   collect) stage_collect ;;
+  supplement) stage_supplement ;;
   train) stage_train ;;
   s5smoke) stage_s5smoke ;;
   arms) stage_arms ;;

@@ -139,6 +139,8 @@ def main():
                         help="Random seeds; each also seeds the radar")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=2000)
+    parser.add_argument("--tm-port", type=int, default=int(os.environ.get("CARLA_TM_PORT", "8000")),
+                        help="traffic-manager port forwarded to every scenario (CARLA_TM_PORT)")
     parser.add_argument("--towns", nargs="+", default=[DEFAULT_TOWN],
                         help=(
                             "towns to run, each in its own results subfolder when "
@@ -176,6 +178,7 @@ def main():
     parser.add_argument("--s5-duration-s", type=float, default=SCENARIO_DURATION_S[5],
                         help="Length of the S5 ghost-exposure drive")
     args = parser.parse_args()
+    os.environ["CARLA_TM_PORT"] = str(args.tm_port)
     if min(
         args.s1_target_speed_kmh,
         args.s1_obstacle_distance_m,
