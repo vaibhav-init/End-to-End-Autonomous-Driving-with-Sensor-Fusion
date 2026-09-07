@@ -14,7 +14,7 @@ export CARLA_TM_PORT="${CARLA_TM_PORT:-8050}"
 OV="${OV:-artifacts/rgd_calibration_v7s/calibrated_overrides.json}"
 RADAR="--radar-backend realistic --radar-profile rgd_regime_v1 --radar-config $OV"
 SEED="${SEED:-42}"
-COLLECT_S="${COLLECT_S:-1800}"
+COLLECT_S="${COLLECT_S:-900}"
 LOG=logs/closed_loop_pipeline.log
 mkdir -p logs
 
