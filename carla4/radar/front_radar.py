@@ -2,6 +2,7 @@
 
 from dataclasses import asdict, replace
 import math
+import time
 import os
 import threading
 
@@ -52,6 +53,38 @@ _BACKEND_ALIASES = {
     "phenomenological": "realistic",
 }
 _DYNAMIC_ACTOR_TAGS = frozenset((12, 13, 14, 15, 16, 17, 18, 19, 21))
+
+
+def wait_for_radar_frame(radar, frame, timeout_s=5.0):
+    """Block until the radar has processed CARLA frame ``frame``.
+
+    Sensor callbacks run on their own thread. With a dense semantic LiDAR the
+    C-Shenron + target-list pipeline needs longer than one 20 Hz tick, so a
+    loop that ticks the world and immediately reads the radar consumes target
+    lists that fall progressively further behind: measured on a straight
+    approach at 16 m/s, a stopped car 9 m ahead was still reported at 36 m,
+    a lag of over a second that grew until the queue saturated. Waiting costs
+    wall-clock time and keeps the sensor synchronous with the simulation,
+    which is also what makes runs comparable across arms.
+
+    Returns True when the radar caught up, False on timeout or callback error.
+    """
+
+    diagnostics = getattr(radar, "diagnostics", None)
+    if diagnostics is None:
+        return True
+    deadline = time.monotonic() + float(timeout_s)
+    while True:
+        info = diagnostics()
+        if info.get("last_error"):
+            return False
+        if "frame" not in info:
+            return True
+        if int(info.get("frame", -1)) >= int(frame):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.001)
 
 
 def normalize_radar_backend(backend=None):

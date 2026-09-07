@@ -15,7 +15,7 @@ import uuid
 import h5py
 import numpy as np
 
-from radar import create_front_radar
+from radar import create_front_radar, wait_for_radar_frame
 from radar.ghost_detection.export_expansion import expand_detection_points
 from radar.ghost_detection.features import snr_db_to_amplitude
 from radar.multipath import ReflectorSegment, generate_multipath_targets
@@ -645,19 +645,17 @@ def _spawn_walkers(client, world, count, seed):
 
 
 def _wait_for_radar_frame(radar, frame, timeout_s):
-    deadline = time.monotonic() + timeout_s
-    diagnostics = {}
-    while time.monotonic() < deadline:
-        diagnostics = radar.diagnostics()
-        callback_error = diagnostics.get("last_error")
-        if callback_error:
-            raise RuntimeError(
-                f"Radar callback failed while waiting for frame {frame}: "
-                f"{callback_error}"
-            )
-        if int(diagnostics.get("frame", -1)) >= int(frame):
-            return diagnostics
-        time.sleep(0.002)
+    # Shared implementation (radar.wait_for_radar_frame); this wrapper keeps
+    # the collector's hard failure on timeout or callback error.
+    if wait_for_radar_frame(radar, frame, timeout_s):
+        return radar.diagnostics()
+    diagnostics = radar.diagnostics()
+    callback_error = diagnostics.get("last_error")
+    if callback_error:
+        raise RuntimeError(
+            f"Radar callback failed while waiting for frame {frame}: "
+            f"{callback_error}"
+        )
     raise TimeoutError(
         f"Radar callback did not reach CARLA frame {frame} within "
         f"{timeout_s:.1f}s; latest radar frame="

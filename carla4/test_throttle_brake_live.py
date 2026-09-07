@@ -21,6 +21,7 @@ import torch
 from radar import (
     add_radar_arguments,
     create_front_radar,
+    wait_for_radar_frame,
     describe_radar_configuration,
     radar_overrides_from_args,
     resolve_realistic_radar_config,
@@ -662,7 +663,11 @@ def main():
 
     try:
         for frame in range(total_frames):
-            world.tick()
+            world_frame = world.tick()
+            # Keep the sensor synchronous with the simulation; see
+            # radar.wait_for_radar_frame.
+            if radar is not None:
+                wait_for_radar_frame(radar, world_frame, 5.0)
 
             velocity = ego.get_velocity()
             speed = math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)

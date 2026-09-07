@@ -26,6 +26,7 @@ from radar import (
     FrontRadar,
     add_radar_arguments,
     create_front_radar,
+    wait_for_radar_frame,
     describe_radar_configuration,
     radar_diagnostics_row,
     radar_overrides_from_args,
@@ -48,6 +49,7 @@ FPS = 20
 MAX_RADAR_RANGE = RADAR_RANGE_M
 
 NPC_VEHICLES = 45
+RADAR_SYNC_TIMEOUT_S = 5.0
 NPC_PEDESTRIANS = 25
 HISTORY_FRAMES = 10
 LABEL_HORIZON = 10
@@ -918,6 +920,7 @@ def main():
     emergency_stopped_frames = 0
     last_emergency_frame = 0
     emergency_count = 0
+    radar_sync_timeouts = 0
     respawn_count = 0
     stuck_frames = 0
     absolute_stuck_frames = 0
@@ -968,7 +971,15 @@ def main():
                     float(args.watchdog_s), repeat=False, exit=True
                 )
             tick_start = time.time()
-            world.tick()
+            world_frame = world.tick()
+            # Wait for the sensor thread: without this the logged radar row
+            # lags the world by up to a second, so a stopped car 9 m ahead is
+            # recorded at 36 m and the future-speed label teaches braking the
+            # features cannot explain.
+            if radar is not None and not wait_for_radar_frame(
+                radar, world_frame, RADAR_SYNC_TIMEOUT_S
+            ):
+                radar_sync_timeouts += 1
             tick_elapsed = time.time() - tick_start
             if tick_elapsed > 1.0:
                 print(
@@ -1325,6 +1336,7 @@ def main():
                 print("=" * 72)
                 print(f"  Samples saved:      {len(df):,}")
                 print(f"  Emergency events:   {emergency_count}")
+                print(f"  Radar sync timeouts:{radar_sync_timeouts}")
                 print(f"  Respawns:           {respawn_count}")
                 print(f"  Scenario coverage:  {scenario_counts}")
                 print(f"  Dataset:            {csv_path}")

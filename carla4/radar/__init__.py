@@ -7,6 +7,7 @@ from .cshenron_core import (
     semantic_tag_name,
 )
 from .front_radar import (
+    wait_for_radar_frame,
     MULTIPATH_MODES,
     RADAR_BACKENDS,
     CShenronFrontRadar,
@@ -64,6 +65,7 @@ __all__ = [
     "RealisticRadarModel",
     "ReflectorSegment",
     "add_radar_arguments",
+    "wait_for_radar_frame",
     "create_front_radar",
     "describe_radar_configuration",
     "extract_reflector_segments",

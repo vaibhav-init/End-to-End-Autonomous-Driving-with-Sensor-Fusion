@@ -35,7 +35,7 @@ if _CARLA4_DIR not in sys.path:
 
 from speed_model import BASE_FEATURE_COLS as DEFAULT_BASE_FEATURE_COLS  # noqa: E402
 from speed_model import TargetSpeedMLP, flatten_history  # noqa: E402
-from radar import (  # noqa: E402
+from radar import (wait_for_radar_frame,   # noqa: E402
     create_front_radar,
     describe_radar_configuration,
     normalize_radar_backend,
@@ -97,6 +97,8 @@ class MLPDriver(Driver):
         # mask a reaction to a ghost; it stops the model under-driving on an
         # empty road. Separately switchable all the same.
         self.cruise_floor = bool(cruise_floor)
+        self.radar_sync_timeout_s = 5.0
+        self._radar_sync_timeouts = 0
         self.fps = fps
         self.debug_every = debug_every
         self.radar_backend = normalize_radar_backend(radar_backend)
@@ -273,6 +275,15 @@ class MLPDriver(Driver):
               f"(base={len(self.base_feature_cols)})")
 
     def get_control(self, ego, world):
+
+        # The sensor thread lags the simulation under a dense LiDAR; without
+        # this the model reads a target list over a second stale (a stopped
+        # car 9 m ahead reported at 36 m). Same wait in every driver, so arms
+        # stay comparable.
+        if getattr(self, "radar", None) is not None:
+            frame = world.get_snapshot().frame
+            if not wait_for_radar_frame(self.radar, frame, self.radar_sync_timeout_s):
+                self._radar_sync_timeouts += 1
         velocity = ego.get_velocity()
         speed = math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
         accel = (speed - self._prev_speed) * self.fps if self._frame > 0 else 0.0
