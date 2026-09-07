@@ -25,6 +25,8 @@ from driving_contract import (
 )
 from speed_model import TargetSpeedMLP, feature_sort_key
 
+BRAKE_WEIGHT_SCALE_MPS = 3.0
+
 
 DATA_PATH = "dataset_throttle_brake"
 DATASET_CONFIG_PATH = "dataset_throttle_brake/dataset_config.json"
@@ -113,6 +115,8 @@ def main():
     parser.add_argument("--config", default=DATASET_CONFIG_PATH)
     parser.add_argument("--output", default=MODEL_DIR, help="Directory to save model artifacts")
     parser.add_argument("--validation-fraction", type=float, default=0.2)
+    parser.add_argument("--brake-weight", type=float, default=4.0,
+                        help="extra loss weight for rows whose label is well below the ego speed")
     parser.add_argument("--label-horizon", type=int, default=None,
                         help="recompute the label as the mean ego speed over this many future frames "
                              "(default: the collector's stored 10-frame label)")
@@ -291,6 +295,13 @@ def main():
 
     X = df[feature_cols].values.astype(np.float32)
     y = df[label_col].values.astype(np.float32)
+    # Braking frames are a few percent of the rows and the ones that matter:
+    # a row whose label sits BRAKE_WEIGHT_SCALE_MPS or more below the ego
+    # speed carries 1 + brake_weight times the loss of a cruise row.
+    ego_now = df["ego_speed_t-0"].values.astype(np.float32)
+    sample_weight = (
+        1.0 + float(args.brake_weight) * np.clip((ego_now - y) / BRAKE_WEIGHT_SCALE_MPS, 0.0, 1.0)
+    ).astype(np.float32)
 
     print(f"  Features: {len(feature_cols)} columns")
     print(f"  Label:    {label_col}")
@@ -306,6 +317,8 @@ def main():
     X_val = X[validation_mask.to_numpy()]
     y_train = y[train_mask.to_numpy()]
     y_val = y[validation_mask.to_numpy()]
+    w_train = sample_weight[train_mask.to_numpy()]
+    w_val = sample_weight[validation_mask.to_numpy()]
     train_groups = set(df.loc[train_mask, "episode_id"])
     validation_groups = set(df.loc[validation_mask, "episode_id"])
     overlap = train_groups & validation_groups
@@ -329,8 +342,8 @@ def main():
         pickle.dump(scaler, fh)
     print(f"  Saved scaler to {scaler_path}")
 
-    train_ds = TensorDataset(torch.tensor(X_train), torch.tensor(y_train))
-    val_ds = TensorDataset(torch.tensor(X_val), torch.tensor(y_val))
+    train_ds = TensorDataset(torch.tensor(X_train), torch.tensor(y_train), torch.from_numpy(w_train))
+    val_ds = TensorDataset(torch.tensor(X_val), torch.tensor(y_val), torch.from_numpy(w_val))
 
     train_dl = DataLoader(train_ds, batch_size=args.batch, shuffle=True)
     val_dl = DataLoader(val_ds, batch_size=args.batch * 2, shuffle=False)
@@ -341,7 +354,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=12
     )
-    criterion = nn.MSELoss()
+    criterion = nn.MSELoss(reduction="none")
 
     total_params = sum(param.numel() for param in model.parameters())
     print(f"  Device: {device}")
@@ -362,10 +375,10 @@ def main():
         train_loss = 0.0
         train_total = 0
 
-        for xb, yb in train_dl:
-            xb, yb = xb.to(device), yb.to(device)
+        for xb, yb, wb in train_dl:
+            xb, yb, wb = xb.to(device), yb.to(device), wb.to(device)
             pred = model(xb)
-            loss = criterion(pred, yb)
+            loss = (criterion(pred, yb) * wb).sum() / wb.sum()
 
             optimizer.zero_grad()
             loss.backward()
@@ -382,10 +395,10 @@ def main():
         val_preds = []
         val_labels = []
         with torch.no_grad():
-            for xb, yb in val_dl:
-                xb, yb = xb.to(device), yb.to(device)
+            for xb, yb, wb in val_dl:
+                xb, yb, wb = xb.to(device), yb.to(device), wb.to(device)
                 pred = model(xb)
-                loss = criterion(pred, yb)
+                loss = (criterion(pred, yb) * wb).sum() / wb.sum()
                 val_loss += loss.item() * len(xb)
                 val_total += len(xb)
                 val_preds.append(pred.cpu().numpy())
@@ -430,7 +443,7 @@ def main():
     all_preds = []
     all_labels = []
     with torch.no_grad():
-        for xb, yb in val_dl:
+        for xb, yb, _wb in val_dl:
             xb = xb.to(device)
             pred = model(xb)
             all_preds.append(pred.cpu().numpy())
