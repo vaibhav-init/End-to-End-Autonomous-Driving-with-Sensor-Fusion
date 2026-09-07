@@ -144,11 +144,14 @@ def _advance_waypoint(carla_map, ego, ahead_m):
         # Target ended up behind ego — direction detection failed
         return None
 
-    # The point must also sit in the ego's driving corridor, not one lane
-    # over: a staged hazard the ego is not on course to meet measures
-    # nothing. Half a lane width of tolerance.
+    # The point must sit in the ego's driving corridor, not one lane over,
+    # and at roughly the requested distance. ``next()`` on Town04 can jump to
+    # a connecting road, which staged S1's 25 m obstacle 200-500 m away (and
+    # on the wrong carriageway) in every run before this check existed.
     lateral = abs(-ego_fwd.y * to_target_x + ego_fwd.x * to_target_y)
     if lateral > MAX_STAGED_LATERAL_OFFSET_M:
+        return None
+    if not 0.5 * ahead_m <= dot_check <= 1.5 * ahead_m + 5.0:
         return None
 
     return wp
