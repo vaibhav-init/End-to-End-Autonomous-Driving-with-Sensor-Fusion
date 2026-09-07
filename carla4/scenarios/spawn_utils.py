@@ -83,6 +83,11 @@ def get_highway_spawns(carla_map, min_straight_m=80.0, max_yaw_diff=5.0,
     return highway_spawns
 
 
+# A staged actor further off the ego's forward axis than this is in a
+# different lane; the radar corridor is 1.8 m half width plus growth.
+MAX_STAGED_LATERAL_OFFSET_M = 2.0
+
+
 def _advance_waypoint(carla_map, ego, ahead_m):
     """
     Walk ahead_m along the road in the ego's actual driving direction.
@@ -111,14 +116,23 @@ def _advance_waypoint(carla_map, ego, ahead_m):
     else:
         advance_fn = lambda w, d: w.previous(d)
 
-    # Walk forward to the target distance
+    # Walk forward to the target distance, staying on the ego's own lane.
+    # ``next()`` lists every continuation at a fork or ramp, and taking [0]
+    # blindly walked the staged obstacle onto a neighbouring carriageway on
+    # Town04: the ground truth still reported a closing in-path actor while
+    # the radar saw only the guardrail between them, so the scenario scored a
+    # perception failure that never existed.
+    lane_id = wp.lane_id
+    road_id = wp.road_id
     travelled = 0.0
     step = 3.0
     while travelled < ahead_m:
         next_wps = advance_fn(wp, step)
         if not next_wps:
             return None
-        wp = next_wps[0]
+        same_lane = [w for w in next_wps if w.road_id == road_id and w.lane_id == lane_id]
+        same_side = [w for w in next_wps if (w.lane_id > 0) == (lane_id > 0)]
+        wp = (same_lane or same_side or next_wps)[0]
         travelled += step
 
     # Verify the target position is actually ahead of the ego
@@ -128,6 +142,13 @@ def _advance_waypoint(carla_map, ego, ahead_m):
     dot_check = ego_fwd.x * to_target_x + ego_fwd.y * to_target_y
     if dot_check < 0:
         # Target ended up behind ego — direction detection failed
+        return None
+
+    # The point must also sit in the ego's driving corridor, not one lane
+    # over: a staged hazard the ego is not on course to meet measures
+    # nothing. Half a lane width of tolerance.
+    lateral = abs(-ego_fwd.y * to_target_x + ego_fwd.x * to_target_y)
+    if lateral > MAX_STAGED_LATERAL_OFFSET_M:
         return None
 
     return wp
