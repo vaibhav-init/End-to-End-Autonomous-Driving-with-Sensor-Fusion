@@ -44,6 +44,7 @@ from train_target_speed_transformer import (
 from transformer_controller import (
     SOURCE_CODES,
     SPEED_SCALE_MPS,
+    dataset_frames_to_scans,
     outputs_to_target_speed,
     load_model,
 )
