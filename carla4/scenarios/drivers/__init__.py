@@ -3,8 +3,8 @@
 Pluggable scenario drivers.
 
 `make_driver` imports the concrete driver lazily so each conda env only loads
-what it can: the `pcla` driver pulls in the PCLA framework, the `mlp` and
-`transformer` drivers pull in torch (and sklearn for the MLP's scaler).
+what it can: the `pcla` driver pulls in the PCLA framework, the `mlp`,
+`transformer` and `cnn` drivers pull in torch (and sklearn for the MLP's scaler).
 Importing this package itself is cheap and env-agnostic.
 
 Radar options arrive as the keyword set produced by
@@ -14,7 +14,7 @@ than threading nine arguments through every call.
 
 from .base import Driver
 
-DRIVER_NAMES = ("pcla", "mlp", "transformer")
+DRIVER_NAMES = ("pcla", "mlp", "transformer", "cnn")
 
 
 def make_driver(
@@ -66,6 +66,16 @@ def make_driver(
         if not model_dir:
             raise ValueError("transformer driver requires --model-dir")
         return TransformerDriver(
+            model_dir=model_dir,
+            debug_every=debug_every,
+            cruise_floor=cruise_floor,
+            **radar_kwargs,
+        )
+    if name == "cnn":
+        from .cnn_driver import CNNDriver
+        if not model_dir:
+            raise ValueError("cnn driver requires --model-dir")
+        return CNNDriver(
             model_dir=model_dir,
             debug_every=debug_every,
             cruise_floor=cruise_floor,

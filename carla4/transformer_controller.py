@@ -121,17 +121,30 @@ def build_window_tokens(scans, ego_speed_mps, ego_accel_mps2, max_points):
     token row, ``SOURCE_CODES``), which evaluation uses to switch ghosts off.
     """
 
+    # The three frame-relative statistics are defined per scan over ALL points
+    # of that scan (radar.ghost_detection.features), so they are computed here,
+    # before the window is pooled and before the point budget is applied.
+    # Computing them afterwards made "amplitude relative to the frame" mean
+    # "relative to the 15% of five pooled scans that survived the budget",
+    # which is not the quantity the ghost detector or the calibration uses.
     ranges, azimuths, velocities, snrs, ages, sources = [], [], [], [], [], []
+    rel_amps, doppler_residuals, densities = [], [], []
     for age_s, scan in scans:
         r, az, vr, snr, src = _scan_columns(scan)
         if r.size == 0:
             continue
+        rel, residual, density = frame_context_statistics(
+            r, az, vr, snr_db_to_amplitude(snr)
+        )
         ranges.append(r)
         azimuths.append(az)
         velocities.append(vr)
         snrs.append(snr)
         ages.append(np.full(r.size, max(0.0, float(age_s))))
         sources.append(src)
+        rel_amps.append(rel)
+        doppler_residuals.append(residual)
+        densities.append(density)
     tokens = np.zeros((max_points + 1, TOKEN_DIM), dtype=np.float32)
     mask = np.zeros(max_points + 1, dtype=np.bool_)
     source_codes = np.full(max_points + 1, -1, dtype=np.int8)
@@ -152,14 +165,17 @@ def build_window_tokens(scans, ego_speed_mps, ego_accel_mps2, max_points):
     snr = np.concatenate(snrs)
     age = np.concatenate(ages)
     src = np.concatenate(sources)
+    rel_amp = np.concatenate(rel_amps)
+    doppler_residual = np.concatenate(doppler_residuals)
+    density = np.concatenate(densities)
 
     indices = _select_points(r, az, age, max_points)
-    r, az, vr, snr, age, src = (
-        r[indices], az[indices], vr[indices], snr[indices], age[indices], src[indices]
+    r, az, vr, snr, age, src, rel_amp, doppler_residual, density = (
+        r[indices], az[indices], vr[indices], snr[indices], age[indices], src[indices],
+        rel_amp[indices], doppler_residual[indices], density[indices],
     )
 
     amplitude = snr_db_to_amplitude(snr)
-    rel_amp, doppler_residual, density = frame_context_statistics(r, az, vr, amplitude)
     features = physical_features(
         r, az, vr, amplitude, age,
         relative_log_amplitude=rel_amp,

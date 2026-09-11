@@ -26,6 +26,12 @@ import torch
 from driving_contract import RADAR_RANGE_M
 from radar.realistic_core import RadarDetection
 from speed_model import TargetSpeedMLP, flatten_history
+from cnn_controller import (  # noqa: E402
+    MODEL_TYPE as CNN_MODEL_TYPE,
+    build_window_grid,
+    load_model as load_cnn,
+    predict_target_speed as predict_cnn_target_speed,
+)
 from transformer_controller import (
     MODEL_TYPE as TRANSFORMER_MODEL_TYPE,
     build_window_tokens,
@@ -209,7 +215,16 @@ def main():
     model_type = config.get("model_type", "mlp")
     fps = float(config.get("fps") or 20)
 
-    if model_type == TRANSFORMER_MODEL_TYPE:
+    if model_type == CNN_MODEL_TYPE:
+        model, _ = load_cnn(args.model_dir, device="cpu")
+        window_frames = int(config["window_frames"])
+        background = ProbeBackground(args.background_from) if args.background_from else None
+
+        def predict(ego_speed, gap, obstacle_speed):
+            scans = build_scans(ego_speed, gap, obstacle_speed, window_frames, fps, background)
+            window = build_window_grid(scans, ego_speed)
+            return predict_cnn_target_speed(model, window, device="cpu")
+    elif model_type == TRANSFORMER_MODEL_TYPE:
         model, _ = load_transformer(args.model_dir, device="cpu")
         window_frames = int(config["window_frames"])
         max_points = int(config["max_points"])

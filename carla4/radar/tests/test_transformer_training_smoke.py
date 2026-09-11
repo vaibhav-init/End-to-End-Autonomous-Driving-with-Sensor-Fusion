@@ -194,6 +194,36 @@ class TransformerChainSmokeTest(unittest.TestCase):
                 summary = json.load(fh)
             self.assertTrue(summary, "counterfactual report is empty")
 
+    def test_cnn_train_accept_counterfactual(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "dataset_ghost")
+            make_collection(data, ghosts=True)
+            model_dir = os.path.join(tmp, "model_cnn")
+            train = _run(
+                "train_target_speed_cnn.py", "--data", data, "--output", model_dir,
+                "--epochs", "2", "--batch", "16", "--width", "8", "--device", "cpu",
+                "--num-workers", "0",
+            )
+            self.assertEqual(train.returncode, 0, train.stdout[-3000:] + train.stderr[-3000:])
+            with open(os.path.join(model_dir, "model_config.json"), encoding="utf-8") as fh:
+                config = json.load(fh)
+            self.assertEqual(config["model_type"], "cnn")
+            self.assertEqual(config["radar_backend"], "realistic")
+
+            accept = _run("acceptance_test.py", "--model-dir", model_dir)
+            self.assertIn("ACCEPTANCE TEST", accept.stdout, accept.stdout[-2000:] + accept.stderr[-2000:])
+            self.assertNotIn("Traceback", accept.stderr)
+
+            report = os.path.join(tmp, "counterfactual_cnn.json")
+            cf = _run(
+                "counterfactual_ghost_test.py", "--model-dir", model_dir, "--data", data,
+                "--limit", "48", "--device", "cpu", "--output", report,
+            )
+            self.assertEqual(cf.returncode, 0, cf.stdout[-3000:] + cf.stderr[-3000:])
+            with open(report, encoding="utf-8") as fh:
+                summary = json.load(fh)
+            self.assertGreater(summary["windows_total"], 0)
+
     def test_mlp_trainer_and_probe_on_the_same_collection(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = os.path.join(tmp, "dataset_clean")
