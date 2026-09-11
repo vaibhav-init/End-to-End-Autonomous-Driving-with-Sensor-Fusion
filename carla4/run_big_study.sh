@@ -20,19 +20,43 @@ LOG=logs/big_study.log
 mkdir -p logs
 mark() { echo "$1 $(date +%H:%M:%S)" >> "$LOG"; }
 
+# An epoch on the large sets costs about 9.4 minutes, so the 60-epoch ceiling
+# the small study used would run for days. On 20 minutes of data the best
+# checkpoint landed at epoch 19 and everything after it overfitted, so a
+# ceiling of EPOCHS with PATIENCE of no improvement bounds the schedule while
+# leaving room for the optimum to arrive later on four times the data.
+EPOCHS="${EPOCHS:-30}"
+PATIENCE="${PATIENCE:-8}"
+
+# CNN before transformer: it is the new question, so if anything runs out of
+# time it should be the model we already have a result for.
 stage_train() {
   for d in clean ghost; do
     local data=dataset_${d}_big
     [ -d "$data" ] || { mark "SKIP_${d}_no_data"; continue; }
-    python3 -u train_throttle_brake.py --data "$data" --config "$data/dataset_config.json" \
-        --label-horizon "$HORIZON" --output model_mlp_${d}_big > logs/big_train_mlp_$d.log 2>&1
-    mark "TRAIN_mlp_${d}=$?"
-    python3 -u train_target_speed_transformer.py --data "$data" --label-horizon "$HORIZON" \
-        --num-workers "$WORKERS" --output model_tf_${d}_big > logs/big_train_tf_$d.log 2>&1
-    mark "TRAIN_tf_${d}=$?"
-    python3 -u train_target_speed_cnn.py --data "$data" --label-horizon "$HORIZON" \
-        --num-workers "$WORKERS" --output model_cnn_${d}_big > logs/big_train_cnn_$d.log 2>&1
-    mark "TRAIN_cnn_${d}=$?"
+    if [ ! -f model_mlp_${d}_big/model_config.json ]; then
+      python3 -u train_throttle_brake.py --data "$data" --config "$data/dataset_config.json" \
+          --label-horizon "$HORIZON" --output model_mlp_${d}_big > logs/big_train_mlp_$d.log 2>&1
+      mark "TRAIN_mlp_${d}=$?"
+    else
+      mark "HAVE_mlp_${d}"
+    fi
+    if [ ! -f model_cnn_${d}_big/model_config.json ]; then
+      python3 -u train_target_speed_cnn.py --data "$data" --label-horizon "$HORIZON" \
+          --epochs "$EPOCHS" --early-stop-patience "$PATIENCE" \
+          --num-workers "$WORKERS" --output model_cnn_${d}_big > logs/big_train_cnn_$d.log 2>&1
+      mark "TRAIN_cnn_${d}=$?"
+    else
+      mark "HAVE_cnn_${d}"
+    fi
+    if [ ! -f model_tf_${d}_big/model_config.json ]; then
+      python3 -u train_target_speed_transformer.py --data "$data" --label-horizon "$HORIZON" \
+          --epochs "$EPOCHS" --early-stop-patience "$PATIENCE" \
+          --num-workers "$WORKERS" --output model_tf_${d}_big > logs/big_train_tf_$d.log 2>&1
+      mark "TRAIN_tf_${d}=$?"
+    else
+      mark "HAVE_tf_${d}"
+    fi
   done
 }
 
