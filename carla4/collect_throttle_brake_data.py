@@ -627,6 +627,14 @@ def main():
             "phase (each spawn is one hard-braking-at-speed event)"
         ),
     )
+    parser.add_argument(
+        "--no-rendering",
+        action="store_true",
+        help=(
+            "run CARLA with rendering disabled. The semantic LiDAR still "
+            "works, no camera is used, and the spectator view goes blank"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default=SAVE_DIR)
     add_radar_arguments(parser)
@@ -771,6 +779,11 @@ def main():
     settings = world.get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = 1.0 / FPS
+    # The radar front end is a ray-cast semantic LiDAR, which reads the
+    # physics world rather than the rendered frame, so collection does not
+    # need the renderer. Turning it off frees the GPU, which matters on a
+    # shared box where another job can starve CARLA of it.
+    settings.no_rendering_mode = bool(args.no_rendering)
     world.apply_settings(settings)
 
     try:
