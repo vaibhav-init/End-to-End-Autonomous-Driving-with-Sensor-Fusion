@@ -28,6 +28,8 @@ import argparse
 import math
 import statistics
 
+import numpy as np
+
 from radar.realistic_core import (
     IdealRadarTarget,
     RadarEnvironment,
@@ -78,7 +80,29 @@ def mirror_ghost(scan, azimuth_rad):
     )
 
 
-def measure(mode, clutter_rate, azimuth_rad, scans, seed):
+def incoherent_ghost(scan, azimuth_rad, rng):
+    """Spatially matched to the mirror ghost, temporally destroyed.
+
+    Same in-path azimuth and the same range band the mirror ghost sweeps, but
+    the range is redrawn every scan far outside the tracker's 3 m association
+    gate and the id is fresh. This separates "the false target is where it
+    matters" from "the false target persists", which the coherent arm conflates.
+    """
+
+    low, high = 60.0 * 0.45 - 15.0, 60.0 * 0.45
+    distance = float(rng.uniform(low, high))
+    return IdealRadarTarget(
+        object_id=-(20_000_000_000 + scan), semantic_tag=14,
+        distance_m=distance,
+        azimuth_rad=azimuth_rad + float(rng.normal(0.0, 0.004)),
+        relative_velocity_mps=0.18, snr_db=15.0, point_count=3,
+        lateral_extent_m=1.8, source="ghost", parent_object_id=101,
+        reflector_id=103, bounce_type="mirror", bounce_order=2,
+        path_length_m=distance, velocity_xy_mps=(0.18, 0.0), radial_extent_m=1.0,
+    )
+
+
+def measure(mode, clutter_rate, azimuth_rad, scans, seed, coherent=True):
     """Delivered false detections per scan, and how often one reached the controller."""
 
     config = load_realistic_radar_config(
@@ -87,15 +111,22 @@ def measure(mode, clutter_rate, azimuth_rad, scans, seed):
     )
     model = RealisticRadarModel(config=config, seed=seed)
     environment = RadarEnvironment()
+    # Its own stream, so the incoherent arm's redraws cannot perturb the
+    # direct-target noise the two arms are supposed to share.
+    jitter = np.random.default_rng(seed ^ 0x1CE)
     delivered = selected = 0
     for scan in range(scans):
+        if mode != "geometry":
+            ghosts = None
+        elif coherent:
+            ghosts = [mirror_ghost(scan, azimuth_rad)]
+        else:
+            ghosts = [incoherent_ghost(scan, azimuth_rad, jitter)]
         result = model.step(
             [lead_vehicle(scan), guardrail()],
             timestamp_s=scan * 0.05,
             environment=environment,
-            multipath_targets=(
-                [mirror_ghost(scan, azimuth_rad)] if mode == "geometry" else None
-            ),
+            multipath_targets=ghosts,
         )
         _, points = model.latest_points()
         delivered += sum(point.source in FALSE_SOURCES for point in points)
@@ -130,6 +161,7 @@ def main():
     print("-" * 82)
 
     structured = {}
+    in_path = min(args.ghost_azimuths)
     for azimuth in args.ghost_azimuths:
         rate, selected = averaged(mode="geometry", clutter_rate=0.0,
                                   azimuth_rad=azimuth, **common)
@@ -148,16 +180,30 @@ def main():
 
     # Compare the in-path ghost against the clutter rate that delivers as many
     # false detections, which is the only honest comparison.
-    in_path = min(structured)
     ghost_rate, ghost_selected = structured[in_path]
     matched = min(random_arm, key=lambda r: abs(random_arm[r][0] - ghost_rate))
     clutter_rate, clutter_selected = random_arm[matched]
+    print()
+    inco_rate, inco_selected = averaged(mode="geometry", clutter_rate=0.0,
+                                       azimuth_rad=in_path, coherent=False, **common)
+    print(f"{'incoherent in-path (same envelope, i.i.d.)':<44}"
+          f"{inco_rate:>17.3f}{inco_selected:>20.2%}")
+
     print("-" * 82)
     print(f"  rate-matched comparison at ~{ghost_rate:.2f} false detections/scan")
     print(f"    structured (in-path ghost)  reached the controller {ghost_selected:.2%} of scans")
     print(f"    random     (clutter {matched:.1f})      reached the controller {clutter_selected:.2%} of scans")
     if clutter_selected > 0:
         print(f"    ratio                       {ghost_selected / clutter_selected:.1f}x")
+        print()
+        print("  and it factorises: the ratio is the product of two independent")
+        print("  mechanisms, neither of which a per-frame statistical corruption")
+        print("  model reproduces.")
+        print(f"    placement  (uniform FOV -> in-path)   {clutter_selected:.2%} -> "
+              f"{inco_selected:.2%}   {inco_selected / clutter_selected:.1f}x")
+        if inco_selected > 0:
+            print(f"    coherence  (i.i.d. -> tracks parent)  {inco_selected:.2%} -> "
+                  f"{ghost_selected:.2%}   {ghost_selected / inco_selected:.1f}x")
     print()
     print("  The azimuth sweep is the control: the same ghost outside the path gate")
     print("  reaches the controller on no scan at all, so this measures coherence")
