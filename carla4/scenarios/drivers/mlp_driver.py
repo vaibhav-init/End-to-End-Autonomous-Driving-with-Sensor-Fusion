@@ -384,6 +384,7 @@ class MLPDriver(Driver):
         }
         if self.radar is not None:
             diagnostics.update(self.radar.diagnostics())
+        diagnostics["radar_sync_timeouts"] = self._radar_sync_timeouts
         if self._last_distance_state is not None:
             diagnostics.update(
                 {
@@ -407,6 +408,9 @@ class MLPDriver(Driver):
         return getter() if getter is not None else None
 
     def cleanup(self):
+        if self._radar_sync_timeouts:
+            print(f"  [mlp]   WARNING: {self._radar_sync_timeouts} ticks used a "
+                  "stale radar frame; this run is not comparable to a clean one")
         if self.radar is not None:
             self.radar.cleanup()
             self.radar = None

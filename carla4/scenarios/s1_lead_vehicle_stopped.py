@@ -102,6 +102,10 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     """Run S1: Lead Vehicle Stopped at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
+    # Seed the Traffic Manager too, not just Python's RNG. Without this the
+    # background traffic differs between two runs of the same seed, so the
+    # "paired seeds" the ghost-vs-clean comparison relies on are not paired.
+    client.get_trafficmanager(TM_PORT).set_random_device_seed(seed)
 
     # SpeedController for staging — drives ego to target speed
     speed_ctrl = SpeedController(

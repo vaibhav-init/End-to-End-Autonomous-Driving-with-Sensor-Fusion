@@ -116,6 +116,10 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     """Run S2: Lead Vehicle Decelerating at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
+    # Seed the Traffic Manager too, not just Python's RNG. Without this the
+    # background traffic differs between two runs of the same seed, so the
+    # "paired seeds" the ghost-vs-clean comparison relies on are not paired.
+    client.get_trafficmanager(TM_PORT).set_random_device_seed(seed)
 
     # Get highway-only spawn points (multi-lane straight roads)
     highway_spawns = get_highway_spawns(carla_map)

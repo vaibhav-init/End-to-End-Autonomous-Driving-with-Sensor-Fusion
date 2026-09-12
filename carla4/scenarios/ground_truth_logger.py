@@ -159,6 +159,11 @@ class GroundTruthLogger:
         "radar_relative_velocity_mps",
         "radar_obstacle_speed_mps",
         "radar_last_error",
+        # Running count of ticks on which the driver gave up waiting for the
+        # sensor thread and used a stale target list. A stale list once put a
+        # car at 9 m in the output at 36 m, so a run with a nonzero count here
+        # is not comparable to one without.
+        "radar_sync_timeouts",
         "controller_target_speed_mps",
     ]
 
@@ -352,6 +357,7 @@ class GroundTruthLogger:
                 "controller_obstacle_speed_mps", ""
             ),
             "radar_last_error": radar.get("last_error", ""),
+            "radar_sync_timeouts": radar.get("radar_sync_timeouts", ""),
             "controller_target_speed_mps": radar.get(
                 "controller_target_speed_mps", ""
             ),

@@ -163,6 +163,10 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     """Run S4: Cut-In from Adjacent Lane at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
+    # Seed the Traffic Manager too, not just Python's RNG. Without this the
+    # background traffic differs between two runs of the same seed, so the
+    # "paired seeds" the ghost-vs-clean comparison relies on are not paired.
+    client.get_trafficmanager(TM_PORT).set_random_device_seed(seed)
 
     # Staging: gap-keeper holds ego at a fixed gap behind the NPC (in the
     # adjacent lane) until both reach highway speed, then the NPC cuts in.

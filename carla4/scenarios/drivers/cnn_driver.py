@@ -242,6 +242,7 @@ class CNNDriver(Driver):
         diagnostics = {"safety_rules_enabled": 0, "safety_rule_fired": ""}
         if self.radar is not None:
             diagnostics.update(self.radar.diagnostics())
+        diagnostics["radar_sync_timeouts"] = self._radar_sync_timeouts
         if self._last_state is not None:
             diagnostics.update({
                 "controller_distance_m": self._last_state["distance"],
@@ -257,6 +258,9 @@ class CNNDriver(Driver):
         return self.radar.get_detections() if self.radar is not None else None
 
     def cleanup(self):
+        if self._radar_sync_timeouts:
+            print(f"  [cnn]   WARNING: {self._radar_sync_timeouts} ticks used a "
+                  "stale radar frame; this run is not comparable to a clean one")
         if self.radar is not None:
             self.radar.cleanup()
             self.radar = None
