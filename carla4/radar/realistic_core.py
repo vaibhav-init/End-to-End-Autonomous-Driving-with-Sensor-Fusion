@@ -697,6 +697,15 @@ class RealisticRadarModel:
         self._ghost_rng = np.random.default_rng(
             np.random.SeedSequence([int(seed) & 0xFFFFFFFF, 0x67686F73])
         )
+        # Clutter gets a stream too, for the same reason. It draws a Poisson
+        # count and then five values per point, so the number of draws depends
+        # on the rate, and numpy takes zero draws when the rate is 0. Sharing
+        # the generator meant a clutter-rate sweep moved the direct-target
+        # noise as well: measured, going from 0.0 to 0.08 false alarms per scan
+        # changed the selected range on 297 of 300 scans.
+        self._clutter_rng = np.random.default_rng(
+            np.random.SeedSequence([int(seed) & 0xFFFFFFFF, 0x636C7472])
+        )
         self._latest_points = ()
         self._capture_debug = bool(capture_debug)
         self._detection_filter = detection_filter
@@ -901,22 +910,22 @@ class RealisticRadarModel:
         rate = self.config.false_alarms_per_scan
         if self._interference_active:
             rate *= self.config.interference_clutter_multiplier
-        count = int(self._rng.poisson(rate))
+        count = int(self._clutter_rng.poisson(rate))
         detections = []
         half_fov = math.radians(self.config.horizontal_fov_deg / 2.0)
         for index in range(count):
             distance = float(
                 np.clip(
-                    self._rng.exponential(self.config.max_range_m / 3.0),
+                    self._clutter_rng.exponential(self.config.max_range_m / 3.0),
                     self.config.minimum_forward_distance_m,
                     self.config.max_range_m,
                 )
             )
-            azimuth = float(self._rng.uniform(-half_fov, half_fov))
-            if self._rng.random() < self.config.stationary_clutter_fraction:
-                velocity = float(self._rng.normal(0.0, 0.20))
+            azimuth = float(self._clutter_rng.uniform(-half_fov, half_fov))
+            if self._clutter_rng.random() < self.config.stationary_clutter_fraction:
+                velocity = float(self._clutter_rng.normal(0.0, 0.20))
             else:
-                velocity = float(self._rng.normal(0.0, 5.0))
+                velocity = float(self._clutter_rng.normal(0.0, 5.0))
             detections.append(
                 RadarDetection(
                     distance_m=float(
@@ -939,7 +948,7 @@ class RealisticRadarModel:
                     ),
                     snr_db=float(
                         self.config.detection_snr_midpoint_db
-                        + self._rng.exponential(2.0)
+                        + self._clutter_rng.exponential(2.0)
                     ),
                     source="clutter",
                     truth_object_id=-1000000 - self._scan_index * 1000 - index,

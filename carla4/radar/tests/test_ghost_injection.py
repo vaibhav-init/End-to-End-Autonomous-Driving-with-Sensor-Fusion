@@ -160,6 +160,32 @@ class PairedRunTest(unittest.TestCase):
         self.assertTrue(any(p.source == "ghost" for p in points_b))
 
 
+    def test_direct_detections_identical_across_clutter_rates(self):
+        """Changing the false-alarm rate must not move the direct-target noise.
+
+        Clutter draws a Poisson count and then several values per point, and
+        numpy takes no draws at all when the rate is zero, so a shared
+        generator made a clutter sweep shift every subsequent direct-target
+        draw. Before clutter got its own stream this differed on 297 of 300
+        scans.
+        """
+
+        def selected(rate):
+            config = replace(
+                load_realistic_radar_config("realistic_clean_v1"),
+                false_alarms_per_scan=rate,
+                emit_extended_points=False,
+            )
+            model = RealisticRadarModel(config, seed=42)
+            out = []
+            for scan in range(120):
+                result = model.step([direct_target()], timestamp_s=scan * 0.05)
+                out.append((result.distance_m, result.relative_velocity_mps))
+            return out
+
+        self.assertEqual(selected(0.0), selected(0.08))
+
+
 class GhostKnobTest(unittest.TestCase):
     def _ghost_counts(self, **knobs):
         config = replace(
