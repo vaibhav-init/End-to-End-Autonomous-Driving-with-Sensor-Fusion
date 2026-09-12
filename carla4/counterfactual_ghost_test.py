@@ -16,6 +16,16 @@ of |delta target speed| in km/h, the fraction of windows whose brake decision
 flips, both restricted to windows that contained ghosts, and broken down by
 the closest ghost's range. Labels are read from the sidecar only; the model
 never sees them.
+
+A flip rate on its own says the controller is *sensitive* to ghosts, not
+whether that sensitivity helps or hurts. So every flip is also scored against
+the teacher: did removing the ghosts turn a correct brake decision into a
+wrong one, or the other way round? A multipath ghost cannot exist without a
+parent object, so it is at least partly evidence that something real is
+there. If removing ghosts systematically destroys correct decisions - and
+removing the same number of direct points does not - then filtering them
+costs the controller information rather than noise, and the ceiling a perfect
+filter can reach is in the wrong place.
 """
 
 import argparse
@@ -65,6 +75,37 @@ def _summary(values):
         "p90": float(np.percentile(values, 90)),
         "p99": float(np.percentile(values, 99)),
         "max": float(values.max()),
+    }
+
+
+def _flip_directions(brake_full, brake_variant, brake_truth):
+    """Split flips into the ones that broke a correct call and the ones that fixed it.
+
+    ``brake_truth`` is what the teacher did over the label horizon, which is
+    the only ground truth available off-line for "should this have braked".
+    """
+
+    full = np.asarray(brake_full, dtype=bool)
+    variant = np.asarray(brake_variant, dtype=bool)
+    truth = np.asarray(brake_truth, dtype=bool)
+    if full.size == 0:
+        return {"windows": 0}
+    correct_before = full == truth
+    correct_after = variant == truth
+    harmful = int((correct_before & ~correct_after).sum())
+    helpful = int((~correct_before & correct_after).sum())
+    return {
+        "windows": int(full.size),
+        "accuracy_before": float(correct_before.mean()),
+        "accuracy_after": float(correct_after.mean()),
+        "accuracy_change": float(correct_after.mean() - correct_before.mean()),
+        # correct -> wrong: removing the points destroyed a good decision
+        "harmful_flips": harmful,
+        # wrong -> correct: removing the points repaired a bad decision
+        "helpful_flips": helpful,
+        "net_harmful_flips": harmful - helpful,
+        "harmful_flip_rate": harmful / full.size,
+        "helpful_flip_rate": helpful / full.size,
     }
 
 
@@ -126,6 +167,12 @@ class GridVariantDataset(Dataset):
             "ego_speed": torch.tensor(ego_speed, dtype=torch.float32),
             "ghost_count": torch.tensor(ghost_count, dtype=torch.int64),
             "closest_ghost_m": torch.tensor(closest, dtype=torch.float32),
+            # Speed change the teacher actually made, same normalisation as
+            # the token path, so one brake-decision rule covers both models.
+            "target": torch.tensor(
+                (float(row[self.label_col]) - ego_speed) / CNN_SPEED_SCALE,
+                dtype=torch.float32,
+            ),
         }
 
 
@@ -139,12 +186,14 @@ def run_cnn(args, rows, sidecars, model_config, fps, label_col):
     loader = DataLoader(dataset, batch_size=args.batch, shuffle=False, num_workers=0)
     deltas_ghost, deltas_dropout, flips_ghost, flips_dropout = [], [], [], []
     ghost_counts, closest_ghost_range, predictions_full = [], [], []
+    brake_full_l, brake_noghost_l, brake_dropout_l, brake_truth_l = [], [], [], []
     windows_total = windows_with_ghosts = 0
     with torch.no_grad():
         for batch in loader:
             ego = batch["ego"].to(args.device)
             ego_speed = batch["ego_speed"].numpy()
             counts = batch["ghost_count"].numpy()
+            teacher_delta = batch["target"].numpy() * CNN_SPEED_SCALE
             full = cnn_outputs_to_target_speed(
                 model(batch["full"].to(args.device), ego).cpu().numpy(), ego_speed)
             predictions_full.extend(full.tolist())
@@ -164,6 +213,10 @@ def run_cnn(args, rows, sidecars, model_config, fps, label_col):
                 brake_full = full[row] < margin
                 flips_ghost.append(brake_full != (noghost[row] < margin))
                 flips_dropout.append(brake_full != (dropout[row] < margin))
+                brake_full_l.append(bool(brake_full))
+                brake_noghost_l.append(bool(noghost[row] < margin))
+                brake_dropout_l.append(bool(dropout[row] < margin))
+                brake_truth_l.append(bool(teacher_delta[row] < -BRAKE_DECISION_MARGIN_MPS))
                 ghost_counts.append(int(counts[row]))
                 closest_ghost_range.append(float(batch["closest_ghost_m"][row]))
     return dict(
@@ -171,6 +224,8 @@ def run_cnn(args, rows, sidecars, model_config, fps, label_col):
         flips_ghost=flips_ghost, flips_dropout=flips_dropout, ghost_counts=ghost_counts,
         closest_ghost_range=closest_ghost_range, windows_total=windows_total,
         windows_with_ghosts=windows_with_ghosts, predictions_full=predictions_full,
+        brake_full=brake_full_l, brake_noghost=brake_noghost_l,
+        brake_dropout=brake_dropout_l, brake_truth=brake_truth_l,
     )
 
 
@@ -219,6 +274,10 @@ def main():
         windows_total = result["windows_total"]
         windows_with_ghosts = result["windows_with_ghosts"]
         predictions_full = result["predictions_full"]
+        brake_full_l = result["brake_full"]
+        brake_noghost_l = result["brake_noghost"]
+        brake_dropout_l = result["brake_dropout"]
+        brake_truth_l = result["brake_truth"]
     else:
         dataset = WindowedDetectionDataset(
             rows, sidecars, int(model_config["window_frames"]),
@@ -233,6 +292,7 @@ def main():
         windows_total = 0
         windows_with_ghosts = 0
         predictions_full = []
+        brake_full_l, brake_noghost_l, brake_dropout_l, brake_truth_l = [], [], [], []
 
         ghost_code = SOURCE_CODES["ghost"]
         direct_code = SOURCE_CODES["direct"]
@@ -242,6 +302,7 @@ def main():
                 mask = batch["mask"].to(args.device)
                 sources = batch["sources"].numpy()
                 ego_speed = batch["ego_speed"].numpy()
+                teacher_delta = batch["target"].numpy() * SPEED_SCALE_MPS
                 full = outputs_to_target_speed(model(tokens, mask).cpu().numpy(), ego_speed)
                 predictions_full.extend(full.tolist())
                 windows_total += len(full)
@@ -277,6 +338,11 @@ def main():
                     brake_dropout = dropout[row] < ego_speed[row] - BRAKE_DECISION_MARGIN_MPS
                     flips_ghost.append(brake_full != brake_noghost)
                     flips_dropout.append(brake_full != brake_dropout)
+                    brake_full_l.append(bool(brake_full))
+                    brake_noghost_l.append(bool(brake_noghost))
+                    brake_dropout_l.append(bool(brake_dropout))
+                    brake_truth_l.append(
+                        bool(teacher_delta[row] < -BRAKE_DECISION_MARGIN_MPS))
                     ghost_counts.append(int(is_ghost[row].sum()))
                     closest_ghost_range.append(float(range_feature[row][is_ghost[row]].min()))
 
@@ -305,6 +371,14 @@ def main():
         "ghost_points_per_window": _summary(ghost_counts),
         "by_closest_ghost_range": by_range,
         "brake_decision_margin_mps": BRAKE_DECISION_MARGIN_MPS,
+        # Against the teacher: did removing points break correct decisions or
+        # repair wrong ones? The dropout row is the control - if removing
+        # ghosts is harmful and removing the same number of direct points is
+        # not, the ghosts were carrying information about a real object.
+        "flip_direction_no_ghost": _flip_directions(
+            brake_full_l, brake_noghost_l, brake_truth_l),
+        "flip_direction_dropout": _flip_directions(
+            brake_full_l, brake_dropout_l, brake_truth_l),
     }
 
     print("=" * 70)
@@ -331,6 +405,31 @@ def main():
             else "the model reacts to ghosts specifically"
         )
         print(f"  verdict             {verdict}")
+
+        fg = report["flip_direction_no_ghost"]
+        fd = report["flip_direction_dropout"]
+        if fg.get("windows"):
+            print("-" * 70)
+            print("  flip direction, scored against the teacher")
+            print(f"    brake accuracy    with ghosts {fg['accuracy_before']:.3%}")
+            print(f"                      ghosts removed {fg['accuracy_after']:.3%} "
+                  f"({fg['accuracy_change']:+.3%})")
+            print(f"                      direct removed {fd['accuracy_after']:.3%} "
+                  f"({fd['accuracy_change']:+.3%})")
+            print(f"    remove ghosts     broke {fg['harmful_flips']} correct calls, "
+                  f"fixed {fg['helpful_flips']}  (net {fg['net_harmful_flips']:+d})")
+            print(f"    remove direct     broke {fd['harmful_flips']} correct calls, "
+                  f"fixed {fd['helpful_flips']}  (net {fd['net_harmful_flips']:+d})")
+            if fg["net_harmful_flips"] > max(fd["net_harmful_flips"], 0):
+                print("    reading           removing ghosts costs more correct brake "
+                      "decisions than removing the same number of real points: the "
+                      "ghosts carried information about their parent object")
+            elif fg["net_harmful_flips"] < 0:
+                print("    reading           removing ghosts repairs more decisions "
+                      "than it breaks: filtering helps this controller")
+            else:
+                print("    reading           removing ghosts is no more harmful than "
+                      "removing the same number of real points")
     else:
         print("  no windows contained ghosts; collect with multipath on to run this test")
     print("=" * 70)
