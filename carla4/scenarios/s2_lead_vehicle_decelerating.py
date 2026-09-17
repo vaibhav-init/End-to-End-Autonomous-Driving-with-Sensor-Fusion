@@ -56,6 +56,7 @@ from ground_truth_logger import (
     distance_between,
 )
 from drivers import DRIVER_NAMES, make_driver
+from viewing import hold_after_end
 from staging import GapKeepController
 from spawn_utils import get_highway_spawns, spawn_npc_in_ego_direction
 from scenario_weather import set_weather_condition
@@ -112,7 +113,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  target_speed_kmh=S2_NPC_SPEED_KMH,
                  handover_settle_s=S2_HANDOVER_SETTLE_S,
                  stage_timeout_s=12.0,
-                 scenario_id=2, safety_rules=False):
+                 scenario_id=2, safety_rules=False,
+                 hold_s=0.0):
     """Run S2: Lead Vehicle Decelerating at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -364,6 +366,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                     carla.Rotation(pitch=-20, yaw=ego_t.rotation.yaw)
                 ))
 
+        hold_after_end(world, ego, driver, spectator, hold_s,
+                       collision_occurred, npc)
+
     finally:
         logger.close()
         driver.cleanup()
@@ -405,6 +410,9 @@ def main():
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
     add_radar_arguments(parser)
+    parser.add_argument("--hold-s", type=float, default=0.0,
+                        help="keep ticking this many seconds after the scenario "
+                             "ends, for watching; not logged")
     parser.add_argument("--stage-approach", action="store_true", default=True,
                         help="Tailgate the NPC with a gap-keeper, hand to the model when it brakes (default: on)")
     parser.add_argument("--no-stage-approach", dest="stage_approach",
@@ -500,7 +508,8 @@ def main():
                                       target_speed_kmh=args.target_speed_kmh,
                                       handover_settle_s=args.handover_settle_s,
                                       stage_timeout_s=args.stage_timeout_s,
-                                      scenario_id=2)
+                                      scenario_id=2,
+                                      hold_s=args.hold_s)
                 results.append({
                     "fog": fog,
                     "seed": seed,

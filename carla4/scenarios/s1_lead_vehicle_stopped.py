@@ -59,6 +59,7 @@ from ground_truth_logger import (
 )
 from drivers import DRIVER_NAMES, make_driver
 from spawn_utils import get_highway_spawns, spawn_obstacle_in_ego_direction
+from viewing import hold_after_end
 from staging import SpeedController
 from scenario_weather import set_weather_condition
 from config import (
@@ -98,7 +99,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  obstacle_distance_m=S1_OBSTACLE_DISTANCE,
                  stage_stable_s=STAGE_STABLE_S,
                  stage_speed_tolerance_kmh=STAGE_SPEED_TOLERANCE_KMH,
-                 scenario_id=1, safety_rules=False):
+                 scenario_id=1, safety_rules=False,
+                 hold_s=0.0):
     """Run S1: Lead Vehicle Stopped at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -341,6 +343,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                     carla.Rotation(pitch=-20, yaw=ego_t.rotation.yaw)
                 ))
 
+        hold_after_end(world, ego, driver, spectator, hold_s,
+                       collision_occurred, obstacle)
+
     finally:
         logger.close()
         driver.cleanup()
@@ -389,6 +394,9 @@ def main():
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
     add_radar_arguments(parser)
+    parser.add_argument("--hold-s", type=float, default=0.0,
+                        help="keep ticking this many seconds after the scenario "
+                             "ends, for watching; not logged")
     parser.add_argument("--headless", action="store_true", help="No spectator camera")
     parser.add_argument(
         "--target-speed-kmh",
@@ -478,7 +486,8 @@ def main():
                                       stage_speed_tolerance_kmh=(
                                           args.stage_speed_tolerance_kmh
                                       ),
-                                      scenario_id=1)
+                                      scenario_id=1,
+                                      hold_s=args.hold_s)
                 results.append({
                     "fog": fog,
                     "seed": seed,

@@ -53,6 +53,7 @@ from ground_truth_logger import (
     distance_between,
 )
 from drivers import DRIVER_NAMES, make_driver
+from viewing import hold_after_end
 from staging import GapKeepController
 from spawn_utils import get_highway_spawns
 from scenario_weather import set_weather_condition
@@ -159,7 +160,8 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  radar_kwargs=None,
                  stage_approach=True, stage_gap=8.0,
                  cutin_stop=True,
-                 scenario_id=4, safety_rules=False):
+                 scenario_id=4, safety_rules=False,
+                 hold_s=0.0):
     """Run S4: Cut-In from Adjacent Lane at a given fog density."""
     carla_map = world.get_map()
     rng = random.Random(seed)
@@ -502,6 +504,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                     carla.Rotation(pitch=-20, yaw=ego_t.rotation.yaw)
                 ))
 
+        hold_after_end(world, ego, driver, spectator, hold_s,
+                       collision_occurred, npc)
+
     finally:
         logger.close()
         driver.cleanup()
@@ -544,6 +549,9 @@ def main():
     parser.add_argument("--pcla-agent", default="tfv6_visiononly",
                         help="PCLA agent name (for --driver pcla)")
     add_radar_arguments(parser)
+    parser.add_argument("--hold-s", type=float, default=0.0,
+                        help="keep ticking this many seconds after the scenario "
+                             "ends, for watching; not logged")
     parser.add_argument("--stage-approach", action="store_true", default=True,
                         help="Stage the scenario: gap-keeper holds close follow, "
                              "then hand over on cut-in (default: on)")
@@ -609,7 +617,8 @@ def main():
                                       safety_rules=args.safety_rules,
                                       stage_approach=args.stage_approach,
                                       stage_gap=args.stage_gap,
-                                      cutin_stop=args.cutin_stop, scenario_id=4)
+                                      cutin_stop=args.cutin_stop, scenario_id=4,
+                                      hold_s=args.hold_s)
                 results.append({
                     "fog": fog,
                     "seed": seed,
