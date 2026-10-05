@@ -28,6 +28,7 @@ import os
 import numpy as np
 
 from .extended_target import expand_detection
+from . import rri
 
 
 DEFAULT_REALISTIC_RADAR_PROFILE = "generic_lrr_v1"
@@ -91,6 +92,30 @@ class RealisticRadarConfig:
     interference_exit_probability: float = 0.30
     interference_detection_scale: float = 0.25
     interference_clutter_multiplier: float = 8.0
+
+    # Radar-to-radar interference (rri_*). The Markov burst above models a
+    # generic degradation with no second emitter; these fields drive the
+    # structured artifacts in ``radar/rri.py`` -- phantom targets at the
+    # interfering radar's apparent position, range-ambiguity replicas, SINR
+    # desensitisation and false-alarm inflation. Like ``multipath_*`` they are
+    # excluded from the config signature (see ``RRI_INJECTION_FIELDS``), so a
+    # controller trained against one interference level can be evaluated
+    # against another without the provenance gate refusing.
+    rri_mode: str = "off"                 # off | parametric
+    rri_carrier_frequency_hz: float = 77.0e9
+    rri_noise_figure_db: float = 4.0
+    rri_noise_bandwidth_hz: float = 1.0e9
+    rri_chirp_period_s: float = 1.0e-6    # -> ~150 m unambiguous range
+    rri_antenna_isolation_db: float = 40.0
+    rri_coherent_processing_chirps: int = 64
+    rri_interference_coherence: float = 0.3
+    rri_max_ghost_orders: int = 2
+    rri_min_inr_db_for_phantom: float = 3.0
+    rri_desensitisation_db: float = 1.0
+    rri_false_alarm_slope: float = 0.35
+    rri_max_false_alarm_multiplier: float = 25.0
+    rri_phantom_detection_slope: float = 0.20
+    rri_max_phantom_probability: float = 0.95
 
     # Persistent multipath-like target priors.  Geometry-aware calibration can
     # replace these priors through a JSON profile.
@@ -383,6 +408,10 @@ def _validate_probability(name, value):
 def _validate_config(config):
     if not isinstance(config.profile_name, str) or not config.profile_name.strip():
         raise ValueError("profile_name must be a non-empty string")
+    if str(config.rri_mode).strip().lower() not in ("off", "parametric"):
+        raise ValueError(
+            f"rri_mode must be 'off' or 'parametric', got {config.rri_mode!r}"
+        )
     if config.schema_version != 1:
         raise ValueError(
             f"Unsupported radar config schema {config.schema_version}; expected 1"
@@ -394,6 +423,8 @@ def _validate_config(config):
         "multipath_reflector_min_points",
         "multipath_max_reflectors",
         "multipath_max_ghosts_per_target",
+        "rri_max_ghost_orders",
+        "rri_coherent_processing_chirps",
         "latency_scans",
         "confirmation_hits",
         "confirmation_window",
@@ -410,6 +441,7 @@ def _validate_config(config):
         not in (
             "profile_name",
             "multipath_mode",
+            "rri_mode",
             "multipath_enable_third_order",
             "emit_extended_points",
             "expand_static_points",
@@ -628,6 +660,16 @@ def _is_ghost_injection_field(name):
     )
 
 
+# Radar-to-radar interference is injected into the radar, not a property of
+# it, so it is excluded from the sensor signature on the same reasoning as
+# ghost injection: a controller trained at one interference level must stay
+# deployable against another.
+RRI_INJECTION_FIELDS = tuple(
+    sorted(name for name in RealisticRadarConfig.__dataclass_fields__
+           if name.startswith("rri_"))
+)
+
+
 # Fields that describe what is injected into the radar, not what the radar
 # is. They are recorded with every dataset and model (``ghost_injection_dict``)
 # but stay out of the signature, so clean-trained controllers can be deployed
@@ -649,22 +691,33 @@ def ghost_injection_dict(config):
     return {name: values[name] for name in GHOST_INJECTION_FIELDS}
 
 
+def rri_injection_dict(config):
+    """The radar-to-radar interference settings recorded outside the signature."""
+
+    values = realistic_radar_config_dict(config)
+    return {name: values[name] for name in RRI_INJECTION_FIELDS}
+
+
 def realistic_radar_config_signature(config):
     """Stable short identity of the *sensor*, excluding ghost injection.
 
     Two configurations that differ only in multipath mode, ghost rate, ghost
     SNR or reflector-fitting parameters share a signature: they are the same
     radar with a different amount of ghosting, which is exactly the variable
-    the closed-loop study manipulates. Anything else (noise, resolution,
-    detection, tracker, selector, point emission) changes it.
+    the closed-loop study manipulates. Radar-to-radar interference is excluded
+    on the same reasoning. Anything else (noise, resolution, detection,
+    tracker, selector, point emission) changes it.
     """
 
     values = realistic_radar_config_dict(config)
+    excluded = frozenset(GHOST_INJECTION_FIELDS) | frozenset(
+        RRI_INJECTION_FIELDS
+    )
     payload = json.dumps(
         {
             name: value
             for name, value in values.items()
-            if name not in GHOST_INJECTION_FIELDS
+            if name not in excluded
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -706,6 +759,16 @@ class RealisticRadarModel:
         self._clutter_rng = np.random.default_rng(
             np.random.SeedSequence([int(seed) & 0xFFFFFFFF, 0x636C7472])
         )
+        # Radar-to-radar interference gets its own stream for the same reason
+        # as ghosts and clutter: phantom draws must not shift the direct-target
+        # noise, or an interference sweep stops being a matched pair against
+        # the interference-off baseline.
+        self._rri_rng = np.random.default_rng(
+            np.random.SeedSequence([int(seed) & 0xFFFFFFFF, 0x5242495F])
+        )
+        self._rri_report = rri.RRIReport()
+        self._rri_desensitisation_db = 0.0
+        self._rri_false_alarm_multiplier = 1.0
         self._latest_points = ()
         self._capture_debug = bool(capture_debug)
         self._detection_filter = detection_filter
@@ -822,7 +885,13 @@ class RealisticRadarModel:
             self._ghost_fading.clear()
         return updated * float(self.config.multipath_fading_std_db)
 
-    def _measure_target(self, target, environment, source="direct"):
+    def _measure_target(
+        self,
+        target,
+        environment,
+        source="direct",
+        snr_penalty_db=0.0,
+    ):
         is_ghost = source == "ghost"
         rng = self._ghost_rng if is_ghost else self._rng
         error = self._update_correlated_error(target.object_id, rng)
@@ -836,6 +905,10 @@ class RealisticRadarModel:
                 self._update_ghost_fading(target.object_id)
                 + self.config.ghost_snr_offset_db
             )
+        # Radar-to-radar interference raises the effective noise floor, so the
+        # target is measured against SINR rather than SNR.
+        if snr_penalty_db:
+            snr_db = rri.desensitise_snr_db(snr_db, snr_penalty_db)
         probability = self._detection_probability(snr_db)
         if source == "direct" and self._update_dropout_state(target.object_id):
             probability *= self.config.dropout_detection_scale
@@ -899,6 +972,106 @@ class RealisticRadarModel:
             path_length_m=max(0.0, float(target.path_length_m)),
         )
 
+    def _rri_parameters(self):
+        """Build an ``RRIParameters`` from the config, or ``None`` if off."""
+
+        if str(self.config.rri_mode).strip().lower() != "parametric":
+            return None
+        return rri.RRIParameters(
+            carrier_frequency_hz=self.config.rri_carrier_frequency_hz,
+            noise_figure_db=self.config.rri_noise_figure_db,
+            noise_bandwidth_hz=self.config.rri_noise_bandwidth_hz,
+            chirp_period_s=self.config.rri_chirp_period_s,
+            antenna_isolation_db=self.config.rri_antenna_isolation_db,
+            coherent_processing_chirps=(
+                self.config.rri_coherent_processing_chirps
+            ),
+            interference_coherence=self.config.rri_interference_coherence,
+            max_ghost_orders=self.config.rri_max_ghost_orders,
+            min_inr_db_for_phantom=self.config.rri_min_inr_db_for_phantom,
+            desensitisation_db=self.config.rri_desensitisation_db,
+            false_alarm_slope=self.config.rri_false_alarm_slope,
+            max_false_alarm_multiplier=(
+                self.config.rri_max_false_alarm_multiplier
+            ),
+            phantom_detection_slope=self.config.rri_phantom_detection_slope,
+            max_phantom_probability=self.config.rri_max_phantom_probability,
+        )
+
+    def _evaluate_rri(self, interferers):
+        """Evaluate interference for this scan and cache the effects."""
+
+        parameters = self._rri_parameters()
+        if parameters is None or not interferers:
+            self._rri_report = rri.RRIReport()
+            self._rri_desensitisation_db = 0.0
+            self._rri_false_alarm_multiplier = 1.0
+            return self._rri_report
+        self._rri_report = rri.evaluate_rri(
+            interferers,
+            parameters,
+            rng=self._rri_rng,
+        )
+        self._rri_desensitisation_db = self._rri_report.desensitisation_db
+        self._rri_false_alarm_multiplier = (
+            self._rri_report.false_alarm_multiplier
+        )
+        return self._rri_report
+
+    def _create_rri_phantoms(self, report):
+        """Turn RRI phantoms into detections attributed to no real object.
+
+        A phantom is not a target, so it is emitted with ``source="phantom"``
+        and a negative ``truth_object_id`` in the same reserved band the
+        clutter path uses. Keeping it distinct from ``"clutter"`` matters: a
+        phantom has a coherent position and a Doppler, so a tracker sees a
+        moving object where a clutter cell does not, and a study that lumps
+        them together cannot separate "noise got worse" from "something that
+        looks like a car appeared".
+        """
+
+        if not report.phantoms:
+            return []
+        half_fov = math.radians(self.config.horizontal_fov_deg / 2.0)
+        detections = []
+        for index, phantom in enumerate(report.phantoms):
+            distance_m = float(phantom["distance_m"])
+            azimuth_rad = float(phantom["azimuth_rad"])
+            if not (
+                self.config.minimum_forward_distance_m
+                <= distance_m
+                <= self.config.max_range_m
+            ):
+                continue
+            if abs(azimuth_rad) > half_fov:
+                continue
+            detections.append(
+                RadarDetection(
+                    distance_m=self._quantize(
+                        distance_m, self.config.range_resolution_m
+                    ),
+                    azimuth_rad=self._quantize(
+                        azimuth_rad,
+                        self._azimuth_resolution_rad(azimuth_rad),
+                    ),
+                    relative_velocity_mps=self._quantize(
+                        float(phantom["relative_velocity_mps"]),
+                        self.config.doppler_resolution_mps,
+                    ),
+                    snr_db=float(phantom["snr_db"]),
+                    source="phantom",
+                    truth_object_id=(
+                        -2000000 - self._scan_index * 1000 - index
+                    ),
+                    semantic_tag=0,
+                    bounce_type="rri",
+                    bounce_order=int(phantom["ghost_order"]) + 1,
+                    path_length_m=2.0 * distance_m,
+                    truth_parent_object_id=int(phantom["parent_object_id"]),
+                )
+            )
+        return detections
+
     def _update_interference(self):
         if self._interference_active:
             if self._rng.random() < self.config.interference_exit_probability:
@@ -910,6 +1083,7 @@ class RealisticRadarModel:
         rate = self.config.false_alarms_per_scan
         if self._interference_active:
             rate *= self.config.interference_clutter_multiplier
+        rate *= self._rri_false_alarm_multiplier
         count = int(self._clutter_rng.poisson(rate))
         detections = []
         half_fov = math.radians(self.config.horizontal_fov_deg / 2.0)
@@ -1089,6 +1263,7 @@ class RealisticRadarModel:
                 ideal_ghost,
                 environment,
                 source="ghost",
+                snr_penalty_db=self._rri_desensitisation_db,
             )
             if detection is not None:
                 detections.append(detection)
@@ -1331,8 +1506,16 @@ class RealisticRadarModel:
         environment=None,
         path_curvature_per_m=0.0,
         multipath_targets=None,
+        interferers=(),
     ):
-        """Advance one sensor cycle and return the selected tracked target."""
+        """Advance one sensor cycle and return the selected tracked target.
+
+        ``interferers`` is an optional sequence of ``rri.InterferingRadar``
+        describing other radars in band. When ``rri_mode`` is ``parametric``
+        they drive phantom detections, SINR desensitisation and false-alarm
+        inflation for this scan; when it is ``off`` the argument is ignored, so
+        a caller can pass interferers unconditionally.
+        """
 
         environment = (environment or RadarEnvironment()).clamped()
         path_curvature_per_m = float(path_curvature_per_m)
@@ -1383,14 +1566,21 @@ class RealisticRadarModel:
         ]
 
         self._update_interference()
+        rri_report = self._evaluate_rri(interferers)
         detections = []
         dropped_direct = 0
         for target in targets:
-            detection = self._measure_target(target, environment)
+            detection = self._measure_target(
+                target,
+                environment,
+                snr_penalty_db=rri_report.desensitisation_db,
+            )
             if detection is None:
                 dropped_direct += 1
             else:
                 detections.append(detection)
+
+        detections.extend(self._create_rri_phantoms(rri_report))
 
         if self.config.multipath_mode == "probabilistic":
             self._spawn_ghosts(targets, environment)
@@ -1404,6 +1594,7 @@ class RealisticRadarModel:
                     target,
                     environment,
                     source="ghost",
+                    snr_penalty_db=rri_report.desensitisation_db,
                 )
                 if detection is not None:
                     detections.append(detection)
@@ -1413,7 +1604,7 @@ class RealisticRadarModel:
 
         generated_counts = {
             source: sum(item.source == source for item in detections)
-            for source in ("direct", "ghost", "clutter")
+            for source in ("direct", "ghost", "clutter", "phantom")
         }
         generated_detection_count = len(detections)
         generated_detections = list(detections)
@@ -1466,6 +1657,13 @@ class RealisticRadarModel:
             "active_track_count": len(self._tracks),
             "confirmed_track_count": confirmed_count,
             "interference_active": self._interference_active,
+            "rri_mode": self.config.rri_mode,
+            "rri_interferer_count": self._rri_report.interferer_count,
+            "rri_max_inr_db": self._rri_report.max_inr_db,
+            "rri_total_inr_db": self._rri_report.total_inr_db,
+            "rri_desensitisation_db": self._rri_desensitisation_db,
+            "rri_false_alarm_multiplier": self._rri_false_alarm_multiplier,
+            "rri_phantom_detection_count": generated_counts["phantom"],
             "selected_track_id": selected.track_id or None,
             "selected_truth_object_id": (
                 selected.truth_object_id if selected.track_id else None
