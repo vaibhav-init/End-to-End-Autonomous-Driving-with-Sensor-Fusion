@@ -9,3 +9,5 @@ rri_per_scan.csv
 RRI_REPORT.md
 
 __pycache__/
+# CARLA-collected geometry; regenerate with collect_carla_rri_geometry.py
+carla_rri_geometry.csv
