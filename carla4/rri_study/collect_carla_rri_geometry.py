@@ -277,10 +277,12 @@ def main() -> None:
     parser.add_argument(
         "--min-follow-gap-m",
         type=float,
-        default=3.0,
-        help="Floor on the closing gap. Left unbounded the follower collapses "
-        "onto ego and the inter-radar geometry degenerates, which wastes the "
-        "part of the sweep that actually matters.",
+        default=6.0,
+        help="Floor on the closing gap, in metres between vehicle centres. Must "
+        "exceed the sum of the two radar mount offsets (4.8 m here), or the "
+        "follower crosses ego and the mount separation degenerates through "
+        "zero and the bearing flips. 6 m leaves a 1.2 m closest approach, "
+        "which still covers the regime where interference matters.",
     )
     parser.add_argument(
         "--rpc-timeout",
