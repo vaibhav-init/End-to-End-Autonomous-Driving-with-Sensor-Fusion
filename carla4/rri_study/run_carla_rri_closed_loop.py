@@ -140,7 +140,7 @@ def _interferer_for(row):
     )
 
 
-def _run_group(rows, isolation_db, coherence, seed):
+def _run_group(rows, isolation_db, coherence, seed, extra_overrides=None):
     overrides = {
         "rri_mode": "parametric",
         "rri_antenna_isolation_db": float(isolation_db),
@@ -149,6 +149,8 @@ def _run_group(rows, isolation_db, coherence, seed):
         "multipath_mode": "off",
         "cycle_time_s": CYCLE_TIME_S,
     }
+    if extra_overrides:
+        overrides.update(extra_overrides)
     config = load_realistic_radar_config("rgd_regime_v1", overrides=overrides)
     model = RealisticRadarModel(config, seed=seed)
 
