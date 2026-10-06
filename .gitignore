@@ -10,3 +10,6 @@ __pycache__
 # is third-party and is left exactly as shipped.
 *.md
 !PCLA/**/*.md
+# READMEs that document a module in the tree are tracked: they record API
+# constraints and measured results that the code alone does not carry.
+!carla4/**/README.md
