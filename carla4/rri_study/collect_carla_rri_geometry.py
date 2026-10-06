@@ -285,10 +285,24 @@ def main() -> None:
         ego = _spawn(world, "vehicle.tesla.model3", base)
         spawned.append(ego)
 
-        def neighbour(offset_forward, offset_right):
-            actor = _spawn(
-                world, "vehicle.tesla.model3", _offset_from(base, offset_forward, offset_right)
-            )
+        def neighbour(spawn_forward, spawn_right):
+            # The spawn location only has to be collision-free; _collect
+            # repositions both vehicles before the first tick, so a scripted
+            # offset that is off-road or occupied can still be used as the
+            # starting geometry. Spawning at a short offset keeps this valid
+            # whatever --gap-m asks for.
+            try:
+                actor = _spawn(
+                    world,
+                    "vehicle.tesla.model3",
+                    _offset_from(base, spawn_forward, spawn_right),
+                )
+            except RuntimeError:
+                actor = _spawn(
+                    world,
+                    "vehicle.tesla.model3",
+                    _offset_from(base, -6.0, float(spawn_right) * 0.25),
+                )
             spawned.append(actor)
             return actor
 
@@ -339,7 +353,7 @@ def main() -> None:
         def follower_offset(t):
             return -max(min_gap, gap - closing_rate * t)
 
-        other = neighbour(follower_offset(0.0), 0.0)
+        other = neighbour(-6.0, 0.0)
         rows.extend(
             _collect(
                 world, ego, other, base,
