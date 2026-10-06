@@ -53,11 +53,6 @@ LANE_CHANGE_START_S = 4.0
 LANE_CHANGE_DURATION_S = 4.0
 
 
-def _speed_mps(actor):
-    velocity = actor.get_velocity()
-    return math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
-
-
 def _mount_location(transform, offset):
     """World location of a radar at ``offset`` in the given transform's frame."""
 
@@ -105,6 +100,10 @@ def _geometry(our_loc, our_boresight, their_loc, their_boresight):
     to_us_x, to_us_y = -dx / distance, -dy / distance
     alignment = their_boresight[0] * to_us_x + their_boresight[1] * to_us_y
     return distance, azimuth_deg, alignment
+
+
+def _planar_distance(a, b):
+    return math.hypot(a.x - b.x, a.y - b.y)
 
 
 def _smoothstep(t):
@@ -161,6 +160,9 @@ def _collect(
     rows = []
     frames = int(round(duration_s * fps))
     previous_range = None
+    previous_ego_loc = None
+    previous_other_loc = None
+    ego_speed = other_speed = 0.0
     for frame in range(frames):
         t = frame / float(fps)
         ego_tf = _offset_from(base, EGO_SPEED_MPS * t, 0.0)
@@ -185,12 +187,25 @@ def _collect(
 
         if previous_range is None:
             closing = 0.0
+            ego_speed = other_speed = 0.0
         else:
-            # Positive means closing. Differenced from CARLA's integrated
-            # geometry rather than read off the script, so it reflects what
-            # actually happened after the physics stepped.
+            # Positive means closing. Differenced from CARLA's own integrated
+            # geometry rather than read off the script.
+            #
+            # Speeds are differenced the same way instead of using
+            # Actor.get_velocity(): a vehicle repositioned with set_transform
+            # teleports, and the velocity CARLA reports for a teleport is
+            # meaningless (it read 200 m/s here, from being shoved by ambient
+            # traffic between scripted poses). A position delta over a fixed
+            # step is the only figure that means anything here.
             closing = (previous_range - distance) * fps
+            ego_step = _planar_distance(ego_tf.location, previous_ego_loc) * fps
+            other_step = _planar_distance(other_tf.location, previous_other_loc) * fps
+            ego_speed = 0.5 * (ego_speed + ego_step) if frame > 1 else ego_step
+            other_speed = 0.5 * (other_speed + other_step) if frame > 1 else other_step
         previous_range = distance
+        previous_ego_loc = ego_tf.location
+        previous_other_loc = other_tf.location
 
         rows.append(
             {
@@ -201,8 +216,8 @@ def _collect(
                 "azimuth_deg": round(azimuth_deg, 4),
                 "closing_mps": round(closing, 4),
                 "boresight_alignment": round(alignment, 5),
-                "ego_speed_mps": round(_speed_mps(ego), 4),
-                "other_speed_mps": round(_speed_mps(other), 4),
+                "ego_speed_mps": round(ego_speed, 4),
+                "other_speed_mps": round(other_speed, 4),
                 "other_right_m": round(other_right_m(t), 4),
             }
         )
@@ -241,11 +256,18 @@ def main() -> None:
         "a map reload takes minutes on a machine that is already loaded.",
     )
     parser.add_argument(
-        "--gap-m",
+        "--lane-offset-m",
         type=float,
         default=3.5,
-        help="Neighbour lateral offset (adjacent-lane cases) or longitudinal "
-        "gap behind ego (tailgating case).",
+        help="Neighbour lateral offset in the adjacent-lane cases. A real lane "
+        "is ~3.5 m, so this is not the same quantity as the following gap.",
+    )
+    parser.add_argument(
+        "--follow-gap-m",
+        type=float,
+        default=20.0,
+        help="Starting longitudinal gap behind ego in the tailgating case; it "
+        "closes from there at --follower-closing-mps.",
     )
     args = parser.parse_args()
 
@@ -306,10 +328,11 @@ def main() -> None:
             spawned.append(actor)
             return actor
 
-        gap = args.gap_m
+        lane_offset = args.lane_offset_m
+        follow_gap = args.follow_gap_m
 
         # Scenario A, steady: neighbour held alongside in the adjacent lane.
-        other = neighbour(1.0, gap)
+        other = neighbour(1.0, lane_offset)
         rows.extend(
             _collect(
                 world, ego, other, base,
@@ -318,7 +341,7 @@ def main() -> None:
                 mount_yaw_deg=FRONT_MOUNT_YAW_DEG,
                 other_mount_offset=FRONT_RADAR_OFFSET,
                 other_forward_m=lambda t: 1.0,
-                other_right_m=lambda t: gap,
+                other_right_m=lambda t: lane_offset,
             )
         )
         other.destroy()
@@ -326,7 +349,7 @@ def main() -> None:
 
         # Scenario A, lane change: neighbour sweeps from its lane into ours,
         # which is the attitude where its radar turns towards us.
-        other = neighbour(1.0, gap)
+        other = neighbour(1.0, lane_offset)
         rows.extend(
             _collect(
                 world, ego, other, base,
@@ -335,7 +358,7 @@ def main() -> None:
                 mount_yaw_deg=FRONT_MOUNT_YAW_DEG,
                 other_mount_offset=FRONT_RADAR_OFFSET,
                 other_forward_m=lambda t: 1.0,
-                other_right_m=lambda t: gap
+                other_right_m=lambda t: lane_offset
                 * _smoothstep((t - LANE_CHANGE_START_S) / LANE_CHANGE_DURATION_S),
             )
         )
@@ -351,7 +374,7 @@ def main() -> None:
         min_gap = 0.5
 
         def follower_offset(t):
-            return -max(min_gap, gap - closing_rate * t)
+            return -max(min_gap, follow_gap - closing_rate * t)
 
         other = neighbour(-6.0, 0.0)
         rows.extend(
