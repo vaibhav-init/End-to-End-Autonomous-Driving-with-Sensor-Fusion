@@ -250,8 +250,10 @@ def main() -> None:
             )
         world = client.load_world(args.town)
         world.tick()
-    world.set_simulator_fps(args.fps)
 
+    # No set_simulator_fps call: in synchronous mode fixed_delta_seconds below
+    # is what sets the step, and neither World nor Client exposes that helper in
+    # 0.9.16.
     settings = world.get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = 1.0 / args.fps
