@@ -275,6 +275,14 @@ def main() -> None:
         "so one run sweeps a safe headway down to a close one.",
     )
     parser.add_argument(
+        "--min-follow-gap-m",
+        type=float,
+        default=3.0,
+        help="Floor on the closing gap. Left unbounded the follower collapses "
+        "onto ego and the inter-radar geometry degenerates, which wastes the "
+        "part of the sweep that actually matters.",
+    )
+    parser.add_argument(
         "--rpc-timeout",
         type=float,
         default=180.0,
@@ -403,7 +411,7 @@ def main() -> None:
         # boundary in the collected geometry, rather than sitting at one
         # distance the way the analytic sweep does.
         closing_rate = float(args.follower_closing_mps)
-        min_gap = 0.5
+        min_gap = float(args.min_follow_gap_m)
 
         def follower_offset(t):
             return -max(min_gap, follow_gap - closing_rate * t)
