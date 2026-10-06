@@ -88,8 +88,10 @@ SWEEPS = {
         [4.0, 6.0, 8.0, 12.0],
         "criterion",
     ),
+    # confirmation_hits cannot exceed confirmation_window, so the range stops
+    # at the default window rather than sweeping past a validation error.
     "confirmation_hits": (
-        [1, 2, 3, 5],
+        [1, 2, 3],
         "criterion",
     ),
 }
