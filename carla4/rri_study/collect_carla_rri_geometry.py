@@ -113,7 +113,38 @@ def _smoothstep(t):
 
 def _spawn(world, blueprint_id, transform):
     blueprint = world.get_blueprint_library().find(blueprint_id)
-    return world.spawn_actor(blueprint, transform)
+    actor = world.spawn_actor(blueprint, transform)
+    # Stop simulating physics on the scripted pair. They are repositioned with
+    # set_transform every tick, so any collision impulse from the 120-odd
+    # ambient actors in the scene lands between the pose we set and the pose we
+    # read back, and the measured inter-radar vector stops being the one we
+    # asked for. Nothing about the interference geometry needs the pair to
+    # collide with anything.
+    actor.set_simulate_physics(False)
+    return actor
+
+
+def _lane_transforms(world, start, count, step_m):
+    """World transforms following the lane ahead of ``start``.
+
+    Driving a straight line from the spawn point leaves the road within a few
+    hundred metres, and the car then gets shoved by scenery. Following the lane
+    keeps both vehicles on a real carriageway, which is also what makes the
+    recorded azimuth and boresight meaningful rather than a cut across a
+    junction.
+    """
+
+    map_ = world.get_map()
+    waypoint = map_.get_waypoint(start.location, project_to_road=True)
+    if waypoint is None:
+        return [start]
+    transforms = [start]
+    for _ in range(count):
+        waypoint = waypoint.next(step_m)[0]
+        if waypoint is None:
+            break
+        transforms.append(waypoint.transform)
+    return transforms
 
 
 def _offset_from(transform, forward_m, right_m):
@@ -157,15 +188,16 @@ def _collect(
     """
 
     our_offset = FRONT_RADAR_OFFSET if mount_yaw_deg == FRONT_MOUNT_YAW_DEG else REAR_RADAR_OFFSET
-    rows = []
     frames = int(round(duration_s * fps))
+    path = _lane_transforms(world, base, frames + 4, EGO_SPEED_MPS / fps)
+    rows = []
     previous_range = None
     previous_ego_loc = None
     previous_other_loc = None
     ego_speed = other_speed = 0.0
     for frame in range(frames):
         t = frame / float(fps)
-        ego_tf = _offset_from(base, EGO_SPEED_MPS * t, 0.0)
+        ego_tf = path[min(frame, len(path) - 1)]
         ego.set_transform(ego_tf)
         # Relative to ego, not to the spawn point: the neighbour has to travel
         # with ego or the scripted gap means nothing.
