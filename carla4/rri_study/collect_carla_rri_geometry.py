@@ -117,18 +117,23 @@ def _spawn(world, blueprint_id, transform):
     return world.spawn_actor(blueprint, transform)
 
 
-def _offset_transform(base, forward_m, right_m):
-    """A transform ``forward_m`` ahead and ``right_m`` across from ``base``."""
+def _offset_from(transform, forward_m, right_m):
+    """A transform ``forward_m`` ahead and ``right_m`` across from ``transform``.
 
-    forward = base.get_forward_vector()
-    right = base.get_right_vector()
+    The anchor matters: the neighbour is placed relative to ego's *current*
+    transform, not to the spawn point. Anchoring both to the spawn point lets
+    ego drive away from a stationary neighbour, which is not the scenario.
+    """
+
+    forward = transform.get_forward_vector()
+    right = transform.get_right_vector()
     return carla.Transform(
         carla.Location(
-            x=base.location.x + forward_m * forward.x + right_m * right.x,
-            y=base.location.y + forward_m * forward.y + right_m * right.y,
-            z=base.location.z,
+            x=transform.location.x + forward_m * forward.x + right_m * right.x,
+            y=transform.location.y + forward_m * forward.y + right_m * right.y,
+            z=transform.location.z,
         ),
-        base.rotation,
+        transform.rotation,
     )
 
 
@@ -158,9 +163,12 @@ def _collect(
     previous_range = None
     for frame in range(frames):
         t = frame / float(fps)
-        ego.set_transform(_offset_transform(base, EGO_SPEED_MPS * t, 0.0))
+        ego_tf = _offset_from(base, EGO_SPEED_MPS * t, 0.0)
+        ego.set_transform(ego_tf)
+        # Relative to ego, not to the spawn point: the neighbour has to travel
+        # with ego or the scripted gap means nothing.
         other.set_transform(
-            _offset_transform(base, other_forward_m(t), other_right_m(t))
+            _offset_from(ego_tf, other_forward_m(t), other_right_m(t))
         )
         if world.tick() is None:
             break
@@ -212,6 +220,13 @@ def main() -> None:
     )
     parser.add_argument("--duration", type=float, default=20.0)
     parser.add_argument("--fps", type=int, default=10)
+    parser.add_argument(
+        "--follower-closing-mps",
+        type=float,
+        default=2.0,
+        help="Rate at which the follower's gap shrinks in the tailgating case, "
+        "so one run sweeps a safe headway down to a close one.",
+    )
     parser.add_argument(
         "--rpc-timeout",
         type=float,
@@ -272,7 +287,7 @@ def main() -> None:
 
         def neighbour(offset_forward, offset_right):
             actor = _spawn(
-                world, "vehicle.tesla.model3", _offset_transform(base, offset_forward, offset_right)
+                world, "vehicle.tesla.model3", _offset_from(base, offset_forward, offset_right)
             )
             spawned.append(actor)
             return actor
@@ -313,16 +328,26 @@ def main() -> None:
         other.destroy()
         spawned.remove(other)
 
-        # Scenario B: follower at a fixed gap, observed by a rear-facing radar.
-        other = neighbour(-gap, 0.0)
+        # Scenario B: a follower observed by our rear-facing radar. The gap
+        # closes at a scripted rate so a single run sweeps from a safe
+        # headway down to a dangerous one and crosses the interference
+        # boundary in the collected geometry, rather than sitting at one
+        # distance the way the analytic sweep does.
+        closing_rate = float(args.follower_closing_mps)
+        min_gap = 0.5
+
+        def follower_offset(t):
+            return -max(min_gap, gap - closing_rate * t)
+
+        other = neighbour(follower_offset(0.0), 0.0)
         rows.extend(
             _collect(
                 world, ego, other, base,
-                scenario="rear_radar_tailgating/follow",
+                scenario="rear_radar_tailgating/closing",
                 duration_s=args.duration, fps=args.fps,
                 mount_yaw_deg=REAR_MOUNT_YAW_DEG,
                 other_mount_offset=FRONT_RADAR_OFFSET,
-                other_forward_m=lambda t: -gap,
+                other_forward_m=follower_offset,
                 other_right_m=lambda t: 0.0,
             )
         )
