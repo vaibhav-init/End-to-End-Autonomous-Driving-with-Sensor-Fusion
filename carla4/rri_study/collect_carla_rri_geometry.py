@@ -213,6 +213,19 @@ def main() -> None:
     parser.add_argument("--duration", type=float, default=20.0)
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument(
+        "--rpc-timeout",
+        type=float,
+        default=180.0,
+        help="Seconds to wait for the simulator RPC. Long by default because a "
+        "listening socket is not a ready simulator.",
+    )
+    parser.add_argument(
+        "--load-world",
+        action="store_true",
+        help="Switch to --town if CARLA is on a different map. Off by default: "
+        "a map reload takes minutes on a machine that is already loaded.",
+    )
+    parser.add_argument(
         "--gap-m",
         type=float,
         default=3.5,
@@ -221,10 +234,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # A generous RPC timeout on purpose. CARLA can be listening on the port
+    # while still initialising, in which case a short timeout surfaces as a
+    # misleading "make sure the simulator is ready" error rather than a wait.
     client = carla.Client(args.host, args.port)
-    client.set_timeout(30.0)
+    client.set_timeout(float(args.rpc_timeout))
     world = client.get_world()
-    if world.get_map().name.split("/")[-1] != args.town:
+
+    current = world.get_map().name.split("/")[-1]
+    if current != args.town:
+        if not args.load_world:
+            raise SystemExit(
+                f"CARLA is on {current}, not {args.town}. Pass --load-world to "
+                "switch (slow on a loaded machine) or --town to match."
+            )
         world = client.load_world(args.town)
         world.tick()
     world.set_simulator_fps(args.fps)
