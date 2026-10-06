@@ -8,16 +8,45 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from ..extended_target import amplitude_jitter_sigma, micro_doppler_rms_mps
 from .features import (
     FEATURE_SCHEMA_VERSION,
     frame_context_statistics,
     physical_features,
 )
 
+# Per-class Doppler spread, indexed by Radar Ghost Dataset class id. Built from
+# the sensor model so the two cannot drift apart: class 0 is background/clutter
+# and takes the small vehicle-like spread, since a clutter point is not a
+# pedestrian and jittering it like one would teach the classifier a spread that
+# no clutter return has.
+_MICRO_DOPPLER_SIGMA_BY_CLASS = np.array(
+    [
+        # Class 0 is background/clutter, so it takes the small vehicle-like
+        # spread rather than micro_doppler_rms_mps's pedestrian fallback: a
+        # clutter point is not a pedestrian, and jittering it like one would
+        # teach the classifier a spread no clutter return has.
+        micro_doppler_rms_mps(3),
+        micro_doppler_rms_mps(1),
+        micro_doppler_rms_mps(2),
+        micro_doppler_rms_mps(3),
+        micro_doppler_rms_mps(4),
+        micro_doppler_rms_mps(5),
+    ],
+    dtype=np.float32,
+)
+
+
+def micro_doppler_sigma_for(class_ids):
+    """Per-point Doppler jitter matching the sensor, given prepared class ids."""
+
+    ids = np.asarray(class_ids, dtype=np.int64)
+    safe = np.where((ids >= 0) & (ids < len(_MICRO_DOPPLER_SIGMA_BY_CLASS)), ids, 0)
+    return _MICRO_DOPPLER_SIGMA_BY_CLASS[safe]
+
 
 class PreparedGhostDataset(Dataset):
     """One sample per sensor cycle, with prior cycles supplied as context."""
-
     def __init__(
         self,
         root,
@@ -278,10 +307,22 @@ class PreparedGhostDataset(Dataset):
             )
             if rng.random() < 0.5:
                 azimuth *= -1.0
-            amplitude *= float(np.exp(rng.normal(0.0, 0.08)))
-            velocity += rng.normal(0.0, 0.03, size=velocity.shape).astype(
-                np.float32
-            )
+            # Jitter magnitudes are derived from the sensor model rather than
+            # hard-coded. They were previously 0.08 in log-amplitude space and
+            # 0.03 m/s in Doppler, against a real per-point spread of 2.0 dB and
+            # 0.44 m/s (pedestrian), so augmentation was smoothing away exactly
+            # the structure a ghost classifier has to learn. Anything that
+            # changes the sensor's point statistics must move these with it;
+            # radar/tests/test_augmentation_matches_sensor.py pins that.
+            amplitude *= np.exp(
+                rng.normal(0.0, amplitude_jitter_sigma(), size=amplitude.shape),
+                dtype=np.float32,
+            ).astype(np.float32)
+            velocity += rng.normal(
+                0.0,
+                micro_doppler_sigma_for(data.get("class_id", indices)[indices]),
+                size=velocity.shape,
+            ).astype(np.float32)
 
         features = physical_features(
             data["r_sc"][indices],

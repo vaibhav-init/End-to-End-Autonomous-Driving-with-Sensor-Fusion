@@ -95,6 +95,40 @@ def object_footprint_m(detection, footprint_scale=1.0):
     return depth * scale, width * scale
 
 
+def micro_doppler_rms_mps(class_id=1, micro_doppler_scale=1.0):
+    """RMS per-point Doppler deviation emitted for one target, in m/s.
+
+    This is the single source of truth for how much Doppler spread a target's
+    points carry. :func:`expand_detection` produces
+    ``amplitude * sin(phase + 2*pi*index/8) + N(0, MICRO_DOPPLER_NOISE_MPS)``
+    per point, where the amplitude is drawn from ``MICRO_DOPPLER_AMPLITUDE`` and
+    the phase is uniform. Over points the sinusoid contributes ``E[a]/sqrt(2)``
+    to the RMS and the Gaussian contributes its own sigma in quadrature.
+
+    It exists so training-time augmentation can be *derived* from the sensor
+    model instead of carrying its own hard-coded jitter, which is how the two
+    drifted apart in the first place: augmentation jittered Doppler by 0.03 m/s
+    against a real per-point spread of 0.44 m/s for a pedestrian.
+    """
+
+    low, high = MICRO_DOPPLER_AMPLITUDE.get(class_id, MICRO_DOPPLER_AMPLITUDE[1])
+    scale = max(0.0, float(micro_doppler_scale))
+    sinusoid_rms = (0.5 * (low + high) / math.sqrt(2.0)) * scale
+    return math.sqrt(sinusoid_rms**2 + (MICRO_DOPPLER_NOISE_MPS * scale) ** 2)
+
+
+def amplitude_jitter_sigma():
+    """Multiplicative lognormal sigma reproducing ``POINT_SNR_FLUCTUATION_DB``.
+
+    ``expand_detection`` perturbs SNR by N(0, POINT_SNR_FLUCTUATION_DB) in dB.
+    Augmentation that scales a linear amplitude by ``exp(N(0, s))`` produces a
+    dB perturbation of ``20 s / ln 10``, so matching the sensor means
+    ``s = POINT_SNR_FLUCTUATION_DB * ln(10) / 20``.
+    """
+
+    return POINT_SNR_FLUCTUATION_DB * math.log(10.0) / 20.0
+
+
 def expand_detection(
     detection,
     rng,
