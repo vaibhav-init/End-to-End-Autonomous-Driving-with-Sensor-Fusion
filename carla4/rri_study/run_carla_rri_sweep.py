@@ -35,7 +35,9 @@ _CARLA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _CARLA_DIR not in sys.path:
     sys.path.insert(0, _CARLA_DIR)
 
-from radar.rri import InterferingRadar, RRIParameters
+import numpy as np
+
+from radar.rri import InterferingRadar, RRIParameters, evaluate_rri
 
 TX_POWER_DBM = 10.0
 TX_GAIN_DBI = 8.0
@@ -53,7 +55,7 @@ def _params(isolation_db, coherence):
     )
 
 
-def _sweep(rows, params):
+def _sweep(rows, params, isolation_db):
     """Evaluate the interference at each collected scan."""
 
     out = []
@@ -68,20 +70,19 @@ def _sweep(rows, params):
             boresight_alignment=float(row["boresight_alignment"]),
             label=row["scenario"],
         )
-        from radar.rri import evaluate_rri
-
         # A deterministic stream per scan keeps this reproducible without
         # pulling in the sensor model: only the phantom draw varies.
-        import numpy as np
-
         report = evaluate_rri(
             [interferer],
             params,
-            rng=np.random.default_rng([int(row["frame"]), int(isolation_seed(params))]),
+            rng=np.random.default_rng(
+                [int(row["frame"]), int(isolation_seed(params))]
+            ),
         )
         out.append(
             {
                 "scenario": row["scenario"],
+                "isolation_db": float(isolation_db),
                 "frame": int(row["frame"]),
                 "time_s": float(row["time_s"]),
                 "range_m": float(row["range_m"]),
@@ -138,7 +139,9 @@ def main() -> None:
 
     all_rows = []
     for isolation_db in isolations:
-        all_rows.extend(_sweep(rows, _params(isolation_db, args.coherence)))
+        all_rows.extend(
+            _sweep(rows, _params(isolation_db, args.coherence), isolation_db)
+        )
 
     os.makedirs(args.output_dir, exist_ok=True)
     out_path = os.path.join(args.output_dir, "carla_rri_sweep.csv")
@@ -151,27 +154,36 @@ def main() -> None:
     worst_iso = min(isolations)
     print(f"geometry: {args.geometry}  ({len(rows)} scans)")
     print(f"wrote {out_path}\n")
-    print(f"{'scenario':34s} {'iso':>5s} {'maxINR':>7s} {'scans w/ phantom':>17s} {'first phantom at':>18s}")
+    print(
+        f"{'scenario':34s} {'iso dB':>6s} {'peak INR':>9s} "
+        f"{'scans w/ phantom':>18s} {'closest approach':>17s}"
+    )
     for scenario in dict.fromkeys(row["scenario"] for row in rows):
         for isolation_db in isolations:
             subset = [
                 row
                 for row in all_rows
                 if row["scenario"] == scenario
-                and abs(row["max_inr_db"] - 0.0) > 1e-12
+                and row["isolation_db"] == float(isolation_db)
             ]
-            subset_all = [
-                row
-                for row in all_rows
-                if row["scenario"] == scenario
-            ]
-            hits = [row for row in subset_all if row["phantom_count"] > 0]
-            peak = max((row["max_inr_db"] for row in subset_all), default=0.0)
-            first = f"{hits[0]['range_m']:.1f} m" if hits else "-"
+            hits = [row for row in subset if row["phantom_count"] > 0]
+            peak = max((row["max_inr_db"] for row in subset), default=0.0)
+            closest = min((row["range_m"] for row in subset), default=float("nan"))
+            first = f"{hits[0]['range_m']:.2f} m" if hits else "-"
             print(
-                f"{scenario:34s} {isolation_db:5.0f} {peak:7.1f} "
-                f"{len(hits):10d}/{len(subset_all):<6d} {first:>18s}"
+                f"{scenario:34s} {isolation_db:6.0f} {peak:9.1f} "
+                f"{len(hits):11d}/{len(subset):<6d} {first:>17s}"
             )
+        # closest geometric approach for this scenario, independent of model
+        subset = [
+            row for row in all_rows
+            if row["scenario"] == scenario
+            and row["isolation_db"] == float(isolations[0])
+        ]
+        print(
+            f"{'':34s} {'':6s} {'':9s} {'':18s} "
+            f"{min(r['range_m'] for r in subset):17.2f} m"
+        )
 
 
 if __name__ == "__main__":
