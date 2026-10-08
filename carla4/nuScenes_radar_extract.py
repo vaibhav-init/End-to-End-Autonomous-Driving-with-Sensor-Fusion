@@ -187,7 +187,8 @@ def _channel_row(nusc: NuScenes, scene_name: str, sample: Dict[str, Any],
     ego_velocity_global, ego_speed = _ego_velocity_vectors(nusc, sample["token"])
 
     pointcloud = RadarPointCloud.from_file(pcd_path)
-    rows = pointcloud.points
+    # devkit stores points as (features, n_points) -> transpose to rows.
+    rows = np.asarray(pointcloud.points).T
     detections: List[List[float]] = []
     targets: List[List[float]] = []
     target_labels: List[str] = []
