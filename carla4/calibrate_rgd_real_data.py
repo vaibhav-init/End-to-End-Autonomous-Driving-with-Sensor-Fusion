@@ -27,9 +27,12 @@ import argparse
 import json
 import math
 import os
+import sys
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
+
+sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), ".."))
 
 from carla4.radar.realism_metrics import RealismSummary  # noqa: E402
 
