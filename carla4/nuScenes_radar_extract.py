@@ -123,12 +123,23 @@ def _ego_velocity_vectors(nusc: NuScenes, sample_token: str) -> Tuple[np.ndarray
     return median_velocity, float(np.linalg.norm(median_velocity))
 
 
+def _annotations_by_sample(nusc: NuScenes) -> Dict[str, List[str]]:
+    """Index annotation tokens per sample (nuScenes indexes them the other way)."""
+
+    cache = getattr(nusc, "_annotations_by_sample", None)
+    if cache is None:
+        cache = {}
+        for record in nusc.sample_annotation.values():
+            cache.setdefault(record["sample_token"], []).append(record["token"])
+        nusc._annotations_by_sample = cache  # type: ignore[attr-defined]
+    return cache
+
+
 def _annotation_rows(nusc: NuScenes, sample_token: str) -> List[Dict[str, Any]]:
     """Category-filtered annotations with global velocity and parked flag."""
 
     rows: List[Dict[str, Any]] = []
-    sample = nusc.get("sample", sample_token)
-    for token in sample["annotations"]:
+    for token in _annotations_by_sample(nusc).get(sample_token, []):
         ann = nusc.get("sample_annotation", token)
         if not ann["category_name"].startswith(TARGET_CATEGORY_PREFIXES):
             continue
