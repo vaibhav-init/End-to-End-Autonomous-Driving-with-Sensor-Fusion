@@ -49,7 +49,7 @@ N_RX = 1                         # free tier limit: single receiver channel
 RX_SPACING_LAMBDA = 0.5
 CFAR_ON = 4                      # CA-CFAR 2D parameters
 CFAR_OFF = 6
-CFAR_ALFA_DB = 5.0               # ~3e-4 Pfa at 8 dB NF
+CFAR_PFA = 3.0e-4                # ~ -35 dB threshold factor in square law
 
 PEAK_RING_M = 3.0                # distance tolerance linking sims to analytic
 
@@ -117,18 +117,20 @@ def _velocity_axis(n_doppler: int) -> np.ndarray:
     return doppler * _lam_m() / 4.0  # fmcw doppler->velocity, closing negative
 
 
-def _extract_peaks(range_doppler_db: np.ndarray, n_bins: int, alfa_db: float):
+def _extract_peaks(range_doppler_db: np.ndarray, n_bins: int, pfa: float):
     from radarsimpy.processing import cfar_ca_2d
 
-    cfar = cfar_ca_2d(range_doppler_db,
-                      guard=CFAR_OFF, trailing=CFAR_ON,
-                      alpha=alfa_db)
-    peaks = np.argwhere(cfar)
+    # cfar_ca_2d returns a boolean-ish mask over the map.
+    mask = cfar_ca_2d(range_doppler_db, guard=CFAR_OFF, trailing=CFAR_ON, pfa=pfa)
+    mask = np.asarray(mask)
+    if mask.ndim != 2:
+        raise ValueError(f"cfar mask wrong shape {mask.shape}")
+    peaks = np.argwhere(mask)
     detections = []
     for row, col in peaks:
         amp = float(range_doppler_db[row, col])
         detections.append((int(row), int(col), amp))
-    return cfar, detections
+    return mask, detections
 
 
 def run_scene(scene: Scene, radar) -> Dict[str, Any]:
@@ -151,9 +153,8 @@ def run_scene(scene: Scene, radar) -> Dict[str, Any]:
     maps = [np.asarray(rd[idx]) for idx in range(rd.shape[0])]
     rd_db = 20.0 * np.log10(np.abs(maps[0]) + 1e-12)
     n_bins = _rd_shape(rd_db)
-    rd_max = rd_db.max()
-    alfa_db = _cfar_alpha(rd_max)
-    _, peaks = _extract_peaks(rd_db, n_bins, alfa_db)
+    pfa = 3e-4
+    _, peaks = _extract_peaks(rd_db, _rd_shape(rd_db), pfa)
 
     rng_axis = _range_axis(rd_db.shape[-1])
     vel_axis = _velocity_axis(rd_db.shape[-2]) if rd_db.ndim == 2 else _velocity_axis(rd_db.shape[0])
@@ -183,10 +184,6 @@ def run_scene(scene: Scene, radar) -> Dict[str, Any]:
         "shape": list(rd_db.shape),
         "analytic": analytic_gr(scene),
     }
-
-
-def _cfar_alpha(rd_max: float) -> float:
-    return max(3.0, min(14.0, rd_max * 0.02))
 
 
 def _rd_shape(rd_db: np.ndarray) -> int:
