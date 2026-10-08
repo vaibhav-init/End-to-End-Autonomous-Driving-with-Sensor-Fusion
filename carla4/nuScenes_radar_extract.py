@@ -210,7 +210,7 @@ def _channel_row(nusc: NuScenes, scene_name: str, sample: Dict[str, Any],
         if range_m <= 0.5:
             continue
         azimuth = math.atan2(point_sensor[1], point_sensor[0])
-        rel_velocity_global = ann["velocity"] - ego_velocity_global
+        rel_velocity_global = np.asarray(ann["velocity"][:2], dtype=float) - ego_velocity_global
         rel_velocity_sensor = _global_vector_to_sensor(rel_velocity_global,
                                                        ego_rotation_global,
                                                        sensor_rotation_global)
