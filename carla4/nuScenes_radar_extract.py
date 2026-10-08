@@ -151,6 +151,7 @@ def _annotation_rows(nusc: NuScenes, sample_token: str) -> List[Dict[str, Any]]:
         rows.append({
             "token": token,
             "position": np.asarray(ann["translation"], dtype=float),
+            "size": np.asarray(ann["size"], dtype=float),
             "velocity": np.asarray(velocity, dtype=float),
             "category": ann["category_name"],
             "parked": parked,
