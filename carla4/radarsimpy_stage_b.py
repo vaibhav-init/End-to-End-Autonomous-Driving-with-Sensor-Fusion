@@ -45,7 +45,7 @@ PULSES = 16
 PRP_S = 150.0e-6
 TX_POWER_DBM = 15.0
 NOISE_FIGURE_DB = 8.0
-N_RX = 8                         # free tier may cap this; fallback below
+N_RX = 1                         # free tier limit: single receiver channel
 RX_SPACING_LAMBDA = 0.5
 CFAR_ON = 4                      # CA-CFAR 2D parameters
 CFAR_OFF = 6
@@ -168,10 +168,10 @@ def run_scene(scene: Scene, radar) -> Dict[str, Any]:
         if rd_db.ndim == 2:
             det["azimuth_rad"] = float("nan")
 
-    # MUSIC DoA using the range-Doppler cells of four receivers.
-    az = _music_azimuth(maps, peaks, rd_db.shape)
-    for det, angle in zip(detections, az):
-        det["azimuth_rad"] = angle
+    # Free tier gives a single Rx channel: azimuth is deferred to the
+    # two-run interferometry extension. Keep the field for schema stability.
+    for det in detections:
+        det["azimuth_rad"] = float("nan")
 
     return {
         "peaks": detections,
