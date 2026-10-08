@@ -82,8 +82,10 @@ def _global_vector_to_sensor(vector_global: np.ndarray,
                              sensor_rotation_global: Quaternion) -> np.ndarray:
     """Sensor-frame vector of a global express, honouring ego/sensor chain."""
 
-    vector_ego = ego_rotation_global.rotation_matrix.T @ vector_global
-    return sensor_rotation_global.rotation_matrix.T @ vector_ego
+    padded = np.array([vector_global[0], vector_global[1], 0.0], dtype=float)
+    vector_ego = ego_rotation_global.rotation_matrix.T @ padded
+    projected = sensor_rotation_global.rotation_matrix.T @ vector_ego
+    return projected
 
 
 def _ego_velocity_vectors(nusc: NuScenes, sample_token: str) -> Tuple[np.ndarray, float]:
