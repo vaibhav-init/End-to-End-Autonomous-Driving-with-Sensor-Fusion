@@ -229,16 +229,29 @@ def main() -> int:
         return 1
 
     radar = build_radar(N_RX)
-    payload: Dict[str, Any] = {"scenes": {}}
+    payload: Dict[str, Any] = {}
+    results = {}
     for name in args.scenes:
         scene = SCENES[name]
         result = run_scene(scene, radar)
-        payload["scenes"][name] = result
+        results[name] = result
         print(f"== {name}: direct@{result['direct_range_m']:.1f} m {result['direct_amp_db']:.1f} dB")
         for meas in result["ghost_measurements"]:
             print("   %-10s ghost@%6.2f m amp %7.1f dB  (ghost-direct %+6.1f dB)"
                   % (meas["variant"], meas["ghost_range_m"], meas["amp_db"],
                      meas["ghost_minus_direct_db"]))
+
+    # Loss proposal: median ghost-minus-direct per variant across scenes maps
+    # onto RealisticRadarConfig's fixed loss constants for geometry mode.
+    proposals = {}
+    for variant in ("mix_half", "full_image"):
+        deltas = [row["ghost_minus_direct_db"] for scene in results.values()
+                  for row in scene["ghost_measurements"] if row["variant"] == variant]
+        if deltas:
+            proposals[variant] = round(float(np.median(deltas)), 1)
+    payload["scenes"] = results
+    payload["proposed_losses"] = proposals
+    print("proposed multipath losses (median over scenes):", proposals)
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
     return 0
