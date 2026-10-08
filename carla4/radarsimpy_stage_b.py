@@ -112,9 +112,13 @@ def _range_axis(n_bins: int) -> np.ndarray:
 
 
 def _velocity_axis(n_doppler: int) -> np.ndarray:
-    k = np.arange(n_doppler) - n_doppler // 2
-    doppler = k / (PULSES * PRP_S)
-    return doppler * _lam_m() / 4.0  # fmcw doppler->velocity, closing negative
+    # radarsimpy's doppler_fft is a plain unshifted fft: bin 0 is 0 Hz, the
+    # negative doppler half wraps into the top bins. fd_k = k/(N*PRI) with
+    # aliasing to the PRF/2 window; v = fd * lambda / 4 for FMCW.
+    k = np.arange(n_doppler)
+    folded = np.where(k > n_doppler // 2, k - n_doppler, k)
+    doppler = folded / (PULSES * PRP_S)
+    return doppler * _lam_m() / 4.0
 
 
 def _extract_peaks(range_doppler_db: np.ndarray, n_bins: int, pfa: float):
@@ -125,7 +129,9 @@ def _extract_peaks(range_doppler_db: np.ndarray, n_bins: int, pfa: float):
     mask = np.asarray(mask)
     if mask.ndim != 2:
         raise ValueError(f"cfar mask wrong shape {mask.shape}")
-    peaks = np.argwhere(mask)
+    amplitude_ceiling = float(range_doppler_db.max()) - 25.0  # drop noise/sidelobe detections
+    peaks = [(int(row), int(col)) for row, col in np.argwhere(mask)
+             if float(range_doppler_db[row, col]) >= amplitude_ceiling]
     detections = []
     for row, col in peaks:
         amp = float(range_doppler_db[row, col])
