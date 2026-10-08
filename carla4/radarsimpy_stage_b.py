@@ -97,9 +97,9 @@ def scene_mesh_targets(scene: Scene, dirpath: str) -> List[Dict[str, Any]]:
                              (plane_point[0], plane_point[1], 1.5))
     targets = [
         {"mesh": car_mesh, "location": (float(x), float(y), 0.75),
-         "velocity": (0.0, 0.0, 0.0)},
+         "velocity": (0.0, 0.0, 0.0), "rcs": 10.0},
         {"mesh": glass_mesh, "location": (float(plane_point[0]), float(plane_point[1]), 1.5),
-         "velocity": (0.0, 0.0, 0.0)},
+         "velocity": (0.0, 0.0, 0.0), "rcs": 20.0},
     ]
     return targets
 
