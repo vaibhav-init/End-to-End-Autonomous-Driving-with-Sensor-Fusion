@@ -141,10 +141,14 @@ def run_scene(scene: Scene, radar) -> Dict[str, Any]:
     baseband = result["baseband"] if isinstance(result, dict) else result.get("baseband")
     baseband = np.asarray(baseband)
 
-    maps = []
-    for rx_index in range(min(len(baseband), 4)):
-        rd = range_doppler_fft(baseband[rx_index])
-        maps.append(np.asarray(rd))
+    # processing ffts axis=2 over (n_rx, n_chirps, n_samples); a single RxC
+    # still presents as a 3-D tensor of shape (1, P, N).
+    if baseband.ndim == 2:
+        baseband = baseband[np.newaxis, ...]
+    rd = range_doppler_fft(baseband)
+    if rd.ndim == 2:
+        rd = rd[np.newaxis, ...]
+    maps = [np.asarray(rd[idx]) for idx in range(rd.shape[0])]
     rd_db = 20.0 * np.log10(np.abs(maps[0]) + 1e-12)
     n_bins = _rd_shape(rd_db)
     rd_max = rd_db.max()
