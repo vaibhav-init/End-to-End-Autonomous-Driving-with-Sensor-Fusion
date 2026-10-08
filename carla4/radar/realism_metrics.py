@@ -245,7 +245,7 @@ def summarize_scans(scans: Iterable[Scan],
             for row in rows:
                 ghost_bin = _range_bin_index(float(row[0]))
                 summary.ghost_range_counts[ghost_bin] += 1
-            ghost_rows.append(np.atleast_2d(rows[:, 0]))
+            ghost_rows.append(rows[:, 0].ravel())
 
     summary.n_scans = len(det_counts)
     if det_counts:
@@ -280,13 +280,13 @@ def summarize_scans(scans: Iterable[Scan],
             summary.n_detection_samples = int(min(rng.size, cap))
 
     dets_per_scan = sum(det_counts)
-    ghosts = float(sum(int(r.shape[0]) for r in ghost_rows))
+    ghosts = float(sum(int(r.size) for r in ghost_rows))
     summary.ghosts_per_scan_mean = ghosts / summary.n_scans if summary.n_scans else 0.0
     summary.ghost_fraction = ghosts / dets_per_scan if dets_per_scan else 0.0
     if ghost_rows and keep_raw_samples:
-        flat_ghost = np.concatenate(ghost_rows, axis=0)
+        flat_ghost = np.concatenate(ghost_rows)
         cap = RealismSummary.RAW_SAMPLE_CAP
-        summary.raw_ghost_range_samples = flat_ghost[:cap].ravel().tolist()
+        summary.raw_ghost_range_samples = flat_ghost.ravel()[:cap].tolist()
 
     return summary
 
