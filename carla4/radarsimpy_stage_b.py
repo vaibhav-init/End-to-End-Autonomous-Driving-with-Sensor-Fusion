@@ -31,7 +31,7 @@ sys_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "..")
 import sys
 sys.path.insert(0, sys_path)
 
-from carla4.radar.radarsimpy_ghost_calibration import (  # noqa: E402
+from carla4.radarsimpy_ghost_calibration import (  # noqa: E402
     SCENES,
     Scene,
     analytic_gr,
