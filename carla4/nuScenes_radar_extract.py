@@ -129,7 +129,7 @@ def _annotations_by_sample(nusc: NuScenes) -> Dict[str, List[str]]:
     cache = getattr(nusc, "_annotations_by_sample", None)
     if cache is None:
         cache = {}
-        for record in nusc.sample_annotation.values():
+        for record in nusc.sample_annotation:
             cache.setdefault(record["sample_token"], []).append(record["token"])
         nusc._annotations_by_sample = cache  # type: ignore[attr-defined]
     return cache
