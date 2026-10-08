@@ -156,39 +156,37 @@ def run_scene(scene: Scene, radar) -> Dict[str, Any]:
     rd = range_doppler_fft(baseband)
     if rd.ndim == 2:
         rd = rd[np.newaxis, ...]
-    maps = [np.asarray(rd[idx]) for idx in range(rd.shape[0])]
-    rd_db = 20.0 * np.log10(np.abs(maps[0]) + 1e-12)
-    n_bins = _rd_shape(rd_db)
-    pfa = 3e-4
-    _, peaks = _extract_peaks(rd_db, _rd_shape(rd_db), pfa)
-
+    rd_db = 20.0 * np.log10(np.abs(rd[0]) + 1e-12)
     rng_axis = _range_axis(rd_db.shape[-1])
-    vel_axis = _velocity_axis(rd_db.shape[-2]) if rd_db.ndim == 2 else _velocity_axis(rd_db.shape[0])
 
-    noise_floor_db = float(np.percentile(rd_db, 50))
-    detections = []
-    for row, col, amp in peaks[:64]:
-        det = {
-            "range_m": float(rng_axis[col] if rd_db.ndim == 2 else rng_axis[0]),
-            "velocity_mps": float(vel_axis[row]),
-            "snr_db": float(amp - noise_floor_db),
-        }
-        detections.append(det)
-        if rd_db.ndim == 2:
-            det["range_m"] = float(rng_axis[col])
-        if rd_db.ndim == 2:
-            det["azimuth_rad"] = float("nan")
+    noise_floor_db = float(np.percentile(rd_db, 25))
 
-    # Free tier gives a single Rx channel: azimuth is deferred to the
-    # two-run interferometry extension. Keep the field for schema stability.
-    for det in detections:
-        det["azimuth_rad"] = float("nan")
+    def amp_at(range_m: float) -> float:
+        k = int(np.argmin(np.abs(rng_axis - range_m)))
+        return float(rd_db[:, k].max())
+
+    # Static canonical scenes: every real path sits at the zero-doppler row
+    # (the doppler fft is unshifted, so row 0 is 0 Hz).
+    direct_range = math.hypot(scene.direct_xy[0], scene.direct_xy[1])
+    direct_amp = amp_at(direct_range)
+
+    measurements = []
+    for variant in analytic_gr(scene):
+        amp = amp_at(variant["ghost_range_m"])
+        measurements.append({
+            "variant": variant["variant"],
+            "ghost_range_m": variant["ghost_range_m"],
+            "amp_db": round(amp, 1),
+            "ghost_minus_direct_db": round(amp - direct_amp, 1),
+        })
 
     return {
-        "peaks": detections,
-        "noise_floor_db": noise_floor_db,
-        "shape": list(rd_db.shape),
-        "analytic": analytic_gr(scene),
+        "direct_range_m": direct_range,
+        "direct_amp_db": round(direct_amp, 1),
+        "ghost_measurements": measurements,
+        "noise_db": round(noise_floor_db, 1),
+        "rd_shape": list(rd_db.shape),
+        "range_axis_m": [round(float(rng_axis[0]), 2), round(float(rng_axis[-1]), 2)],
     }
 
 
@@ -234,12 +232,13 @@ def main() -> int:
     payload: Dict[str, Any] = {"scenes": {}}
     for name in args.scenes:
         scene = SCENES[name]
-        payload["scenes"][name] = run_scene(scene, radar)
-        rows = payload["scenes"][name]["peaks"]
-        print(f"== {name}: {len(rows)} CFAR peaks")
-        for det in sorted(rows, key=lambda d: -d["snr_db"])[:10]:
-            print(f"   r={det['range_m']:7.2f} m  az={np.degrees(det['azimuth_rad']):7.2f}° "
-                  f"v={det['velocity_mps']:6.2f} m/s  snr={det['snr_db']:6.1f} dB")
+        result = run_scene(scene, radar)
+        payload["scenes"][name] = result
+        print(f"== {name}: direct@{result['direct_range_m']:.1f} m {result['direct_amp_db']:.1f} dB")
+        for meas in result["ghost_measurements"]:
+            print("   %-10s ghost@%6.2f m amp %7.1f dB  (ghost-direct %+6.1f dB)"
+                  % (meas["variant"], meas["ghost_range_m"], meas["amp_db"],
+                     meas["ghost_minus_direct_db"]))
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
     return 0
