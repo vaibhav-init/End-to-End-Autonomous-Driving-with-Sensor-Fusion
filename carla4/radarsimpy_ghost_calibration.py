@@ -140,7 +140,8 @@ def analytic_gr(scene: Scene) -> List[Dict[str, float]]:
 def stage_a_plane_plane() -> Dict[str, Any]:
     """Compare the model's geometry-mode ghosts with the mirror analytics."""
 
-    config = RealisticRadarConfig(profile_name="rgd_regime_v1")
+    from carla4.radar.realistic_core import load_realistic_radar_config
+    config = load_realistic_radar_config(profile_name="rgd_regime_v1")
     config = replace(config, multipath_mode="geometry")
     report: Dict[str, Any] = {}
     for name, scene in SCENES.items():
