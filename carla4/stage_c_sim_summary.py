@@ -72,7 +72,29 @@ def load_gt_by_sample(csv_path: str) -> Dict[int, np.ndarray]:
     return out
 
 
-def build_sim_scans(details_path: str, gt_by_sample: Dict[int, np.ndarray]) -> List[Scan]:
+def load_gt_by_world_frame(csv_path: str) -> Dict[int, np.ndarray]:
+    """GT keyed by the CARLA world frame, for latency-aligned association."""
+
+    import csv
+
+    out: Dict[int, np.ndarray] = {}
+    with open(csv_path, newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            try:
+                frame = int(float(row["world_frame"]))
+                target = np.array([
+                    float(row["gt_center_range_m"]),
+                    math.radians(float(row["gt_azimuth_deg"])),
+                    float(row["gt_closing_velocity_mps"]),
+                ])
+                out.setdefault(frame, target)
+            except (KeyError, TypeError, ValueError):
+                continue
+    return out
+
+
+def build_sim_scans(details_path: str, gt_by_sample: Dict[int, np.ndarray],
+                    gt_by_frame: Dict[int, np.ndarray]) -> List[Scan]:
     scans = []
     with open(details_path, "r", encoding="utf-8") as handle:
         for line in handle:
@@ -81,7 +103,17 @@ def build_sim_scans(details_path: str, gt_by_sample: Dict[int, np.ndarray]) -> L
             detections = _det_rows(
                 record.get("backends", {}).get("realistic", {}).get("debug", {}).get("delivered_detections", [])
             )
-            gt = gt_by_sample.get(sample)
+            # Prefer the sensor's latency-aligned ground truth frame: the CSV
+            # row for sample_index carries the pose at the sampling instant,
+            # while the delivered target list may lag by a frame or two.
+            aligned_frame = (
+                record.get("backends", {}).get("realistic", {}).get("aligned_ground_truth_frame")
+            )
+            gt = None
+            if aligned_frame is not None:
+                gt = gt_by_frame.get(int(aligned_frame))
+            if gt is None:
+                gt = gt_by_sample.get(sample)
             targets = np.zeros((1, 3)) if gt is not None else np.zeros((0, 3))
             if gt is not None:
                 targets = np.asarray([gt], dtype=float)
@@ -101,7 +133,8 @@ def main() -> int:
     details = os.path.join(args.stage_c_dir, "radar_details.jsonl")
     samples = os.path.join(args.stage_c_dir, "radar_samples.csv")
     gt_by_sample = load_gt_by_sample(samples)
-    scans = build_sim_scans(details, gt_by_sample)
+    gt_by_frame = load_gt_by_world_frame(samples)
+    scans = build_sim_scans(details, gt_by_sample, gt_by_frame)
     sim_summary = summarize_scans(scans)
     print(f"sim scans={sim_summary.n_scans} "
           f"dets/scan={sim_summary.detections_per_scan_mean:.1f} "
