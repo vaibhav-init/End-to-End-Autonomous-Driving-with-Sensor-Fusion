@@ -13,10 +13,10 @@
  "max_unambiguous_doppler_mps": 44.3,
  "multipath_second_order_loss_db": 16.4,
  "multipath_third_order_loss_db": 22.0,
- "range_noise_floor_m": 0.228,
+ "range_noise_floor_m": 0.383,
  "range_noise_snr_scale_m": 7.833,
  "azimuth_noise_floor_deg": 0.574,
  "azimuth_noise_snr_scale_deg": 32.814,
- "doppler_noise_floor_mps": 0.35,
+ "doppler_noise_floor_mps": 0.471,
  "doppler_noise_snr_scale_mps": 20.016
 }
