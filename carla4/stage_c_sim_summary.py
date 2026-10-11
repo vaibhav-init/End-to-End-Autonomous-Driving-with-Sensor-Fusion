@@ -103,17 +103,15 @@ def build_sim_scans(details_path: str, gt_by_sample: Dict[int, np.ndarray],
             detections = _det_rows(
                 record.get("backends", {}).get("realistic", {}).get("debug", {}).get("delivered_detections", [])
             )
-            # Prefer the sensor's latency-aligned ground truth frame: the CSV
-            # row for sample_index carries the pose at the sampling instant,
-            # while the delivered target list may lag by a frame or two.
+            # The CSV ground truth at sample_index is what the validator's own
+            # error columns are evaluated against, so keep the association
+            # consistent with it. (Matching by aligned_frame shifted the bias
+            # the wrong way; the sensor's aligned frame numbering does not
+            # map onto the CSV world_frame column one-to-one.)
             aligned_frame = (
                 record.get("backends", {}).get("realistic", {}).get("aligned_ground_truth_frame")
             )
-            gt = None
-            if aligned_frame is not None:
-                gt = gt_by_frame.get(int(aligned_frame))
-            if gt is None:
-                gt = gt_by_sample.get(sample)
+            gt = gt_by_sample.get(sample)
             targets = np.zeros((1, 3)) if gt is not None else np.zeros((0, 3))
             if gt is not None:
                 targets = np.asarray([gt], dtype=float)
