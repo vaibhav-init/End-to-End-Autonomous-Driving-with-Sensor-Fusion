@@ -747,7 +747,9 @@ def main():
 
     carla = _carla_module()
     client = carla.Client(args.host, args.port)
-    client.set_timeout(30.0)
+    # Heavy towns (Town03/04) exceed 30 s of world reload while the desktop
+    # window renderer warms; give the loader generous headroom.
+    client.set_timeout(120.0)
     output = Path(args.output) / args.split
     output.mkdir(parents=True, exist_ok=True)
     summaries = []
