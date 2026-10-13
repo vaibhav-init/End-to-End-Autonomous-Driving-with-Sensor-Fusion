@@ -36,16 +36,24 @@ smoke() {
 
 collect_all() {
     check_carla
+    FAILURES=0
     for spec in "pedestrian:train:8" "pedestrian:val:2" "pedestrian:test:2" \
                 "cyclist:train:8" "cyclist:val:1"; do
         IFS=: read -r type split count <<EOF
 $spec
 EOF
         echo "=== $type / $split / $count sequences ==="
-        "$PY" collect_carla_radar_ghosts.py \
+        if ! "$PY" collect_carla_radar_ghosts.py \
             --town Town04 --target-type "$type" --split "$split" --sequences "$count" \
-            --output "$OUT/$type" --resume "$@" || exit 1
+            --output "$OUT/$type" --resume "$@"; then
+            # A stalled synchronous-RPC worker (or its failed retry) aborts the
+            # supervisor; the failed sequences are retried by rerunning with
+            # --resume, so keep going through the remaining invocations.
+            echo "INVOCATION FAILED: $type/$split (will be retried by rerunning with --resume)"
+            FAILURES=$((FAILURES + 1))
+        fi
     done
+    exit "$FAILURES"
 }
 
 prepare() {
