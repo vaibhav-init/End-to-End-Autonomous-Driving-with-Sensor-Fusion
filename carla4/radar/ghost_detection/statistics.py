@@ -44,13 +44,19 @@ def amplitude_to_db(amplitude, mode="auto"):
     value can be negative and rarely exceeds ~100. The guess is printed by
     the callers because getting it wrong shifts every amplitude statistic by
     a constant that the relative measures then cancel anyway.
+
+    ``auto`` classifies as dB only on solid evidence (a negative value),
+    because both the RGD ``amp`` field and the CARLA export that mimics it
+    store *linear* amplitude, and the CARLA proxy ``10^(SNR/20)`` stays
+    below 100 for any SNR under 40 dB -- the previous ``max < 100`` guess
+    misclassified the synthetic domain and shifted absolute amplitude
+    statistics by tens of dB.
     """
 
     values = np.asarray(amplitude, dtype=np.float64)
     if mode == "auto":
         finite = values[np.isfinite(values)]
-        looks_like_db = finite.size > 0 and (finite.min() < 0.0 or finite.max() < 100.0)
-        mode = "db" if looks_like_db else "linear"
+        mode = "db" if finite.size and finite.min() < 0.0 else "linear"
     if mode == "db":
         return values, mode
     return 20.0 * np.log10(np.maximum(values, 1.0e-6)), "linear"

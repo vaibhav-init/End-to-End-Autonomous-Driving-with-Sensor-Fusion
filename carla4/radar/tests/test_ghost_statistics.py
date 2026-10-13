@@ -62,6 +62,16 @@ class StatisticsTest(unittest.TestCase):
         self.assertEqual(unit, "db")
         self.assertEqual(values.tolist(), [-5.0, 12.0, 40.0])
 
+    def test_carla_amplitude_proxy_is_linear_not_db(self):
+        # The CARLA export stores amp = 10^(SNR/20); an SNR of 13..40 dB gives
+        # amplitudes 4.5..100 -- all below 100, so the old `max < 100` guess
+        # misclassified the synthetic domain as already-dB and left the values
+        # unconverted.  Negative-free evidence must classify as linear.
+        _, unit = amplitude_to_db(np.array([4.5, 27.0, 100.0]))
+        self.assertEqual(unit, "linear")
+        values, _ = amplitude_to_db(np.array([4.5, 27.0, 100.0]))
+        self.assertAlmostEqual(float(values[0]), 20 * math.log10(4.5), places=5)
+
     def test_ghost_parent_relations_recover_known_offsets(self):
         stats = sequence_statistics(_sequence())
         meta = stats["_meta"]
