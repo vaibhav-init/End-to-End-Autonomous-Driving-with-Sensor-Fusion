@@ -36,16 +36,11 @@ smoke() {
 
 collect_all() {
     check_carla
-    for run in \
-        "pedestrian train 8" \
-        "pedestrian val 2" \
-        "pedestrian test 2" \
-        "cyclist train 8" \
-        "cyclist val 1"; do
-        set -- $run
-        type=$1
-        split=$2
-        count=$3
+    for spec in "pedestrian:train:8" "pedestrian:val:2" "pedestrian:test:2" \
+                "cyclist:train:8" "cyclist:val:1"; do
+        IFS=: read -r type split count <<EOF
+$spec
+EOF
         echo "=== $type / $split / $count sequences ==="
         "$PY" collect_carla_radar_ghosts.py \
             --town Town04 --target-type "$type" --split "$split" --sequences "$count" \
