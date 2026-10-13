@@ -18,6 +18,11 @@ import unittest
 
 import numpy as np
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 from radar.extended_target import expand_detection
 from radar.oracle_filter import OracleGhostFilter
 from radar.realistic_core import (

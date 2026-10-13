@@ -4,6 +4,11 @@ from unittest.mock import patch
 
 import numpy as np
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 from radar.cshenron_core import SEMANTIC_LIDAR_DTYPE
 from radar.front_radar import CShenronFrontRadar, RealisticFrontRadar
 from radar.realistic_core import load_realistic_radar_config

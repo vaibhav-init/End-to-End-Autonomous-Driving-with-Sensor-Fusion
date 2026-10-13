@@ -4,6 +4,11 @@ import unittest
 
 import numpy as np
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 from radar.ghost_detection.export_expansion import expand_detection_points
 from radar.ghost_detection.features import (
     FEATURE_NAMES,

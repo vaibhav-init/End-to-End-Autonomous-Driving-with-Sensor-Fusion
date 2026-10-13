@@ -2,6 +2,11 @@ import unittest
 
 import numpy as np
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 from radar.ghost_detection.labels import (
     decode_cmto_label,
     label_id_to_binary_target,

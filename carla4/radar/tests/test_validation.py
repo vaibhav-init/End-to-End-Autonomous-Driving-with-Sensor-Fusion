@@ -1,5 +1,10 @@
 import unittest
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 from radar.validation import BackendAccuracy, error_statistics
 from validate_radar_accuracy import (
     _assess_carla_versions,

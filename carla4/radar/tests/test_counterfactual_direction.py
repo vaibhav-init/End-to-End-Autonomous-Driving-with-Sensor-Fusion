@@ -9,7 +9,12 @@ Needs torch only because the module it lives in imports it; the function under
 test is plain numpy.
 """
 
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 try:
     import torch  # noqa: F401

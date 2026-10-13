@@ -19,6 +19,11 @@ import math
 import numpy as np
 import pytest
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 from radar.extended_target import (
     MICRO_DOPPLER_AMPLITUDE,
     MICRO_DOPPLER_NOISE_MPS,

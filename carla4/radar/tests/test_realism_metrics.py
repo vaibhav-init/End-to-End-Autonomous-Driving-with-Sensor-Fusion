@@ -8,6 +8,11 @@ import unittest
 
 import numpy as np
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 from carla4.radar.realism_metrics import (
     AZIMUTH_GATE_RAD,
     RADIAL_VELOCITY_GATE_MPS,
