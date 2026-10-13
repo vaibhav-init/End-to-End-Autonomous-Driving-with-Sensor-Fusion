@@ -1736,7 +1736,7 @@ def _sequence_path(args, sequence_index):
         / args.split
         / (
             f"scenario-{args.town.lower()}-synthetic-{sequence_index:03d}_sequence-01_"
-            f"car_{args.split}.h5"
+            f"{args.target_type}_{args.split}.h5"
         )
     )
 
