@@ -24,6 +24,7 @@ from collect_carla_radar_ghosts import (
     _wait_for_radar_frame,
 )
 from radar import create_front_radar
+from radar.realistic_core import REALISTIC_RADAR_PROFILES
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,12 @@ def parse_args():
     parser.add_argument("--event-retry", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=100)
     parser.add_argument("--radar-config", help="optional geometry-profile overrides")
+    parser.add_argument(
+        "--radar-profile",
+        choices=REALISTIC_RADAR_PROFILES,
+        default="geometry_multipath_v1",
+        help="realistic-backend profile; rgd_regime_v1 carries the measured-loss physics",
+    )
     parser.add_argument(
         "--camera-view",
         choices=("chase", "target"),
@@ -424,7 +431,7 @@ def collect_sequence(client, args, sequence_index, town, preset):
             backend="realistic",
             fps=args.fps,
             points_per_second=args.points_per_second,
-            profile_name="geometry_multipath_v1",
+            profile_name=args.radar_profile,
             config_path=args.radar_config,
             seed=sequence_seed,
             capture_debug=True,
@@ -606,7 +613,7 @@ def _write_sequence(path, radar_data, diagnostics, events, failures, args):
             compression="gzip",
             shuffle=True,
         )
-        handle.attrs["generator"] = "CARLA 0.9.16 diverse geometry_multipath_v1"
+        handle.attrs["generator"] = f"CARLA 0.9.16 diverse {args.radar_profile}"
         handle.attrs["town"] = diagnostics["town"]
         handle.attrs["scene"] = diagnostics["scene"]
         handle.attrs["weather"] = diagnostics["weather"]
