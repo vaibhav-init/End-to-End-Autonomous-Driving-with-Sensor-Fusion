@@ -8,7 +8,12 @@ claim must reproduce:
 - probability of detection versus range,
 - range / azimuth / radial-velocity error statistics of matched detections,
 - unmatched-detection (ghost / clutter) rate and its range distribution,
-- Doppler-ambiguity misassignment rate of matched detections.
+- Doppler-ambiguity misassignment rate of matched detections,
+- temporal structure: detection-count lag-1 autocorrelation and the
+  miss-run length distribution of per-truth-id detection gaps (computed
+  when scans carry ``target_truth_ids``; the real nuScenes side can only
+  provide these at its 2 Hz annotation cadence, so sim-vs-real miss-run
+  comparisons must use the sim cadence on both sides).
 
 The result is a :class:`RealismSummary` that serialises to JSON.  Two
 summaries -- one from real data, one from the simulator -- can then be
@@ -41,6 +46,10 @@ DOPPLER_MISASSIGNMENT_MPS = 2.0
 PD_RANGE_BINS = (0.0, 25.0, 50.0, 75.0, 100.0, 150.0, 250.0)
 
 DETECTIONS_PER_SCAN_HIST_BINS = 60
+
+# Miss-run histogram edges: a miss-run of length L counts in the bin whose
+# edges bracket L; runs longer than the last edge clip into the final bin.
+MISS_RUN_BIN_EDGES = (1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 50, 100)
 
 
 @dataclass
@@ -184,6 +193,13 @@ class RealismSummary:
     raw_matched_azimuth_samples: List[float] = field(default_factory=list)
     raw_ghost_range_samples: List[float] = field(default_factory=list)
 
+    # Temporal structure.  detection_count_series is capped; NaN means the
+    # statistic was not computed (empty/short sequence or no truth ids).
+    detection_count_lag1_autocorr: float = float("nan")
+    detection_count_series: List[int] = field(default_factory=list)
+    miss_run_hist: List[int] = field(default_factory=list)              # bins over MISS_RUN_BIN_EDGES
+    miss_run_mean: float = float("nan")
+
     RAW_SAMPLE_CAP = 20000
 
     def to_json(self, path: str) -> str:
@@ -217,7 +233,21 @@ def summarize_scans(scans: Iterable[Scan],
     ghost_rows: List[np.ndarray] = []
     misassigned = 0
 
-    for scan in scans:
+    # Per-truth-id miss-run tracking.  A run is a maximal stretch of
+    # consecutive scans in which a ground-truth id was present (GT visible)
+    # but no detection matched it.  An absent scan breaks the run and flushes
+    # it, because an unseen-but-not-GT-present scan is occlusion, not a miss.
+    summary.miss_run_hist = [0] * (len(MISS_RUN_BIN_EDGES) - 1)
+    miss_runs: List[float] = []
+    open_runs: Dict[int, int] = {}
+
+    def _flush_run(length: int) -> None:
+        if length > 0:
+            miss_runs.append(float(length))
+            bin_index = int(np.searchsorted(MISS_RUN_BIN_EDGES, length, side="right") - 1)
+            summary.miss_run_hist[min(bin_index, len(MISS_RUN_BIN_EDGES) - 2)] += 1
+
+    for scan_index, scan in enumerate(scans):
         dets = _validate_scan_rows(scan.detections, "detections")
         tgts = _validate_scan_rows(scan.targets, "targets")
         det_count = int(dets.shape[0])
@@ -247,6 +277,24 @@ def summarize_scans(scans: Iterable[Scan],
                 summary.ghost_range_counts[ghost_bin] += 1
             ghost_rows.append(rows[:, 0].ravel())
 
+        # Miss-run bookkeeping when this scan carries truth ids.  A scan
+        # whose truth ids are malformed or absent interrupts every open run.
+        if scan.target_truth_ids is not None:
+            truth_ids = np.asarray(scan.target_truth_ids).ravel()
+            aligned = truth_ids.size == tgt_count
+            present = {int(v) for v in truth_ids} if aligned else set()
+            detected_ids = ({int(truth_ids[pair[1]]) for pair in stats.matched_indices
+                             if pair[1] < truth_ids.size} if aligned else set())
+            for truth_id in sorted(present):
+                run = open_runs.get(truth_id, 0)
+                if truth_id in detected_ids:
+                    _flush_run(run)
+                    open_runs.pop(truth_id, None)
+                else:
+                    open_runs[truth_id] = run + 1
+            for absent_id in [tid for tid in open_runs if tid not in present]:
+                _flush_run(open_runs.pop(absent_id))
+
     summary.n_scans = len(det_counts)
     if det_counts:
         counts = np.asarray(det_counts, dtype=float)
@@ -255,7 +303,20 @@ def summarize_scans(scans: Iterable[Scan],
         hist, _ = np.histogram(counts, bins=DETECTIONS_PER_SCAN_HIST_BINS,
                                range=(0, DETECTIONS_PER_SCAN_HIST_BINS))
         summary.detections_per_scan_hist = [int(v) for v in hist]
+        summary.detection_count_series = det_counts[: RealismSummary.RAW_SAMPLE_CAP]
+        if len(counts) > 2:
+            centered = counts - counts.mean()
+            denominator = float(np.sum(centered[:-1] * centered[:-1]))
+            if denominator > 0.0:
+                summary.detection_count_lag1_autocorr = float(
+                    np.sum(centered[:-1] * centered[1:]) / denominator)
     summary.targets_per_scan_mean = float(np.mean(tgt_counts)) if tgt_counts else 0.0
+
+    # A miss still open at the end of the sequence is a real miss-run.
+    for truth_id in list(open_runs):
+        _flush_run(open_runs.pop(truth_id))
+    if miss_runs:
+        summary.miss_run_mean = float(np.mean(miss_runs))
 
     if matched.size:
         rng = matched[:, 0]
@@ -350,17 +411,26 @@ def compare_summaries(reference: RealismSummary, candidate: RealismSummary) -> D
          candidate.velocity_misassignment_rate),
         ("ghosts_per_scan_mean", reference.ghosts_per_scan_mean, candidate.ghosts_per_scan_mean),
         ("ghost_fraction", reference.ghost_fraction, candidate.ghost_fraction),
+        ("detection_count_lag1_autocorr", reference.detection_count_lag1_autocorr,
+         candidate.detection_count_lag1_autocorr),
     ):
         err[key] = {"reference": ref_val, "candidate": cand_val,
                     "delta": (cand_val - ref_val) if ref_val is not None and cand_val is not None else None}
     if reference.raw_matched_range_samples and candidate.raw_matched_range_samples:
         err["range_error_ks"] = _ks_statistic(reference.raw_matched_range_samples,
                                               candidate.raw_matched_range_samples)
+    if reference.raw_matched_azimuth_samples and candidate.raw_matched_azimuth_samples:
+        err["azimuth_error_ks"] = _ks_statistic(reference.raw_matched_azimuth_samples,
+                                                candidate.raw_matched_azimuth_samples)
     if reference.raw_matched_velocity_samples and candidate.raw_matched_velocity_samples:
         err["velocity_error_ks"] = _ks_statistic(reference.raw_matched_velocity_samples,
                                                  candidate.raw_matched_velocity_samples)
     if reference.raw_ghost_range_samples and candidate.raw_ghost_range_samples:
         err["ghost_range_ks"] = _ks_statistic(reference.raw_ghost_range_samples,
                                               candidate.raw_ghost_range_samples)
+    if (reference.miss_run_hist and candidate.miss_run_hist
+            and any(reference.miss_run_hist) and any(candidate.miss_run_hist)
+            and len(reference.miss_run_hist) == len(candidate.miss_run_hist)):
+        err["miss_run_hist_l1"] = _l1_distance(reference.miss_run_hist, candidate.miss_run_hist)
     report["statistics"] = err
     return report

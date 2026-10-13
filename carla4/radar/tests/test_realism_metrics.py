@@ -1,6 +1,7 @@
 """Unit tests for the realism metrics module."""
 
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -102,6 +103,75 @@ class SummarizeTest(unittest.TestCase):
         summary = summarize_scans([])
         self.assertEqual(summary.n_scans, 0)
         self.assertEqual(sum(sum(row) for row in summary.pd_counts), 0)
+
+
+class TemporalStatsTest(unittest.TestCase):
+    @staticmethod
+    def _truth_scan(detected, target_id=7):
+        tgt = [[10.0, 0.0, 0.0]]
+        scan = _scan([list(tgt[0])] if detected else [], tgt)
+        scan.target_truth_ids = np.asarray([target_id])
+        return scan
+
+    def test_miss_runs_counted_within_present_stretches(self):
+        # Detected in 0,1; missed 2,3,4 (run 3); detected in 5; GT-absent in 6
+        # (occlusion, not a miss); present again in 7,8,9 all missed, so the
+        # final open run of 3 is flushed when the sequence ends.
+        scans = [self._truth_scan(True), self._truth_scan(True),
+                 self._truth_scan(False), self._truth_scan(False),
+                 self._truth_scan(False), self._truth_scan(True),
+                 _scan([], []),                      # no GT this scan
+                 self._truth_scan(False), self._truth_scan(False), self._truth_scan(False)]
+        summary = summarize_scans(scans)
+        self.assertEqual(summary.miss_run_hist, [0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        self.assertAlmostEqual(summary.miss_run_mean, 3.0, places=6)
+
+    def test_miss_runs_broken_by_absence(self):
+        # Missed 0,1 (run 2, flushed when the id leaves the GT), detected in 4,
+        # missed in 5 (open run flushed at the end).
+        scans = [self._truth_scan(False, 3), self._truth_scan(False, 3),
+                 self._truth_scan(True, 9), self._truth_scan(True, 9),
+                 self._truth_scan(True, 3), self._truth_scan(False, 3)]
+        summary = summarize_scans(scans)
+        self.assertEqual(summary.miss_run_hist, [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        self.assertAlmostEqual(summary.miss_run_mean, 1.5, places=6)
+
+    def test_no_truth_ids_leaves_temporal_fields_unset(self):
+        summary = summarize_scans([_scan([[10.0, 0.0, 0.0]], [[10.0, 0.0, 0.0]])])
+        self.assertTrue(math.isnan(summary.miss_run_mean))
+        self.assertEqual(sum(summary.miss_run_hist), 0)
+
+    def test_detection_count_autocorr(self):
+        scans = []
+        for i in range(8):
+            if i % 2 == 0:
+                scans.append(_scan([[10.0, 0.0, 0.0]] * 4, [[10.0, 0.0, 0.0]] * 4))
+            else:
+                scans.append(_scan([], []))
+        summary = summarize_scans(scans)
+        self.assertAlmostEqual(summary.detection_count_lag1_autocorr, -1.0, places=5)
+
+    def test_constant_counts_autocorr_undefined(self):
+        scans = [_scan([[10.0, 0.0, 0.0]], [[10.0, 0.0, 0.0]]) for _ in range(10)]
+        summary = summarize_scans(scans)
+        self.assertTrue(math.isnan(summary.detection_count_lag1_autocorr))
+
+
+class AzimuthKS(unittest.TestCase):
+    def test_azimuth_error_ks_separates_spreads(self):
+        rng = np.random.default_rng(3)
+        scans_a = []
+        scans_b = []
+        for _ in range(60):
+            tgt = [20.0, 0.0, 0.0]
+            det_a = [20.0, rng.normal(0, 0.005), 0.0]
+            det_b = [20.0, rng.normal(0, 0.05), 0.0]
+            scans_a.append(_scan([det_a], [tgt]))
+            scans_b.append(_scan([det_b], [tgt]))
+        report = compare_summaries(summarize_scans(scans_a), summarize_scans(scans_b))
+        ks = report["statistics"].get("azimuth_error_ks")
+        self.assertIsInstance(ks, float)
+        self.assertGreater(abs(ks), 0.3)
 
 
 class CompareTest(unittest.TestCase):

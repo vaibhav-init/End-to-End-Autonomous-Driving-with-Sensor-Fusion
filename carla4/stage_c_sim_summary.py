@@ -53,10 +53,10 @@ def _det_rows(detections: List[Dict[str, Any]]) -> np.ndarray:
     return np.asarray(rows, dtype=float)
 
 
-def load_gt_by_sample(csv_path: str) -> Dict[int, np.ndarray]:
+def load_gt_by_sample(csv_path: str) -> Dict[int, Tuple[np.ndarray, int]]:
     import csv
 
-    out: Dict[int, np.ndarray] = {}
+    out: Dict[int, Tuple[np.ndarray, int]] = {}
     with open(csv_path, newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             try:
@@ -66,7 +66,8 @@ def load_gt_by_sample(csv_path: str) -> Dict[int, np.ndarray]:
                     math.radians(float(row["gt_azimuth_deg"])),
                     float(row["gt_closing_velocity_mps"]),
                 ])
-                out.setdefault(sample, target)
+                lead_id = int(float(row.get("lead_actor_id") or 0))
+                out.setdefault(sample, (target, lead_id))
             except (KeyError, TypeError, ValueError):
                 continue
     return out
@@ -111,11 +112,15 @@ def build_sim_scans(details_path: str, gt_by_sample: Dict[int, np.ndarray],
             aligned_frame = (
                 record.get("backends", {}).get("realistic", {}).get("aligned_ground_truth_frame")
             )
-            gt = gt_by_sample.get(sample)
-            targets = np.zeros((1, 3)) if gt is not None else np.zeros((0, 3))
-            if gt is not None:
-                targets = np.asarray([gt], dtype=float)
-            scans.append(Scan(detections=detections, targets=targets))
+            entry = gt_by_sample.get(sample)
+            if entry is None:
+                scans.append(Scan(detections=detections, targets=np.zeros((0, 3))))
+                continue
+            gt, lead_id = entry
+            targets = np.asarray([gt], dtype=float)
+            truth_ids = np.asarray([lead_id], dtype=np.int64) if lead_id else None
+            scans.append(Scan(detections=detections, targets=targets,
+                              target_truth_ids=truth_ids))
     return scans
 
 
@@ -140,7 +145,9 @@ def main() -> int:
           f"range_sigma={sim_summary.range_error_std_m:.3f} m "
           f"range_mean={sim_summary.range_error_mean_m:.3f} m "
           f"vr_sigma={sim_summary.velocity_error_std_mps:.3f} m/s "
-          f"misassign={sim_summary.velocity_misassignment_rate:.3f}")
+          f"misassign={sim_summary.velocity_misassignment_rate:.3f} "
+          f"miss_run_mean={sim_summary.miss_run_mean:.2f} "
+          f"count_autocorr={sim_summary.detection_count_lag1_autocorr:.3f}")
 
     if args.sim_summary_out:
         sim_summary.to_json(args.sim_summary_out)
@@ -163,9 +170,10 @@ def main() -> int:
             block = table.get(key)
             if block:
                 print(f"  {key:32s} real={block['reference']:8.3f} sim={block['candidate']:8.3f} delta={block['delta']:+.3f}")
-        for key in ("range_error_ks", "velocity_error_ks", "ghost_range_ks"):
+        for key in ("range_error_ks", "azimuth_error_ks", "velocity_error_ks", "ghost_range_ks",
+                    "miss_run_hist_l1"):
             if key in table:
-                print(f"  {key:32s} KS={table[key]:.3f}")
+                print(f"  {key:32s} {table[key]:.3f}")
     return 0
 
 
