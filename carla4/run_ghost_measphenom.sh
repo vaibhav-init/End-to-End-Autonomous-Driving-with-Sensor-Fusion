@@ -37,6 +37,11 @@ smoke() {
 collect_all() {
     check_carla
     FAILURES=0
+    # v7s representation parity: one exported row per delivered detection.
+    # The sensor-source default expands each ghost object to ~8 surface
+    # points, which pushes the ghost share to ~80% against v7s's ~24% and
+    # poisons the fine-tune ratio. NOTE points_source=expand must stay a
+    # separate collection (different representation, cannot resume across).
     for spec in "pedestrian:train:8" "pedestrian:val:2" "pedestrian:test:2" \
                 "cyclist:train:8" "cyclist:val:1"; do
         IFS=: read -r type split count <<EOF
@@ -45,7 +50,8 @@ EOF
         echo "=== $type / $split / $count sequences ==="
         if ! "$PY" collect_carla_radar_ghosts.py \
             --town Town04 --target-type "$type" --split "$split" --sequences "$count" \
-            --output "$OUT/$type" --resume "$@"; then
+            --output "$OUT/$type" --resume \
+            --points-source expand --no-expand-points --points-per-detection 1 "$@"; then
             # A stalled synchronous-RPC worker (or its failed retry) aborts the
             # supervisor; the failed sequences are retried by rerunning with
             # --resume, so keep going through the remaining invocations.
