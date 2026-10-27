@@ -82,6 +82,32 @@ class PhantomBrakeTest(unittest.TestCase):
         self.assertLess(envelope, 90.0)
         self.assertEqual(int(phantom_brake_mask(df).sum()), 10)
 
+    def test_standstill_hold_brake_is_not_a_phantom_event(self):
+        df = _run(20, speed_kmh=0.0)
+        df["brake"] = 0.35
+        self.assertEqual(int(phantom_brake_mask(df).sum()), 0)
+
+    def test_staging_frames_are_not_scored(self):
+        df = _run(20, speed_kmh=50.0)
+        df["brake"] = 1.0
+        df["driver_in_control"] = 0
+        self.assertEqual(int(phantom_brake_mask(df).sum()), 0)
+
+    def test_rear_end_is_attributed_to_the_phantom_episode(self):
+        from metrics import rear_end_metrics
+
+        df = _run(40, speed_kmh=50.0)
+        df["brake"] = 0.0
+        df.loc[10:20, "brake"] = 0.8       # phantom episode
+        df["follower_present"] = 1
+        df["follower_gap_m"] = 10.0
+        df["rear_collision"] = 0
+        df.loc[22, "rear_collision"] = 1   # follower hits 2 frames later
+        result = rear_end_metrics(df)
+        self.assertEqual(result["phantom_brakes_with_follower"], 1)
+        self.assertEqual(result["rear_end_collisions"], 1)
+        self.assertEqual(result["p_crash_given_phantom"], 1.0)
+
     def test_jerk_is_zero_for_constant_acceleration_and_positive_for_twitching(self):
         smooth = _run(200)
         smooth["ego_accel_mps2"] = 1.0
