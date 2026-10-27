@@ -31,13 +31,30 @@ from radar.detection_log import DetectionLog, sidecar_path  # noqa: E402
 PATH_HALF_WIDTH_M = 1.8
 PATH_WIDTH_GROWTH_PER_M = 0.004
 PATH_MAX_FORWARD_M = 100.0
+PATH_MAX_ABS_CURVATURE_PER_M = 0.08
+PATH_MAX_LATERAL_OFFSET_M = 8.0
 
 
-def actor_in_ego_path(ego, actor):
+def _path_lateral_offset(forward_m, path_curvature_per_m):
+    """Lateral centreline offset used by the radar's curved-path selector."""
+
+    curvature = max(
+        -PATH_MAX_ABS_CURVATURE_PER_M,
+        min(PATH_MAX_ABS_CURVATURE_PER_M, float(path_curvature_per_m or 0.0)),
+    )
+    offset = 0.5 * curvature * forward_m * forward_m
+    return max(
+        -PATH_MAX_LATERAL_OFFSET_M,
+        min(PATH_MAX_LATERAL_OFFSET_M, offset),
+    )
+
+
+def actor_in_ego_path(ego, actor, path_curvature_per_m=0.0):
     """Whether ``actor`` sits ahead of the ego inside the driving corridor.
 
     Uses transforms only, so it works on any road segment without map
-    queries. Lateral extent of the actor is included, as the selector does.
+    queries. Lateral extent of the actor is included, and the corridor centre
+    follows the same curvature offset as the radar selector on Town04 curves.
     """
 
     if ego is None or actor is None or not actor.is_alive:
@@ -50,15 +67,21 @@ def actor_in_ego_path(ego, actor):
     lateral = delta.x * right.x + delta.y * right.y
     if not 0.0 < longitudinal < PATH_MAX_FORWARD_M:
         return False
+    path_lateral = _path_lateral_offset(longitudinal, path_curvature_per_m)
     half_width = PATH_HALF_WIDTH_M + PATH_WIDTH_GROWTH_PER_M * longitudinal
     try:
         extent = float(actor.bounding_box.extent.y)
     except (AttributeError, RuntimeError):
         extent = 0.9
-    return abs(lateral) - extent <= half_width
+    return abs(lateral - path_lateral) - extent <= half_width
 
 
-def nearest_in_path_actor(world, ego, type_filters=("vehicle.*", "walker.pedestrian.*")):
+def nearest_in_path_actor(
+    world,
+    ego,
+    type_filters=("vehicle.*", "walker.pedestrian.*"),
+    path_curvature_per_m=0.0,
+):
     """Privileged nearest in-path actor ahead of the ego, or None.
 
     Returns ``(actor, distance_m)``. Used by the exposure scenario, where any
@@ -83,12 +106,15 @@ def nearest_in_path_actor(world, ego, type_filters=("vehicle.*", "walker.pedestr
             if not 0.0 < longitudinal < PATH_MAX_FORWARD_M:
                 continue
             lateral = delta.x * right.x + delta.y * right.y
+            path_lateral = _path_lateral_offset(
+                longitudinal, path_curvature_per_m
+            )
             half_width = PATH_HALF_WIDTH_M + PATH_WIDTH_GROWTH_PER_M * longitudinal
             try:
                 extent = float(actor.bounding_box.extent.y)
             except (AttributeError, RuntimeError):
                 extent = 0.5
-            if abs(lateral) - extent > half_width:
+            if abs(lateral - path_lateral) - extent > half_width:
                 continue
             distance = math.sqrt(delta.x ** 2 + delta.y ** 2)
             if distance < best_distance:
@@ -117,6 +143,7 @@ class GroundTruthLogger:
         "brake",
         "steer",
         "critical_event",
+        "driver_in_control",
         "collision_occurred",
         "time_to_collision_s",
         "ego_accel_mps2",
@@ -165,6 +192,16 @@ class GroundTruthLogger:
         # is not comparable to one without.
         "radar_sync_timeouts",
         "controller_target_speed_mps",
+        "radar_path_curvature_per_m",
+        # Follower-vehicle columns (S5 only): the rear-end risk of a phantom
+        # brake. They are blank in scenarios without a follower.
+        "follower_present",
+        "follower_gap_m",
+        "follower_speed_kmh",
+        "follower_brake",
+        "follower_target_speed_kmh",
+        "follower_reaction_s",
+        "rear_collision",
     ]
 
     def __init__(
@@ -208,12 +245,20 @@ class GroundTruthLogger:
         brake=0.0,
         steer=0.0,
         critical_event=False,
+        driver_in_control=True,
         collision=False,
         tl_state=0,
         ego_accel=0.0,
         radar_diagnostics=None,
         npc_in_path=None,
         detections=None,
+        follower_present=False,
+        follower_gap_m=None,
+        follower_speed_kmh=None,
+        follower_brake=None,
+        follower_target_speed_kmh=None,
+        follower_reaction_s=None,
+        rear_collision=False,
     ):
         """Record one tick of ground truth data.
 
@@ -271,6 +316,7 @@ class GroundTruthLogger:
             "brake": round(brake, 4),
             "steer": round(steer, 4),
             "critical_event": 1 if critical_event else 0,
+            "driver_in_control": 1 if driver_in_control else 0,
             "collision_occurred": 1 if collision else 0,
             "time_to_collision_s": round(ttc, 4),
             "ego_accel_mps2": round(ego_accel, 4),
@@ -361,6 +407,36 @@ class GroundTruthLogger:
             "controller_target_speed_mps": radar.get(
                 "controller_target_speed_mps", ""
             ),
+            "radar_path_curvature_per_m": radar.get(
+                "path_curvature_per_m", ""
+            ),
+            "follower_present": 1 if follower_present else 0,
+            "follower_gap_m": (
+                round(float(follower_gap_m), 4)
+                if follower_gap_m is not None
+                else ""
+            ),
+            "follower_speed_kmh": (
+                round(float(follower_speed_kmh), 4)
+                if follower_speed_kmh is not None
+                else ""
+            ),
+            "follower_brake": (
+                round(float(follower_brake), 4)
+                if follower_brake is not None
+                else ""
+            ),
+            "follower_target_speed_kmh": (
+                round(float(follower_target_speed_kmh), 4)
+                if follower_target_speed_kmh is not None
+                else ""
+            ),
+            "follower_reaction_s": (
+                round(float(follower_reaction_s), 4)
+                if follower_reaction_s is not None
+                else ""
+            ),
+            "rear_collision": 1 if rear_collision else 0,
         }
         self._writer.writerow(row)
         self._rows += 1
