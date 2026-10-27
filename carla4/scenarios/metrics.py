@@ -18,6 +18,7 @@ Definitions are deliberately simple and stated once, here, so every driver
 and every arm is scored the same way.
 """
 
+import math
 import os
 import sys
 
@@ -73,9 +74,25 @@ def legitimate_brake_mask(df):
     return present & in_path & justified
 
 
-def phantom_brake_mask(df, threshold=BRAKE_THRESHOLD):
+def phantom_brake_mask(df, threshold=BRAKE_THRESHOLD,
+                       min_speed_mps=MOVING_SPEED_MPS):
+    """Brake commands with no GT reason, while the ego is actually moving.
+
+    A stationary vehicle holding brake is not a phantom-brake event: the HOLD
+    state deliberately applies 0.35 brake, and a car that never moves cannot
+    phantom-brake. Excluding standstill frames removes that construct-validity
+    artefact without hiding any moving-vehicle intervention.
+    """
+
     brake = _column(df, "brake", 0.0)
-    return (brake > threshold) & ~legitimate_brake_mask(df)
+    speed = _column(df, "gt_ego_speed_kmh", 0.0) / 3.6
+    in_control = _column(df, "driver_in_control", 1.0) > 0.5
+    return (
+        (brake > threshold)
+        & (speed >= min_speed_mps)
+        & in_control
+        & ~legitimate_brake_mask(df)
+    )
 
 
 def brake_episodes(mask, fps=FPS, merge_s=EPISODE_MERGE_S, min_s=EPISODE_MIN_S):
@@ -153,4 +170,125 @@ def longitudinal_cost_metrics(df, fps=FPS):
         ),
         "distance_km": distance_km,
         "jerk_rms_mps3": jerk_rms_mps3(df, fps),
+    }
+
+
+def wilson_interval(successes, trials, z=1.959963984540054):
+    """Wilson score interval for a binomial proportion."""
+
+    if trials <= 0:
+        return float("nan"), float("nan")
+    p = successes / trials
+    denominator = 1.0 + z * z / trials
+    centre = (p + z * z / (2.0 * trials)) / denominator
+    margin = (
+        z
+        * math.sqrt(p * (1.0 - p) / trials + z * z / (4.0 * trials * trials))
+        / denominator
+    )
+    return max(0.0, centre - margin), min(1.0, centre + margin)
+
+
+def rear_end_metrics(df, fps=FPS, horizon_s=5.0):
+    """Attribute rear-end collisions to phantom vs legitimate brake episodes.
+
+    ``rear_collision`` is set by the S5 follower when it hits the ego. Each
+    collision is attributed to the most recent brake episode whose start lies
+    within ``horizon_s`` before the collision. That gives the conditional
+    probability the rest of the project needs:
+
+        p(crash | phantom brake)
+        p(crash | legitimate brake)
+
+    Missing columns (old logs, scenarios without a follower) return NaN.
+    """
+
+    if "rear_collision" not in df.columns:
+        return {
+            "rear_end_collisions": float("nan"),
+            "phantom_brakes_with_follower": float("nan"),
+            "legitimate_brakes_with_follower": float("nan"),
+            "p_crash_given_phantom": float("nan"),
+            "p_crash_given_legitimate": float("nan"),
+            "p_crash_given_phantom_ci_low": float("nan"),
+            "p_crash_given_phantom_ci_high": float("nan"),
+            "follower_max_gap_m": float("nan"),
+            "follower_valid": 0,
+        }
+
+    gap_series = (
+        pd.to_numeric(df["follower_gap_m"], errors="coerce")
+        if "follower_gap_m" in df.columns
+        else pd.Series([float("nan")])
+    )
+    follower_max_gap = float(gap_series.max())
+    # A follower that loses the ego (>60 m) cannot measure rear-end risk.
+    follower_valid = bool(
+        np.isfinite(follower_max_gap) and follower_max_gap <= 60.0
+    )
+    if not follower_valid:
+        return {
+            "rear_end_collisions": float("nan"),
+            "phantom_brakes_with_follower": float("nan"),
+            "legitimate_brakes_with_follower": float("nan"),
+            "p_crash_given_phantom": float("nan"),
+            "p_crash_given_legitimate": float("nan"),
+            "p_crash_given_phantom_ci_low": float("nan"),
+            "p_crash_given_phantom_ci_high": float("nan"),
+            "follower_max_gap_m": follower_max_gap,
+            "follower_valid": 0,
+        }
+
+    rear = _column(df, "rear_collision", 0.0) > 0.0
+    if "follower_present" in df.columns:
+        follower_present = _column(df, "follower_present", 0.0) > 0.5
+    else:
+        follower_present = np.ones(len(df), dtype=bool)
+    phantom = phantom_brake_mask(df) & follower_present
+    brake = (_column(df, "brake", 0.0) > BRAKE_THRESHOLD) & follower_present
+    legitimate = brake & legitimate_brake_mask(df)
+
+    phantom_episodes = brake_episodes(phantom, fps)
+    legitimate_episodes = brake_episodes(legitimate, fps)
+    horizon = max(1, int(round(horizon_s * fps)))
+    # The collision flag latches; count only the first frame of each event.
+    rear = rear & follower_present
+    rear_edges = rear & ~np.concatenate(([False], rear[:-1]))
+    collision_indices = np.flatnonzero(rear_edges)
+
+    def attributed(episodes):
+        count = 0
+        for collision_index in collision_indices:
+            recent = [
+                start
+                for start, _end in episodes
+                if 0 <= collision_index - start <= horizon
+            ]
+            if recent:
+                count += 1
+        return count
+
+    phantom_crashes = attributed(phantom_episodes)
+    legitimate_crashes = attributed(legitimate_episodes)
+    ci_low, ci_high = wilson_interval(
+        phantom_crashes, len(phantom_episodes)
+    )
+    return {
+        "rear_end_collisions": int(rear.sum() > 0),
+        "phantom_brakes_with_follower": len(phantom_episodes),
+        "legitimate_brakes_with_follower": len(legitimate_episodes),
+        "p_crash_given_phantom": (
+            float(phantom_crashes / len(phantom_episodes))
+            if phantom_episodes
+            else float("nan")
+        ),
+        "p_crash_given_legitimate": (
+            float(legitimate_crashes / len(legitimate_episodes))
+            if legitimate_episodes
+            else float("nan")
+        ),
+        "p_crash_given_phantom_ci_low": ci_low,
+        "p_crash_given_phantom_ci_high": ci_high,
+        "follower_max_gap_m": follower_max_gap,
+        "follower_valid": 1,
     }
