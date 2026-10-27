@@ -1,7 +1,0 @@
-torch==2.0.1
-torchvision
-pyyaml
-scikit-image
-opencv-python
-torch_scatter
-tqdm
