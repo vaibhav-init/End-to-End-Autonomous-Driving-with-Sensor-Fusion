@@ -297,6 +297,7 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 brake=brake,
                 steer=steer,
                 critical_event=obstacle_spawned,
+                driver_in_control=obstacle_spawned,
                 collision=collision_occurred[0],
                 ego_accel=accel,
                 radar_diagnostics=driver.diagnostics(),
@@ -471,6 +472,10 @@ def main():
     results = []
     for fog in args.fog:
         for seed in args.seeds:
+            # spawn_obstacle_in_ego_direction uses the global RNG for the
+            # blueprint choice; without this, paired arms get different
+            # obstacle models even at the same seed.
+            random.seed(seed)
             try:
                 logger = run_scenario(client, world, settings, fog, seed,
                                       args.output, driver_name=args.driver,

@@ -332,6 +332,10 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 brake=brake,
                 steer=steer,
                 critical_event=npc_braked,
+                driver_in_control=(
+                    gapkeep is None
+                    or (handover_step is not None and step > handover_step)
+                ),
                 collision=collision_occurred[0],
                 ego_accel=accel,
                 radar_diagnostics=driver.diagnostics(),
