@@ -107,7 +107,14 @@ def _scenario_passthrough(args, sid):
             cmd.append("--no-stage-approach")
         return cmd
     if sid == 5:
-        return ["--duration-s", str(args.s5_duration_s)]
+        cmd = [
+            "--duration-s", str(args.s5_duration_s),
+            "--follower-gap-m", str(args.s5_follower_gap_m),
+            "--follower-reaction-s", str(args.s5_follower_reaction_s),
+        ]
+        if not args.s5_follower:
+            cmd.append("--no-follower")
+        return cmd
     return []
 
 
@@ -177,6 +184,11 @@ def main():
                         help="Disable controlled S2 staging (not recommended for comparisons)")
     parser.add_argument("--s5-duration-s", type=float, default=SCENARIO_DURATION_S[5],
                         help="Length of the S5 ghost-exposure drive")
+    parser.add_argument("--s5-follower", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="spawn the S5 following vehicle for rear-end risk")
+    parser.add_argument("--s5-follower-gap-m", type=float, default=20.0)
+    parser.add_argument("--s5-follower-reaction-s", type=float, default=0.8)
     args = parser.parse_args()
     os.environ["CARLA_TM_PORT"] = str(args.tm_port)
     if min(
@@ -185,6 +197,7 @@ def main():
         args.s1_stage_stable_s,
         args.s1_stage_speed_tolerance_kmh,
         args.s5_duration_s,
+        args.s5_follower_gap_m,
     ) <= 0.0:
         parser.error("scenario parameters must be positive")
     if args.output_root is None:

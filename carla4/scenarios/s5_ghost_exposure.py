@@ -49,6 +49,7 @@ from ground_truth_logger import (
     nearest_in_path_actor,
 )
 from drivers import DRIVER_NAMES, make_driver
+from follower import FollowerController, spawn_follower
 from spawn_utils import get_highway_spawns
 from s4_cut_in import spawn_npc_adjacent_lane
 from scenario_weather import set_weather_condition
@@ -106,7 +107,9 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                  target_speed_kmh=S5_TARGET_SPEED_KMH,
                  adjacent_npcs=S5_ADJACENT_NPCS,
                  background_vehicles=S5_BACKGROUND_VEHICLES,
-                 scenario_id=5, safety_rules=False):
+                 scenario_id=5, safety_rules=False,
+                 follower=True, follower_gap_m=20.0,
+                 follower_reaction_s=0.8):
     carla_map = world.get_map()
     rng = random.Random(seed)
     duration_s = duration_s or SCENARIO_DURATION_S[scenario_id]
@@ -152,6 +155,27 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     )
     driver.setup(world, ego, carla_map, client)
 
+    follower_vehicle = None
+    follower_controller = None
+    if follower:
+        follower_vehicle = spawn_follower(
+            world, carla_map, ego, gap_m=follower_gap_m
+        )
+        if follower_vehicle is None:
+            print("  [follower] could not spawn a following vehicle")
+        else:
+            follower_controller = FollowerController(
+                follower_vehicle,
+                ego,
+                carla_map,
+                desired_gap_m=follower_gap_m,
+                reaction_s=follower_reaction_s,
+            )
+            print(
+                f"  [follower] id={follower_vehicle.id} "
+                f"gap={follower_gap_m:.1f}m reaction={follower_reaction_s:.2f}s"
+            )
+
     # Parents in the neighbouring lanes. spawn_npc_adjacent_lane prefers the
     # right lane and falls back to the left; failures are skipped, the count
     # actually spawned is logged so a thin run is visible.
@@ -173,6 +197,11 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     for _ in range(40):
         control = driver.get_control(ego, world)
         ego.apply_control(control)
+        if follower_controller is not None:
+            follower_control, _gap, _target, _brake, _speed = (
+                follower_controller.update()
+            )
+            follower_vehicle.apply_control(follower_control)
         world.tick()
 
     spectator = world.get_spectator()
@@ -180,6 +209,22 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
     collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=ego)
     collision_occurred = [False]
     collision_sensor.listen(lambda _event: collision_occurred.__setitem__(0, True))
+
+    follower_collision_sensor = None
+    rear_collision = [False]
+    if follower_vehicle is not None:
+        follower_collision_sensor = world.spawn_actor(
+            collision_bp, carla.Transform(), attach_to=follower_vehicle
+        )
+
+        def _on_follower_collision(event):
+            try:
+                if event.other_actor.id == ego.id:
+                    rear_collision[0] = True
+            except RuntimeError:
+                pass
+
+        follower_collision_sensor.listen(_on_follower_collision)
 
     logger = GroundTruthLogger(
         output_dir, scenario_id, fog_density, seed,
@@ -207,11 +252,24 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
             accel = (ego_speed_mps - prev_speed_mps) * FPS if step > 0 else 0.0
             prev_speed_mps = ego_speed_mps
 
-            lead, gap = nearest_in_path_actor(world, ego)
+            diagnostics = driver.diagnostics()
+            curvature = diagnostics.get("path_curvature_per_m", 0.0)
+            lead, gap = nearest_in_path_actor(
+                world, ego, path_curvature_per_m=curvature
+            )
             lead_speed = compute_vehicle_speed(lead) if lead is not None else None
             rel_vel = (ego_speed - lead_speed) / 3.6 if lead is not None else None
 
-            diagnostics = driver.diagnostics()
+            follower_gap = None
+            follower_speed = None
+            follower_brake = None
+            follower_target = None
+            if follower_controller is not None:
+                follower_control, follower_gap, follower_target, follower_brake, follower_speed = (
+                    follower_controller.update()
+                )
+                follower_vehicle.apply_control(follower_control)
+
             if diagnostics.get("selected_source") == "ghost":
                 ghost_selected_frames += 1
 
@@ -225,13 +283,29 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
                 brake=applied.brake if applied else 0.0,
                 steer=applied.steer if applied else 0.0,
                 critical_event=False,
+                driver_in_control=True,
                 collision=collision_occurred[0],
                 ego_accel=accel,
                 radar_diagnostics=diagnostics,
                 npc_in_path=lead is not None,
                 detections=driver.latest_detections(),
+                follower_present=follower_controller is not None,
+                follower_gap_m=follower_gap,
+                follower_speed_kmh=follower_speed,
+                follower_brake=follower_brake,
+                follower_target_speed_kmh=follower_target,
+                follower_reaction_s=(
+                    follower_reaction_s if follower_controller is not None else None
+                ),
+                rear_collision=rear_collision[0],
             )
 
+            if rear_collision[0]:
+                print(
+                    f"    💥 REAR-END at step {step} "
+                    f"(gap={follower_gap:.1f}m, ego={ego_speed:.1f} km/h)"
+                )
+                break
             if collision_occurred[0]:
                 print(f"    💥 COLLISION at step {step} (speed={ego_speed:.1f} km/h)")
                 break
@@ -255,6 +329,12 @@ def run_scenario(client, world, settings, fog_density, seed, output_dir,
             collision_sensor.destroy()
         except RuntimeError:
             pass
+        if follower_collision_sensor is not None:
+            try:
+                follower_collision_sensor.destroy()
+            except RuntimeError:
+                pass
+        cleanup_actor(follower_vehicle)
         for npc in npcs:
             try:
                 npc.set_autopilot(False)
@@ -287,6 +367,14 @@ def main():
                         help="speed the adjacent NPCs are asked to hold")
     parser.add_argument("--adjacent-npcs", type=int, default=S5_ADJACENT_NPCS)
     parser.add_argument("--background-vehicles", type=int, default=S5_BACKGROUND_VEHICLES)
+    parser.add_argument(
+        "--follower",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="spawn a following vehicle and measure rear-end risk",
+    )
+    parser.add_argument("--follower-gap-m", type=float, default=20.0)
+    parser.add_argument("--follower-reaction-s", type=float, default=0.8)
     add_radar_arguments(parser)
     args = parser.parse_args()
     if args.duration_s <= 0.0:
@@ -316,6 +404,11 @@ def main():
     print(f"  Seeds:           {args.seeds}")
     print(f"  Duration:        {args.duration_s:.0f}s")
     print(f"  Adjacent NPCs:   {args.adjacent_npcs} at ~{args.target_speed_kmh:.0f} km/h")
+    print(
+        f"  Follower:        {'on' if args.follower else 'off'}"
+        f" (gap={args.follower_gap_m:.1f}m, "
+        f"reaction={args.follower_reaction_s:.2f}s)"
+    )
     print(f"  Output dir:      {args.output}")
     print("=" * 64)
 
@@ -334,6 +427,9 @@ def main():
                     adjacent_npcs=args.adjacent_npcs,
                     background_vehicles=args.background_vehicles,
                     safety_rules=args.safety_rules,
+                    follower=args.follower,
+                    follower_gap_m=args.follower_gap_m,
+                    follower_reaction_s=args.follower_reaction_s,
                 )
                 results.append({
                     "fog": fog, "seed": seed,
