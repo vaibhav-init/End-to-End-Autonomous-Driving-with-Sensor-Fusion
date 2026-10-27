@@ -157,7 +157,7 @@ def main():
     print("STRUCTURED VS RANDOM FALSE POSITIVES, IDENTICAL TRACKER")
     print(f"  {args.scans} scans x {len(args.seeds)} seed(s), rgd_regime_v1, one lead car + guardrail")
     print("=" * 82)
-    print(f"{"case":<44}{"false det/scan":>17}{"reached controller":>21}")
+    print(f"{'case':<44}{'false det/scan':>17}{'reached controller':>21}")
     print("-" * 82)
 
     structured = {}
