@@ -25,7 +25,12 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from metrics import peak_deceleration_mps2, longitudinal_cost_metrics  # noqa: E402
+from metrics import (  # noqa: E402
+    longitudinal_cost_metrics,
+    peak_deceleration_mps2,
+    rear_end_metrics,
+    wilson_interval,
+)
 
 # Sim rate used by the scenarios (carla4/scenarios/config.py FPS); used to turn
 # reaction step counts into seconds.
@@ -100,6 +105,14 @@ def per_run_metrics(df):
         source = df["radar_selected_source"].astype(str)
         ghost_selected_fraction = float((source == "ghost").mean())
 
+    sync_timeouts = (
+        pd.to_numeric(df["radar_sync_timeouts"], errors="coerce")
+        .fillna(0.0)
+        if "radar_sync_timeouts" in df.columns
+        else pd.Series([0.0])
+    )
+    stale_radar_frames = int((sync_timeouts > 0).sum())
+
     return {
         "collided": collided,
         "min_dist_m": min_dist,
@@ -108,8 +121,11 @@ def per_run_metrics(df):
         "reaction_s": reaction_s,
         "pre_event_brake_fraction": pre_event_brake_fraction,
         "ghost_selected_fraction": ghost_selected_fraction,
+        "radar_sync_timeouts": int(sync_timeouts.max()),
+        "stale_radar_frames": stale_radar_frames,
         # The false-positive side of the trade-off; see metrics.py.
         **longitudinal_cost_metrics(df, fps=FPS),
+        **rear_end_metrics(df, fps=FPS),
     }
 
 
@@ -206,7 +222,13 @@ def validate_comparison_matrix(df):
 
 
 def build_summary(df):
-    """Collision rate + metric means per (driver, scenario, fog)."""
+    """Collision rate + metric means per (driver, scenario, fog).
+
+    Phantom brakes are reported both pooled (all events / all km, comparable
+    to the old tables) and as a mean of per-run rates with a standard
+    deviation. The latter is what a confidence interval or a power analysis
+    must use: the pooled ratio has no per-run variance.
+    """
     grp = df.groupby(["driver", "scenario", "fog"])
     summary = grp.agg(
         n_runs=("collided", "size"),
@@ -218,19 +240,51 @@ def build_summary(df):
         mean_pre_event_brake_fraction=("pre_event_brake_fraction", "mean"),
         phantom_brake_events=("phantom_brake_events", "sum"),
         distance_km=("distance_km", "sum"),
+        mean_phantom_brake_per_km=("phantom_brake_per_km", "mean"),
+        std_phantom_brake_per_km=("phantom_brake_per_km", "std"),
+        median_phantom_brake_per_km=("phantom_brake_per_km", "median"),
         mean_jerk_rms_mps3=("jerk_rms_mps3", "mean"),
         std_jerk_rms_mps3=("jerk_rms_mps3", "std"),
         mean_ghost_selected_fraction=("ghost_selected_fraction", "mean"),
+        rear_end_collisions=("rear_end_collisions", "sum"),
+        phantom_brakes_with_follower=("phantom_brakes_with_follower", "sum"),
+        n_follower_valid=("follower_valid", "sum"),
+        max_follower_gap_m=("follower_max_gap_m", "max"),
+        n_runs_with_stale_radar=(
+            "stale_radar_frames", lambda values: int((values > 0).sum())
+        ),
+        max_radar_sync_timeouts=("radar_sync_timeouts", "max"),
     ).reset_index()
     summary["collision_rate"] = summary["n_collisions"] / summary["n_runs"]
     summary["phantom_brake_per_km"] = summary["phantom_brake_events"] / summary[
         "distance_km"
     ].replace(0.0, np.nan)
+    summary["p_crash_given_phantom"] = (
+        summary["rear_end_collisions"]
+        / summary["phantom_brakes_with_follower"].replace(0, np.nan)
+    )
+    intervals = summary.apply(
+        lambda row: wilson_interval(
+            int(row["rear_end_collisions"]),
+            int(row["phantom_brakes_with_follower"]),
+        ),
+        axis=1,
+    )
+    summary["p_crash_given_phantom_ci_low"] = [item[0] for item in intervals]
+    summary["p_crash_given_phantom_ci_high"] = [item[1] for item in intervals]
     cols = ["driver", "scenario", "fog", "n_runs", "n_collisions",
             "collision_rate", "mean_min_dist_m", "mean_min_ttc_s",
             "mean_peak_decel", "mean_reaction_s",
             "mean_pre_event_brake_fraction",
-            "phantom_brake_events", "distance_km", "phantom_brake_per_km",
+            "phantom_brake_events", "distance_km",
+            "phantom_brake_per_km", "mean_phantom_brake_per_km",
+            "std_phantom_brake_per_km", "median_phantom_brake_per_km",
+            "rear_end_collisions", "phantom_brakes_with_follower",
+            "n_follower_valid", "max_follower_gap_m",
+            "p_crash_given_phantom",
+            "p_crash_given_phantom_ci_low",
+            "p_crash_given_phantom_ci_high",
+            "n_runs_with_stale_radar", "max_radar_sync_timeouts",
             "mean_jerk_rms_mps3", "std_jerk_rms_mps3",
             "mean_ghost_selected_fraction"]
     return summary[cols].sort_values(["scenario", "fog", "driver"])
@@ -536,6 +590,10 @@ def main():
     parser.add_argument("--runs", nargs="+", required=True,
                         help="label=dir pairs, e.g. pcla=results_pcla mlp=results_mlp")
     parser.add_argument("--out", default="comparison", help="output directory")
+    parser.add_argument(
+        "--skip-validation", action="store_true",
+        help="allow missing/extra run keys (useful after failed runs)",
+    )
     args = parser.parse_args()
 
     runs = parse_runs(args.runs)
@@ -551,7 +609,10 @@ def main():
     if df.empty:
         print("  No runs loaded — nothing to compare.")
         sys.exit(1)
-    validate_comparison_matrix(df)
+    if args.skip_validation:
+        print("  [warn] comparison-matrix validation skipped")
+    else:
+        validate_comparison_matrix(df)
 
     raw_path = os.path.join(args.out, "per_run_metrics.csv")
     df.to_csv(raw_path, index=False)
