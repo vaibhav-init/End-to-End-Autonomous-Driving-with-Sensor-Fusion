@@ -33,7 +33,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from evaluate_cross_domain import CrossDomainDataset, load_checkpoint
-from radar.ghost_detection.dataset import CLASS_NAMES
+from radar.ghost_detection.labels import CLASS_NAMES
 from radar.ghost_detection.metrics import BinaryHistogramMetrics
 
 
