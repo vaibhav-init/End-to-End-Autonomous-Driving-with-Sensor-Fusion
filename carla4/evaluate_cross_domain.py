@@ -172,7 +172,8 @@ class CrossDomainDataset(Dataset):
     """Windows from a prepared npz set, tolerant of v1/v2 manifests."""
 
     def __init__(self, root, split, window_frames, max_points,
-                 cache_sequences=64, context_reserve_fraction=0.25):
+                 cache_sequences=64, context_reserve_fraction=0.25,
+                 return_indices=False):
         self.root = Path(root)
         with (self.root / "manifest.json").open("r", encoding="utf-8") as fh:
             self.manifest = json.load(fh)
@@ -203,6 +204,7 @@ class CrossDomainDataset(Dataset):
             raise ValueError(f"Split {split!r} has no radar frames")
         self._cache_limit = max(1, int(cache_sequences))
         self._cache = {}
+        self.return_indices = bool(return_indices)
 
     def __len__(self):
         return len(self.samples)
@@ -326,12 +328,37 @@ class CrossDomainDataset(Dataset):
             data["frame"][ordered] == current_frame
         )
         target[:count] = data["target"][ordered]
-        return {
+        sample = {
             "features": torch.from_numpy(padded),
             "point_mask": torch.from_numpy(point_mask),
             "label_mask": torch.from_numpy(label_mask),
             "target": torch.from_numpy(target),
         }
+        if self.return_indices:
+            sample.update(
+                {
+                    "sequence_index": torch.tensor(seq_index, dtype=torch.int64),
+                    "sensor": torch.tensor(sensor, dtype=torch.int64),
+                    "frame": torch.tensor(current_frame, dtype=torch.int64),
+                    "indices": torch.from_numpy(ordered.astype(np.int64)),
+                    "class_id": torch.from_numpy(
+                        data.get("class_id", np.full(len(data["frame"]), -1))[
+                            ordered
+                        ].astype(np.int64)
+                    ),
+                    "is_main": torch.from_numpy(
+                        data.get("is_main", np.full(len(data["frame"]), -1))[
+                            ordered
+                        ].astype(np.int64)
+                    ),
+                    "bounce_type": torch.from_numpy(
+                        data.get("bounce_type", np.full(len(data["frame"]), -1))[
+                            ordered
+                        ].astype(np.int64)
+                    ),
+                }
+            )
+        return sample
 
 
 def evaluate_dataset(checkpoint, data_root, args):

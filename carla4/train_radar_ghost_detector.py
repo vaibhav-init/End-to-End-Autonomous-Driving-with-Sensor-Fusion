@@ -99,6 +99,33 @@ def parse_args():
         default=0.05,
         help="runtime fallback cycle time stored with the checkpoint",
     )
+    parser.add_argument(
+        "--select-metric",
+        choices=("auprc", "auroc"),
+        default="auprc",
+        help="validation metric used to keep the best checkpoint",
+    )
+    parser.add_argument(
+        "--freeze-backbone-epochs",
+        type=int,
+        default=0,
+        help=(
+            "train only the classifier head for this many initial epochs, then "
+            "unfreeze the backbone (0 keeps the whole model trainable)"
+        ),
+    )
+    parser.add_argument(
+        "--backbone-lr-scale",
+        type=float,
+        default=1.0,
+        help="backbone learning rate as a fraction of --learning-rate",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="stop after this many epochs without a better validation score (0 disables)",
+    )
     return parser.parse_args()
 
 
@@ -119,6 +146,31 @@ def _model_kwargs(args):
     if args.model == "temporal_pointnet":
         common["context_dim"] = args.context_dim
     return common
+
+
+def _backbone_and_head(model_name, model):
+    """Split parameters into the shared encoder and the classifier head.
+
+    ``TemporalPointNet.local`` is the per-point encoder; ``head`` is the
+    context-fused classifier. ``PointMLP`` is a single stack, so the final
+    linear layer is the head and everything before it is the backbone.
+    """
+
+    if model_name == "temporal_pointnet":
+        return list(model.local.parameters()), list(model.head.parameters())
+    if model_name == "point_mlp":
+        linears = [module for module in model.network if isinstance(module, nn.Linear)]
+        classifier = linears[-1]
+        head_ids = {id(classifier.weight), id(classifier.bias)}
+        backbone = [p for p in model.parameters() if id(p) not in head_ids]
+        return backbone, list(classifier.parameters())
+    raise ValueError(f"Unknown ghost detector model {model_name!r}")
+
+
+def _set_backbone_trainable(model_name, model, trainable):
+    backbone, _ = _backbone_and_head(model_name, model)
+    for parameter in backbone:
+        parameter.requires_grad = bool(trainable)
 
 
 def _loader(dataset, batch_size, workers, shuffle, persistent=True):
@@ -307,11 +359,24 @@ def main():
     # re-derives pos_weight from its own class frequencies instead (see
     # run_epoch), so the prior follows the data actually seen.
     positive_weight = float(np.clip(real_count / ghost_count, 0.1, 20.0))
+    backbone_parameters, head_parameters = _backbone_and_head(args.model, model)
+    parameter_groups = [
+        {"params": head_parameters, "lr": args.learning_rate},
+    ]
+    if backbone_parameters:
+        parameter_groups.append(
+            {
+                "params": backbone_parameters,
+                "lr": args.learning_rate * args.backbone_lr_scale,
+            }
+        )
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        parameter_groups,
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
+    if args.freeze_backbone_epochs > 0:
+        _set_backbone_trainable(args.model, model, False)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="max",
@@ -320,11 +385,18 @@ def main():
     )
 
     history = []
-    best_auprc = -1.0
+    best_score = -1.0
     best_val_metrics = {}
     best_path = output / "best_detector.pt"
+    epochs_without_improvement = 0
     started = time.time()
     for epoch in range(1, args.epochs + 1):
+        if args.freeze_backbone_epochs > 0:
+            _set_backbone_trainable(
+                args.model,
+                model,
+                epoch > args.freeze_backbone_epochs,
+            )
         train_dataset.set_epoch(epoch)
         train_metrics = run_epoch(
             model,
@@ -343,10 +415,16 @@ def main():
                 static_pos_weight=positive_weight,
                 max_real_fpr=args.max_real_fpr,
             )
-        scheduler.step(val_metrics["auprc"])
+        selection_score = float(val_metrics[args.select_metric])
+        scheduler.step(selection_score)
         epoch_record = {
             "epoch": epoch,
             "learning_rate": optimizer.param_groups[0]["lr"],
+            "backbone_learning_rate": optimizer.param_groups[-1]["lr"],
+            "backbone_trainable": (
+                args.freeze_backbone_epochs <= 0
+                or epoch > args.freeze_backbone_epochs
+            ),
             "train": train_metrics,
             "val": val_metrics,
         }
@@ -357,11 +435,14 @@ def main():
             f"train_pos_weight={train_metrics['mean_pos_weight']:.3f} "
             f"val_loss={val_metrics['loss']:.5f} "
             f"val_auprc={val_metrics['auprc']:.5f} "
-            f"val_f1={val_metrics['best_f1']:.5f}"
+            f"val_auroc={val_metrics['auroc']:.5f} "
+            f"val_f1={val_metrics['best_f1']:.5f} "
+            f"select={args.select_metric}:{selection_score:.5f}"
         )
-        if val_metrics["auprc"] > best_auprc:
-            best_auprc = val_metrics["auprc"]
+        if selection_score > best_score:
+            best_score = selection_score
             best_val_metrics = val_metrics
+            epochs_without_improvement = 0
             checkpoint = {
                 "schema_version": 1,
                 "model_name": args.model,
@@ -377,12 +458,28 @@ def main():
                 "epoch": epoch,
                 "training_data": str(Path(args.data).resolve()),
                 "pretrained": args.pretrained,
+                "select_metric": args.select_metric,
+                "selection_score": selection_score,
+                "arguments": vars(args),
             }
             torch.save(checkpoint, best_path)
+        else:
+            epochs_without_improvement += 1
 
         with (output / "history.json").open("w", encoding="utf-8") as handle:
             json.dump(history, handle, indent=2)
             handle.write("\n")
+
+        if (
+            args.early_stop_patience > 0
+            and epochs_without_improvement >= args.early_stop_patience
+        ):
+            print(
+                f"early stopping at epoch {epoch}: no "
+                f"{args.select_metric} improvement for "
+                f"{epochs_without_improvement} epochs"
+            )
+            break
 
     print()
     print("=== best validation confusion matrices ===")
@@ -391,7 +488,10 @@ def main():
 
     summary = {
         "best_checkpoint": str(best_path),
-        "best_validation_auprc": best_auprc,
+        "select_metric": args.select_metric,
+        "best_validation_score": best_score,
+        "best_validation_auprc": best_val_metrics.get("auprc"),
+        "best_validation_auroc": best_val_metrics.get("auroc"),
         "best_validation_confusion_matrix": best_val_metrics.get(
             "confusion_matrix"
         ),
