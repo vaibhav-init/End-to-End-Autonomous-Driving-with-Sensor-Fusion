@@ -143,6 +143,18 @@ def _flatten_records(records):
     }
 
 
+def _collate(batch):
+    """Keep the variable-length raw point indices out of the stack."""
+
+    result = {}
+    for key in batch[0]:
+        if key == "indices":
+            result[key] = [sample[key] for sample in batch]
+        else:
+            result[key] = torch.stack([sample[key] for sample in batch])
+    return result
+
+
 def dump(args):
     specifications = [_parse_spec(text) for text in args.checkpoint]
     names = [name for name, _ in specifications]
@@ -169,6 +181,7 @@ def dump(args):
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
+            collate_fn=_collate,
         )
         records = []
         with torch.no_grad():
