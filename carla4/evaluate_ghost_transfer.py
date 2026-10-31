@@ -143,12 +143,17 @@ def _flatten_records(records):
     }
 
 
+VARIABLE_LENGTH_FIELDS = frozenset(
+    ("indices", "class_id", "is_main", "bounce_type")
+)
+
+
 def _collate(batch):
-    """Keep the variable-length raw point indices out of the stack."""
+    """Keep the variable-length per-point fields out of the stack."""
 
     result = {}
     for key in batch[0]:
-        if key == "indices":
+        if key in VARIABLE_LENGTH_FIELDS:
             result[key] = [sample[key] for sample in batch]
         else:
             result[key] = torch.stack([sample[key] for sample in batch])
