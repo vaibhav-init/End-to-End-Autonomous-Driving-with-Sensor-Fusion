@@ -126,6 +126,14 @@ def parse_args():
         default=0,
         help="stop after this many epochs without a better validation score (0 disables)",
     )
+    parser.add_argument(
+        "--reset-head",
+        action="store_true",
+        help=(
+            "reinitialise the classifier head after loading --pretrained, so a "
+            "shared backbone can be paired with a target-domain-specific head"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -171,6 +179,20 @@ def _set_backbone_trainable(model_name, model, trainable):
     backbone, _ = _backbone_and_head(model_name, model)
     for parameter in backbone:
         parameter.requires_grad = bool(trainable)
+
+
+def _reset_head(model_name, model):
+    """Reinitialise only the classifier head, keeping the shared encoder."""
+
+    if model_name == "temporal_pointnet":
+        modules = model.head.modules()
+    elif model_name == "point_mlp":
+        modules = [module for module in model.network if isinstance(module, nn.Linear)][-1:]
+    else:
+        raise ValueError(f"Unknown ghost detector model {model_name!r}")
+    for module in modules:
+        if isinstance(module, nn.Linear):
+            module.reset_parameters()
 
 
 def _loader(dataset, batch_size, workers, shuffle, persistent=True):
@@ -345,6 +367,9 @@ def main():
         if pretrained.get("model_name") != args.model:
             raise ValueError("Pretrained model architecture does not match --model")
         model.load_state_dict(pretrained["model_state"])
+        if args.reset_head:
+            _reset_head(args.model, model)
+            print("reset classifier head after loading --pretrained")
 
     real_count, ghost_count = split_label_counts(
         train_dataset.manifest,
