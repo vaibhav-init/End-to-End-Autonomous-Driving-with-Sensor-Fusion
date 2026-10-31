@@ -303,7 +303,7 @@ def _calibrate(target, probability, max_real_fpr):
 def _transform(probability, mode):
     probability = np.clip(np.asarray(probability, dtype=np.float64), 1e-6, 1 - 1e-6)
     if mode == "mean":
-        return probability
+        return probability.mean(axis=0)
     if mode == "logit":
         logits = np.log(probability) - np.log1p(-probability)
         return 1.0 / (1.0 + np.exp(-logits.mean(axis=0)))
@@ -327,7 +327,7 @@ def _subset_metrics(
 ):
     val = _transform(val_probabilities, mode)
     test = _transform(test_probabilities, mode)
-    threshold = _calibrate(val, val_target, max_real_fpr)
+    threshold = _calibrate(val_target, val, max_real_fpr)
     val_result = _metrics(val_target, val, threshold, max_real_fpr)
     test_result = _metrics(test_target, test, threshold, max_real_fpr)
     return val_result, test_result
