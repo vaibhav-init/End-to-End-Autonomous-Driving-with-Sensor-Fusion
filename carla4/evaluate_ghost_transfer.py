@@ -201,7 +201,11 @@ def dump(args):
                 )
                 label_masks = batch["label_mask"].numpy()
                 for row in range(point_probabilities.shape[0]):
-                    selected = label_masks[row]
+                    point_indices = batch["indices"][row].numpy()
+                    count = len(point_indices)
+                    # Packed samples live in the first `count` slots; the rest
+                    # of the tensor is padding up to --max-points.
+                    selected = label_masks[row][:count]
                     if not np.any(selected):
                         continue
                     sequence_index = int(batch["sequence_index"][row])
@@ -222,13 +226,15 @@ def dump(args):
                                 int(batch["frame"][row]),
                                 dtype=np.int64,
                             ),
-                            "indices": batch["indices"][row].numpy()[selected],
-                            "target": batch["target"][row].numpy()[selected],
+                            "indices": point_indices[selected],
+                            "target": batch["target"][row].numpy()[:count][
+                                selected
+                            ],
                             "class_id": batch["class_id"][row].numpy()[selected],
                             "is_main": batch["is_main"][row].numpy()[selected],
                             "bounce_type": batch["bounce_type"][row]
                             .numpy()[selected],
-                            "prob": point_probabilities[row][selected],
+                            "prob": point_probabilities[row][:count][selected],
                         }
                     )
         if not records:
