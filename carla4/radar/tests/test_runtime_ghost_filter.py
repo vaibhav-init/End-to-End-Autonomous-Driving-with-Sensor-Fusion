@@ -14,11 +14,9 @@ What they pin down:
 * metadata records the gain and the scoring path for provenance.
 """
 
-import math
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -83,13 +81,13 @@ class RuntimeGhostFilterTest(unittest.TestCase):
 
     def test_amplitude_gain_is_applied(self):
         filt = RuntimeGhostFilter(self.path, amplitude_gain_db=77.32)
-        record = filt._point_record(point(snr_db=20.0), 0.0)
+        record = filt._point_record(point(20.0, snr_db=20.0), 0.0)
         expected = float(
             snr_db_to_amplitude(np.array([20.0]))[0]
         ) * 10.0 ** (77.32 / 20.0)
         self.assertAlmostEqual(record[3], expected, places=3)
         zero_gain = RuntimeGhostFilter(self.path, amplitude_gain_db=0.0)
-        plain = zero_gain._point_record(point(snr_db=20.0), 0.0)
+        plain = zero_gain._point_record(point(20.0, snr_db=20.0), 0.0)
         self.assertAlmostEqual(
             plain[3],
             float(snr_db_to_amplitude(np.array([20.0]))[0]),
