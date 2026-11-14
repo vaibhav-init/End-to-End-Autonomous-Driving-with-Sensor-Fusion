@@ -1816,6 +1816,10 @@ class RealisticRadarModel:
         ]
 
         threshold = getattr(self._detection_filter, "threshold", 1.0e9)
+        # threshold >= 1.0 is annotate-only (see RuntimeGhostFilter):
+        # score and annotate everything, drop nothing, so score-only
+        # calibration runs keep the no-filter trajectory exactly.
+        reject_active = threshold < 1.0
         kept_indices = []
         rejected_clusters = 0
         offset = 0
@@ -1829,7 +1833,11 @@ class RealisticRadarModel:
             # Clutter is exempt, exactly as RuntimeGhostFilter.filter_points
             # exempts it: the released labels supervise real-vs-multipath,
             # not the synthetic unstructured-clutter process.
-            if not scores or detection.source == "clutter":
+            if (
+                not reject_active
+                or not scores
+                or detection.source == "clutter"
+            ):
                 kept_indices.append(index)
                 continue
             mean_probability = float(

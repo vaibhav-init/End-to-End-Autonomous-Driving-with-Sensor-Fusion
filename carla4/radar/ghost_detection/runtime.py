@@ -298,13 +298,23 @@ class RuntimeGhostFilter:
 
         accepted = []
         rejected = []
+        # threshold >= 1.0 is the annotate-only mode used by
+        # calibrate_runtime_threshold.py: every point is scored and
+        # annotated, nothing is rejected — otherwise exactly-saturated
+        # probabilities (p == 1.0) would be dropped even in score-only
+        # runs and silently shift the deployment trajectory.
+        reject_active = self.threshold < 1.0
         for index, detection in enumerate(detections):
             probability = float(probabilities[index])
             annotated = replace(detection, ghost_probability=probability)
             # The released real labels supervise real-vs-multipath, not the
             # synthetic unstructured-clutter process. Keep clutter for the
             # existing tracker rather than applying an out-of-domain label.
-            if detection.source != "clutter" and probability >= self.threshold:
+            if (
+                reject_active
+                and detection.source != "clutter"
+                and probability >= self.threshold
+            ):
                 rejected.append(annotated)
             else:
                 accepted.append(annotated)
@@ -351,9 +361,16 @@ class RuntimeGhostFilter:
         )
         accepted = []
         rejected = []
+        # threshold >= 1.0 is annotate-only: score and annotate everything,
+        # reject nothing (see filter_detections).
+        reject_active = self.threshold < 1.0
         for point, probability in zip(points, probabilities):
             annotated = replace(point, ghost_probability=float(probability))
-            if point.source != "clutter" and probability >= self.threshold:
+            if (
+                reject_active
+                and point.source != "clutter"
+                and probability >= self.threshold
+            ):
                 rejected.append(annotated)
             else:
                 accepted.append(annotated)
