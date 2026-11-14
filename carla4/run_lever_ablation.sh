@@ -25,6 +25,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="${PYTHON:-python3}"
 cd "$ROOT"
 
 # The matched recipe's shared collection settings (S2R_MATCHED_REPORT.md §1).
@@ -97,24 +98,24 @@ run_variant() {
         config_args=(--radar-config "$RADAR_CONFIG")
     fi
 
-    python3 -u collect_carla_radar_ghosts.py \
+    "$PYTHON" -u collect_carla_radar_ghosts.py \
         --target-type cyclist --split train --seed 100 \
         --sequences 10 --headless --town "$TOWN" --output "$out" \
         "${common[@]}" "${density_args[@]}" "${config_args[@]}" \
         || { echo "[fail] $variant cyclist collection" >&2; return 1; }
-    python3 -u collect_carla_radar_ghosts.py \
+    "$PYTHON" -u collect_carla_radar_ghosts.py \
         --target-type pedestrian --split train --seed 2000 \
         --sequences 10 --headless --town "$TOWN" --output "$out" \
         "${common[@]}" "${density_args[@]}" "${config_args[@]}" \
         || { echo "[fail] $variant pedestrian collection" >&2; return 1; }
 
     echo "=== [$variant] prepare ==="
-    python3 -u prepare_radar_ghost_dataset.py \
+    "$PYTHON" -u prepare_radar_ghost_dataset.py \
         --input "$out" --output "$prepared" --split-mode all_train \
         || { echo "[fail] $variant prepare" >&2; return 1; }
 
     echo "=== [$variant] pretrain (10 epochs from the zero-shot checkpoint) ==="
-    python3 -u train_radar_ghost_detector.py \
+    "$PYTHON" -u train_radar_ghost_detector.py \
         --data "$prepared" --output "${out}_pretrain" \
         --pretrained "$ZEROSHOT" \
         --epochs 10 --batch-size 16 --num-workers "$WORKERS" \
