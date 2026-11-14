@@ -117,11 +117,97 @@ class RuntimeGhostFilterTest(unittest.TestCase):
                                           scan_index=2)
         self.assertEqual(len(filt._point_history), 2)
         self.assertEqual(len(probabilities), len(second))
-        # The ages of the context points come from the timestamps.
-        old_timestamp, old_scan, stored = filt._point_history[0]
+        # The ages of the context points come from the timestamps; each
+        # history entry stores its records and its own per-scan statistics.
+        old_timestamp, old_scan, stored, stats = filt._point_history[0]
         self.assertEqual(old_timestamp, 0.0)
         self.assertEqual(old_scan, 1)
         self.assertEqual(len(stored), len(first))
+        self.assertEqual(len(stats[0]), len(first))
+
+    def test_current_scan_statistics_are_per_scan_not_pooled(self):
+        """Frame-relative features must come from the point's own scan.
+
+        Training computes the v2 statistics per frame (prepare-time, over
+        each point's own full frame). If the runtime pooled the context
+        window into one statistic set — the previous behaviour — a point's
+        relative amplitude and Doppler residual would depend on other
+        scans' points, which never happens in training.
+        """
+
+        filt = RuntimeGhostFilter(self.path, amplitude_gain_db=0.0)
+        scan_a = np.asarray(
+            [
+                filt._point_record(
+                    point(20.0 + index, velocity=1.0 + 0.1 * index,
+                          snr_db=40.0),
+                    0.0,
+                )
+                for index in range(30)
+            ],
+            dtype=np.float32,
+        )
+        scan_b = np.asarray(
+            [
+                filt._point_record(
+                    point(60.0 + index, velocity=-1.0 - 0.1 * index,
+                          snr_db=5.0),
+                    0.0,
+                )
+                for index in range(30)
+            ],
+            dtype=np.float32,
+        )
+        features_a, stats_a = filt._scan_features(scan_a)
+        features_b, stats_b = filt._scan_features(scan_b)
+        pooled_features, pooled_stats = filt._scan_features(
+            np.concatenate((scan_a, scan_b))
+        )
+        # Per-scan relative amplitude for scan A equals the statistic over
+        # scan A alone, and differs from the pooled-window value.
+        self.assertFalse(np.allclose(stats_a[0], pooled_stats[0][:30]))
+        self.assertFalse(np.allclose(stats_b[0], pooled_stats[0][30:]))
+        # And the per-scan value is exactly the statistic of that scan.
+        from radar.ghost_detection.features import frame_context_statistics
+
+        expected_rel, expected_resid, expected_density = (
+            frame_context_statistics(
+                scan_a[:, 0], scan_a[:, 1], scan_a[:, 2], scan_a[:, 3]
+            )
+        )
+        self.assertTrue(np.allclose(stats_a[0], expected_rel))
+        self.assertTrue(np.allclose(stats_a[1], expected_resid))
+        self.assertTrue(np.allclose(stats_a[2], expected_density))
+
+    def test_budget_split_reserves_context_share(self):
+        """Dense current scans must not starve the context (age feature).
+
+        PreparedGhostDataset reserves context_reserve_fraction of the point
+        budget for context; current-first splitting would hand everything
+        to a dense current scan and silently disable the age feature.
+        """
+
+        filt = RuntimeGhostFilter(self.path, amplitude_gain_db=0.0)
+        # window_frames=3, max_points=64, reserve = round(64*0.25) = 16.
+        dense = [
+            point(20.0 + index, velocity=0.5 + 0.05 * index, snr_db=15.0)
+            for index in range(80)
+        ]
+        probabilities = filt.score_points(dense, timestamp_s=0.0, scan_index=1)
+        # The whole current scan is scored in input order (80 <= capacity?):
+        # 80 > 64 - 0 = 64, so the even subset of 64 carries probabilities
+        # and the rest stay at 0 exactly like the exporter's dense frames.
+        scored = int(np.count_nonzero(probabilities > 0) )
+        self.assertLessEqual(scored, 64)
+        # Second scan: now context exists, so the current capacity is
+        # 64 - 16 = 48 and at most 48 current points are scored.
+        filt.score_points(
+            [point(30.0 + i, snr_db=15.0) for i in range(10)],
+            timestamp_s=0.05,
+            scan_index=2,
+        )
+        probabilities = filt.score_points(dense, timestamp_s=0.1, scan_index=3)
+        self.assertLessEqual(int(np.count_nonzero(probabilities > 0)), 48)
 
     def test_filter_points_partitions_and_exempts_clutter(self):
         filt = RuntimeGhostFilter(

@@ -28,6 +28,20 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def _even_indices(count, select):
+    """Deterministic evenly-spaced subset of ``range(count)``.
+
+    Same convention as PreparedGhostDataset's current-scan selection and
+    CrossDomainDataset's deterministic context sampling.
+    """
+
+    if select >= count:
+        return np.arange(count, dtype=np.int64)
+    if select <= 0:
+        return np.zeros(0, dtype=np.int64)
+    return np.linspace(0, count - 1, select, dtype=np.int64)
+
+
 def checkpoint_metadata(path, threshold=None, device="cpu"):
     """Read deployment-relevant metadata without constructing the network."""
 
@@ -121,17 +135,15 @@ class RuntimeGhostFilter:
         self.cycle_time_s = float(checkpoint.get("cycle_time_s", 0.05))
         self.amplitude_gain_db = float(amplitude_gain_db)
         self._amplitude_scale = 10.0 ** (self.amplitude_gain_db / 20.0)
+        arguments = checkpoint.get("arguments") or {}
+        self.context_reserve_fraction = float(
+            arguments.get("context_reserve", 0.25)
+        )
         self.signature = file_sha256(self.checkpoint_path)[:16]
         # window_frames includes the current scan, matching PreparedGhostDataset.
-        self._history = deque(maxlen=max(0, self.window_frames - 1))
+        # One store serves both scoring paths: each entry is
+        # (timestamp, scan_index, records (n x 5), per-scan stats).
         self._point_history = deque(maxlen=max(0, self.window_frames - 1))
-
-    @staticmethod
-    def _select_evenly(values, count):
-        if len(values) <= count:
-            return list(values)
-        indices = np.linspace(0, len(values) - 1, count, dtype=np.int64)
-        return [values[int(index)] for index in indices]
 
     def _point_record(self, detection, age_s):
         return (
@@ -144,37 +156,29 @@ class RuntimeGhostFilter:
             max(0.0, float(age_s)),
         )
 
-    def filter_detections(self, detections, timestamp_s=None, scan_index=None):
-        detections = list(detections)
-        timestamp = (
-            float(timestamp_s)
-            if timestamp_s is not None and math.isfinite(float(timestamp_s))
-            else None
-        )
-        scan = int(scan_index) if scan_index is not None else 0
-        context = []
-        for old_timestamp, old_scan, old_detections in self._history:
-            if timestamp is not None and old_timestamp is not None:
-                age_s = max(0.0, timestamp - old_timestamp)
-            else:
-                age_s = max(0, scan - old_scan) * self.cycle_time_s
-            context.extend(
-                self._point_record(detection, age_s)
-                for detection in old_detections
+    @staticmethod
+    def _scan_features(values):
+        """Feature rows for ONE scan's records with per-scan statistics.
+
+        Training features are per-frame: prepare_radar_ghost_dataset.py
+        computes the v2 frame-relative statistics over each point's own
+        full frame, and PreparedGhostDataset indexes them per point. The
+        runtime must therefore compute the statistics over the point's own
+        scan only — pooling the context window into one statistic set
+        (the previous behaviour) mixes the same object's returns across
+        scans, shrinks the Doppler-residual cue and dilutes the amplitude
+        median, which is a train/deploy distribution mismatch.
+
+        Returns ``(features, stats)`` with ``stats`` cached so the history
+        scan can be rebuilt with fresh ages later without recomputing.
+        """
+
+        if len(values) == 0:
+            empty = np.zeros(0, dtype=np.float32)
+            return (
+                np.zeros((0, len(FEATURE_NAMES)), dtype=np.float32),
+                (empty.copy(), empty.copy(), empty.copy()),
             )
-
-        current_count = min(len(detections), self.max_points)
-        context_capacity = self.max_points - current_count
-        context = self._select_evenly(context, context_capacity)
-        records = context + [
-            self._point_record(detection, 0.0)
-            for detection in detections[:current_count]
-        ]
-        self._history.append((timestamp, scan, tuple(detections)))
-        if not records or current_count == 0:
-            return detections, []
-
-        values = np.asarray(records, dtype=np.float32)
         rel_log_amp, doppler_residual, density_ratio = frame_context_statistics(
             values[:, 0],
             values[:, 1],
@@ -191,32 +195,111 @@ class RuntimeGhostFilter:
             doppler_cluster_residual=doppler_residual,
             local_density_ratio=density_ratio,
         )
+        return features, (rel_log_amp, doppler_residual, density_ratio)
+
+    def _context_rows(self, timestamp, scan):
+        """Feature rows for every stored history scan, ages recomputed."""
+
+        rows = []
+        for old_timestamp, old_scan, old_values, old_stats in self._point_history:
+            if timestamp is not None and old_timestamp is not None:
+                age_s = max(0.0, timestamp - old_timestamp)
+            else:
+                age_s = max(0, scan - old_scan) * self.cycle_time_s
+            ages = np.full(len(old_values), age_s, dtype=np.float32)
+            rows.append(
+                physical_features(
+                    old_values[:, 0],
+                    old_values[:, 1],
+                    old_values[:, 2],
+                    old_values[:, 3],
+                    ages,
+                    relative_log_amplitude=old_stats[0],
+                    doppler_cluster_residual=old_stats[1],
+                    local_density_ratio=old_stats[2],
+                )
+            )
+        if not rows:
+            return np.zeros((0, len(FEATURE_NAMES)), dtype=np.float32)
+        return np.concatenate(rows, axis=0)
+
+    def _score_records(self, current_values, timestamp, scan):
+        """Score one scan's records; return probabilities in input order.
+
+        Context comes from the stored history scans (each carrying its own
+        per-scan statistics and a recomputed age). The point-budget split
+        mirrors PreparedGhostDataset: context is first reserved a fixed
+        share (``context_reserve_fraction``) of ``max_points`` and the
+        current scan fills the remainder — current-first splitting starves
+        the context on dense frames and silently disables the age feature.
+        """
+
+        current_features, current_stats = self._scan_features(current_values)
+        context_all = self._context_rows(timestamp, scan)
+        reserve = min(
+            len(context_all),
+            int(round(self.max_points * self.context_reserve_fraction)),
+        )
+        current_capacity = self.max_points - reserve
+
+        # History is stored AFTER scoring so the current scan never appears
+        # in its own context.
+        self._point_history.append(
+            (timestamp, scan, current_values, current_stats)
+        )
+
+        current_count = min(len(current_values), current_capacity)
+        if current_count == 0:
+            return np.zeros(len(current_values), dtype=np.float64)
+        context_indices = _even_indices(len(context_all), reserve)
+        current_indices = _even_indices(len(current_features), current_count)
+        rows = np.concatenate(
+            (
+                context_all[context_indices],
+                current_features[current_indices],
+            ),
+            axis=0,
+        )
         padded = np.zeros(
             (1, self.max_points, len(FEATURE_NAMES)),
             dtype=np.float32,
         )
         point_mask = np.zeros((1, self.max_points), dtype=np.bool_)
-        padded[0, : len(features)] = features
-        point_mask[0, : len(features)] = True
+        padded[0, : len(rows)] = rows
+        point_mask[0, : len(rows)] = True
         with self.torch.no_grad():
             logits = self.model(
                 self.torch.from_numpy(padded).to(self.device),
                 self.torch.from_numpy(point_mask).to(self.device),
             )
             probabilities = self.torch.sigmoid(logits)[0].cpu().numpy()
-        current_start = len(context)
-        current_probabilities = probabilities[
-            current_start : current_start + current_count
+        result = np.zeros(len(current_values), dtype=np.float64)
+        current_start = len(context_indices)
+        result[current_indices] = probabilities[
+            current_start : current_start + len(current_indices)
         ]
+        return result
+
+    def filter_detections(self, detections, timestamp_s=None, scan_index=None):
+        """Legacy cluster-level path (per-scan statistics, like training)."""
+
+        detections = list(detections)
+        timestamp = (
+            float(timestamp_s)
+            if timestamp_s is not None and math.isfinite(float(timestamp_s))
+            else None
+        )
+        scan = int(scan_index) if scan_index is not None else 0
+        records = [self._point_record(detection, 0.0) for detection in detections]
+        values = np.asarray(records, dtype=np.float32) if records else np.zeros(
+            (0, 5), dtype=np.float32
+        )
+        probabilities = self._score_records(values, timestamp, scan)
 
         accepted = []
         rejected = []
         for index, detection in enumerate(detections):
-            probability = (
-                float(current_probabilities[index])
-                if index < current_count
-                else 0.0
-            )
+            probability = float(probabilities[index])
             annotated = replace(detection, ghost_probability=probability)
             # The released real labels supervise real-vs-multipath, not the
             # synthetic unstructured-clutter process. Keep clutter for the
@@ -232,11 +315,10 @@ class RuntimeGhostFilter:
 
         This mirrors the training/export distribution: the detector was
         trained on per-point features whose frame-relative statistics are
-        computed over the full expanded frame (``--points-source sensor``),
-        so the runtime must score expanded points, not one cluster per
-        object. History keeps the previous scans' point lists; context
-        capacity is shared with the current scan exactly as in
-        :meth:`filter_detections`.
+        computed over the point's own full expanded frame
+        (``--points-source sensor``), so the runtime scores expanded points
+        with per-scan statistics — never one cluster per object, and never
+        statistics pooled across the context window.
         """
 
         points = list(points)
@@ -246,64 +328,11 @@ class RuntimeGhostFilter:
             else None
         )
         scan = int(scan_index) if scan_index is not None else 0
-        context = []
-        for old_timestamp, old_scan, old_points in self._point_history:
-            if timestamp is not None and old_timestamp is not None:
-                age_s = max(0.0, timestamp - old_timestamp)
-            else:
-                age_s = max(0, scan - old_scan) * self.cycle_time_s
-            context.extend(
-                self._point_record(point, age_s) for point in old_points
-            )
-
-        current_count = min(len(points), self.max_points)
-        context_capacity = self.max_points - current_count
-        context = self._select_evenly(context, context_capacity)
-        records = context + [
-            self._point_record(point, 0.0) for point in points[:current_count]
-        ]
-        self._point_history.append(
-            (timestamp, scan, tuple(self._select_evenly(points, self.max_points)))
+        records = [self._point_record(point, 0.0) for point in points]
+        values = np.asarray(records, dtype=np.float32) if records else np.zeros(
+            (0, 5), dtype=np.float32
         )
-        if not records or current_count == 0:
-            return np.zeros(len(points), dtype=np.float64)
-
-        values = np.asarray(records, dtype=np.float32)
-        rel_log_amp, doppler_residual, density_ratio = frame_context_statistics(
-            values[:, 0],
-            values[:, 1],
-            values[:, 2],
-            values[:, 3],
-        )
-        features = physical_features(
-            values[:, 0],
-            values[:, 1],
-            values[:, 2],
-            values[:, 3],
-            values[:, 4],
-            relative_log_amplitude=rel_log_amp,
-            doppler_cluster_residual=doppler_residual,
-            local_density_ratio=density_ratio,
-        )
-        padded = np.zeros(
-            (1, self.max_points, len(FEATURE_NAMES)),
-            dtype=np.float32,
-        )
-        point_mask = np.zeros((1, self.max_points), dtype=np.bool_)
-        padded[0, : len(features)] = features
-        point_mask[0, : len(features)] = True
-        with self.torch.no_grad():
-            logits = self.model(
-                self.torch.from_numpy(padded).to(self.device),
-                self.torch.from_numpy(point_mask).to(self.device),
-            )
-            probabilities = self.torch.sigmoid(logits)[0].cpu().numpy()
-        current_start = len(context)
-        result = np.zeros(len(points), dtype=np.float64)
-        result[:current_count] = probabilities[
-            current_start : current_start + current_count
-        ]
-        return result
+        return self._score_records(values, timestamp, scan)
 
     def filter_points(self, points, timestamp_s=None, scan_index=None):
         """Score an expanded point scan and partition it.
@@ -340,5 +369,7 @@ class RuntimeGhostFilter:
             "max_points": self.max_points,
             "feature_schema": FEATURE_SCHEMA_VERSION,
             "amplitude_gain_db": self.amplitude_gain_db,
+            "context_reserve_fraction": self.context_reserve_fraction,
             "scoring": "expanded-points",
+            "statistics": "per-scan",
         }
