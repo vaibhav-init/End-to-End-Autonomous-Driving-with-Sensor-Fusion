@@ -67,9 +67,8 @@ def cluster_mean_probabilities(detections):
         selected["frame"].astype(np.int64) * 1_000_003
         + selected["truth_object_id"].astype(np.int64) * 1009
         + np.array(
-            [hash((str(reflector), str(btype), int(order))) % 997
-             for reflector, btype, order in zip(
-                 selected["reflector_id"],
+            [hash((str(btype), int(order))) % 997
+             for btype, order in zip(
                  selected["bounce_type"].astype(str),
                  selected["bounce_order"],
              )]
