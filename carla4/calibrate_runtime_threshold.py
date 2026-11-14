@@ -144,7 +144,7 @@ def compute_curve(sidecars, thresholds, dynamic_tags):
 
 def main():
     args = parse_args()
-    curve = compute_curve(args.sidecars, args.thresholds, args.dynamic_tags)
+    curve = compute_curve(args.sidecar, args.thresholds, args.dynamic_tags)
     result = {
         "sidecars": [str(Path(path).resolve()) for path in args.sidecar],
         "ghost_points": curve["ghost_points"],
