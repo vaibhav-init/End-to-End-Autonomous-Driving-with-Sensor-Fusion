@@ -1609,7 +1609,10 @@ class RealisticRadarModel:
         generated_detection_count = len(detections)
         generated_detections = list(detections)
         rejected = []
-        if self._detection_filter is not None:
+        if (
+            self._detection_filter is not None
+            and not hasattr(self._detection_filter, "score_points")
+        ):
             detections, rejected = self._detection_filter.filter_detections(
                 detections,
                 timestamp_s=timestamp_s,
@@ -1624,12 +1627,40 @@ class RealisticRadarModel:
                 self._latency_queue.popleft()
             )
 
+        # The learned per-point filter runs *after* the latency queue and
+        # *before* the tracker: the detector was trained on the sensor's
+        # emitted expanded-point list, so it must score that distribution,
+        # and a cluster whose own points look ghostly must not become a
+        # track. The oracle stays pre-latency (it is exact by construction).
+        point_filter_rejected_clusters = 0
+        filtered_points = None
+        if (
+            self._detection_filter is not None
+            and hasattr(self._detection_filter, "score_points")
+        ):
+            (
+                delivered,
+                point_filter_rejected_clusters,
+                filtered_points,
+            ) = self._apply_point_filter(
+                delivered,
+                timestamp_s=timestamp_s,
+                scan_index=self._scan_index,
+            )
+
         self._update_tracks(delivered, dt)
         selected = self._select_track(path_curvature_per_m)
         # The point-level list a point-set consumer sees: the delivered
         # clusters spread over their object footprints. The tracker above
         # keeps working on clusters, as a production object-list stack does.
-        self._latest_points = tuple(self._expand_points(delivered))
+        # With the learned point filter active the surviving clusters were
+        # already expanded exactly once (per cluster, in list order, so the
+        # RNG draw sequence is unchanged), and their accepted points are
+        # reused instead of re-rolling new noise.
+        if filtered_points is not None:
+            self._latest_points = tuple(filtered_points)
+        else:
+            self._latest_points = tuple(self._expand_points(delivered))
         ghost_point_count = sum(
             point.source == "ghost" for point in self._latest_points
         )
@@ -1644,6 +1675,9 @@ class RealisticRadarModel:
             "generated_detection_count": generated_detection_count,
             "accepted_detection_count": len(detections),
             "rejected_detection_count": len(rejected),
+            "point_filter_rejected_cluster_count": (
+                point_filter_rejected_clusters
+            ),
             "delivered_detection_count": len(delivered),
             "delivered_source_scan_index": delivered_source_scan_index,
             "point_detection_count": len(self._latest_points),
@@ -1745,6 +1779,82 @@ class RealisticRadarModel:
                 "selected": asdict(selected),
             }
         return selected
+
+    def _apply_point_filter(
+        self,
+        detections,
+        timestamp_s=None,
+        scan_index=None,
+    ):
+        """Run the learned per-point filter on the delivered clusters.
+
+        The detector is trained on the exporter's per-point rows: expanded
+        points with frame statistics computed over the full frame. The
+        runtime therefore expands each delivered cluster *separately, in
+        list order* (which reproduces the exact RNG draw sequence of
+        ``_expand_points(detections)``), scores all points of the scan in
+        one pass, and drops a whole cluster when the mean ghost probability
+        of its own points crosses the filter threshold. A cluster dropped
+        here never reaches the tracker, so it can neither confirm nor
+        produce a longitudinal target.
+
+        Returns ``(kept_detections, rejected_cluster_count, kept_points)``.
+        """
+
+        cluster_points = [
+            self._expand_points((detection,)) for detection in detections
+        ]
+        flat_points = [point for group in cluster_points for point in group]
+        probabilities = self._detection_filter.score_points(
+            flat_points,
+            timestamp_s=timestamp_s,
+            scan_index=scan_index,
+        )
+        annotated = [
+            replace(point, ghost_probability=float(probability))
+            for point, probability in zip(flat_points, probabilities)
+        ]
+
+        threshold = getattr(self._detection_filter, "threshold", 1.0e9)
+        kept_indices = []
+        rejected_clusters = 0
+        offset = 0
+        cluster_slices = []
+        for points in cluster_points:
+            cluster_slices.append((offset, offset + len(points)))
+            offset += len(points)
+        for index, detection in enumerate(detections):
+            start, stop = cluster_slices[index]
+            scores = annotated[start:stop]
+            # Clutter is exempt, exactly as RuntimeGhostFilter.filter_points
+            # exempts it: the released labels supervise real-vs-multipath,
+            # not the synthetic unstructured-clutter process.
+            if not scores or detection.source == "clutter":
+                kept_indices.append(index)
+                continue
+            mean_probability = float(
+                np.mean([score.ghost_probability for score in scores])
+            )
+            if mean_probability >= threshold:
+                rejected_clusters += 1
+            else:
+                kept_indices.append(index)
+        kept = []
+        kept_points = []
+        for index in kept_indices:
+            start, stop = cluster_slices[index]
+            scores = annotated[start:stop]
+            kept_points.extend(scores)
+            mean_probability = float(
+                np.mean([score.ghost_probability for score in scores])
+            )
+            kept.append(
+                replace(
+                    detections[index],
+                    ghost_probability=mean_probability,
+                )
+            )
+        return kept, rejected_clusters, kept_points
 
     def _expand_points(self, detections):
         """Spread each delivered cluster over its object footprint.

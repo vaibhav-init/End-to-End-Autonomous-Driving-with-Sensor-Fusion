@@ -942,6 +942,9 @@ class RealisticFrontRadar(CShenronFrontRadar):
                 ghost_detector_path,
                 threshold=ghost_threshold,
                 device=ghost_device,
+                amplitude_gain_db=float(
+                    getattr(self.realistic_config, "amplitude_gain_db", 0.0)
+                ),
             )
         self._detection_filter = detection_filter
         self.model = RealisticRadarModel(
