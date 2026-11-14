@@ -96,12 +96,13 @@ def cluster_mean_probabilities(detections, dynamic_tags=None):
     return means, counts
 
 
-def main():
-    args = parse_args()
+def compute_curve(sidecars, thresholds, dynamic_tags):
+    """Ghost-recall vs cluster-loss rows for a set of score-only sidecars."""
+
     ghost_probabilities = []
     all_cluster_means = []
     dynamic_cluster_means = []
-    for path in args.sidecar:
+    for path in sidecars:
         detections = np.load(path, allow_pickle=True)["detections"]
         source = detections["source"].astype(str)
         ghost_probabilities.append(
@@ -111,7 +112,7 @@ def main():
         )
         all_cluster_means.append(cluster_mean_probabilities(detections))
         dynamic_cluster_means.append(
-            cluster_mean_probabilities(detections, args.dynamic_tags)
+            cluster_mean_probabilities(detections, dynamic_tags)
         )
     ghost_points = np.concatenate(ghost_probabilities)
     pooled = [
@@ -122,7 +123,7 @@ def main():
     ghost_points_total = int(len(ghost_points))
 
     rows = []
-    for threshold in args.thresholds:
+    for threshold in thresholds:
         row = {"threshold": float(threshold)}
         row["ghost_point_recall"] = (
             float(np.mean(ghost_points >= threshold))
@@ -135,11 +136,20 @@ def main():
             row[f"{name}_clusters_lost"] = int(lost)
             row[f"{name}_clusters_total"] = int(total)
         rows.append(row)
+    return {
+        "ghost_points": ghost_points_total,
+        "curve": rows,
+    }
+
+
+def main():
+    args = parse_args()
+    curve = compute_curve(args.sidecars, args.thresholds, args.dynamic_tags)
     result = {
         "sidecars": [str(Path(path).resolve()) for path in args.sidecar],
-        "ghost_points": ghost_points_total,
+        "ghost_points": curve["ghost_points"],
         "dynamic_tags": list(args.dynamic_tags),
-        "curve": rows,
+        "curve": curve["curve"],
         "note": (
             "ghost_point_recall is over ghost points; cluster loss weights "
             "clusters equally (a lost cluster is a lost tracker "
@@ -154,7 +164,7 @@ def main():
         f"{'dyn loss':>9s} {'dyn lost':>9s} "
         f"{'all loss':>9s}"
     )
-    for row in rows:
+    for row in result["curve"]:
         print(
             f"{row['threshold']:6.2f} {row['ghost_point_recall']:10.4f} "
             f"{row['dynamic_cluster_loss']:9.4f} "

@@ -110,7 +110,7 @@ def load_split_points(prepared_dir, split, rng, max_points):
 def _rbf_gram(a, b, bandwidth):
     """RBF kernel gram matrix with a fixed bandwidth (1-D inputs)."""
 
-    diff = (a.reshape(-1, 1) - b.reshape(-1, 1)) / bandwidth
+    diff = (a.reshape(-1, 1) - b.reshape(1, -1)) / bandwidth
     return np.exp(-0.5 * diff * diff)
 
 

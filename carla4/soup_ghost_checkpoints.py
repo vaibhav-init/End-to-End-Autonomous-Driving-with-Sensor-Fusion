@@ -218,23 +218,45 @@ def main():
         "data": str(Path(args.data).resolve()),
         "checkpoint": str(checkpoint_path.resolve()),
     }
-    for split_name, split in (("val", args.val_split),
-                              ("test", args.test_split)):
-        result = evaluate_checkpoint(
-            args.data,
-            souped,
-            split,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            device=args.device,
-        )
-        report[f"{split_name}_metrics"] = result
-        print(
-            f"[{split_name}] AUROC {result['auroc']:.4f} "
-            f"AUPRC {result['auprc']:.4f} "
-            f"fixed recall {result['confusion_matrix']['fixed']['recall']:.4f} "
-            f"FPR {result['confusion_matrix']['fixed']['false_positive_rate']:.4f}"
-        )
+    # The soup is a new model: re-select its operating threshold on the
+    # validation split with the standard <=1% real-FPR rule instead of
+    # inheriting the anchor checkpoint's threshold, then report test at
+    # that val-selected threshold.
+    val_result = evaluate_checkpoint(
+        args.data,
+        souped,
+        args.val_split,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        device=args.device,
+    )
+    souped["threshold"] = float(val_result["operating_threshold"])
+    torch.save(souped, checkpoint_path)
+    report["val_metrics"] = val_result
+    report["val_selected_threshold"] = float(val_result["operating_threshold"])
+    print(
+        f"[val] AUROC {val_result['auroc']:.4f} "
+        f"AUPRC {val_result['auprc']:.4f} "
+        f"operating thr {val_result['operating_threshold']:.4f} "
+        f"recall {val_result['operating_recall']:.4f} "
+        f"FPR {val_result['operating_false_positive_rate']:.4f}"
+    )
+    test_result = evaluate_checkpoint(
+        args.data,
+        souped,
+        args.test_split,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        device=args.device,
+        threshold=float(val_result["operating_threshold"]),
+    )
+    report["test_metrics"] = test_result
+    print(
+        f"[test] AUROC {test_result['auroc']:.4f} "
+        f"AUPRC {test_result['auprc']:.4f} "
+        f"fixed recall {test_result['confusion_matrix']['fixed']['recall']:.4f} "
+        f"FPR {test_result['confusion_matrix']['fixed']['false_positive_rate']:.4f}"
+    )
     (output / "soup_report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n"
     )
