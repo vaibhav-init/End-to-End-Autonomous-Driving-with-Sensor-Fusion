@@ -1,0 +1,34 @@
+{
+  "sim": {
+    "n_correct_frames": 3070,
+    "range_error_mean_m": 0.06881682498607743,
+    "range_error_mae_m": 0.2199153289258401,
+    "range_core_sigma_m": 0.26582899978613733,
+    "range_core_n": 3058,
+    "velocity_error_mean_mps": 0.05699382211467719,
+    "velocity_core_sigma_mps": 0.4382131691866948,
+    "velocity_core_n": 3048
+  },
+  "real_references": {
+    "nuScenes_radar_front_summary": {
+      "range_sigma_m": 0.4569589126174623,
+      "velocity_sigma_mps": 0.700644177554032,
+      "n_core_pairs": 115
+    },
+    "nuScenes_merged_front_summary": {
+      "range_sigma_m": 0.4829986494745648,
+      "velocity_sigma_mps": 0.6740003733851042,
+      "n_core_pairs": 280
+    },
+    "nuScenes_radar_front_left_summary": {
+      "range_sigma_m": 0.33198317256555454,
+      "velocity_sigma_mps": 0.8740724351190272,
+      "n_core_pairs": 15
+    },
+    "nuScenes_radar_front_right_summary": {
+      "range_sigma_m": 0.4935083617657693,
+      "velocity_sigma_mps": 0.5083836219620295,
+      "n_core_pairs": 67
+    }
+  }
+}

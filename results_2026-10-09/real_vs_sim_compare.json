@@ -1,0 +1,120 @@
+{
+  "detections_per_scan": {
+    "reference_mean": 91.78217821782178,
+    "candidate_mean": 299.46555555555557,
+    "hist_l1": 0.9166666666666666
+  },
+  "pd_table": {
+    "reference_bins": [
+      [
+        12997,
+        988
+      ],
+      [
+        12035,
+        604
+      ],
+      [
+        4788,
+        210
+      ],
+      [
+        1179,
+        47
+      ],
+      [
+        383,
+        6
+      ],
+      [
+        6,
+        0
+      ]
+    ],
+    "candidate_bins": [
+      [
+        3466,
+        208
+      ],
+      [
+        134,
+        24
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "bin_edges": [
+      0.0,
+      25.0,
+      50.0,
+      75.0,
+      100.0,
+      150.0,
+      250.0
+    ]
+  },
+  "statistics": {
+    "range_error_mean_m": {
+      "reference": -0.09412208238217801,
+      "candidate": 0.17296337972371068,
+      "delta": 0.2670854621058887
+    },
+    "range_error_std_m": {
+      "reference": 0.791519352490287,
+      "candidate": 0.8357920405345168,
+      "delta": 0.04427268804422979
+    },
+    "azimuth_error_mean_rad": {
+      "reference": 0.003446844788159693,
+      "candidate": 0.019854644370260258,
+      "delta": 0.016407799582100563
+    },
+    "azimuth_error_std_rad": {
+      "reference": 0.06849512907231903,
+      "candidate": 0.0732712289189215,
+      "delta": 0.0047760998466024746
+    },
+    "velocity_error_mean_mps": {
+      "reference": -1.2348216014697952,
+      "candidate": 0.8341827406850089,
+      "delta": 2.069004342154804
+    },
+    "velocity_error_std_mps": {
+      "reference": 2.7714144382421595,
+      "candidate": 2.8982514855145953,
+      "delta": 0.12683704727243583
+    },
+    "velocity_misassignment_rate": {
+      "reference": 0.5272237196765499,
+      "candidate": 0.5732758620689655,
+      "delta": 0.04605214239241562
+    },
+    "ghosts_per_scan_mean": {
+      "reference": 87.19059405940594,
+      "candidate": 299.4011111111111,
+      "delta": 212.21051705170515
+    },
+    "ghost_fraction": {
+      "reference": 0.9499730312837109,
+      "candidate": 0.9997848018136013,
+      "delta": 0.04981177052989039
+    },
+    "range_error_ks": 0.1592875731945348,
+    "velocity_error_ks": 0.3220884840598569,
+    "ghost_range_ks": 0.27785
+  }
+}
