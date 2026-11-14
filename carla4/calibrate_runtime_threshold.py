@@ -45,21 +45,35 @@ def parse_args():
         nargs="*",
         default=(0.5, 0.6, 0.7, 0.77, 0.8, 0.85, 0.9, 0.95, 0.99),
     )
+    parser.add_argument(
+        "--dynamic-tags",
+        type=int,
+        nargs="*",
+        default=(12, 14, 18, 19, 21),
+        help=(
+            "semantic tags counted as dynamic road users; the controller "
+            "only ever selects a dynamic track, so the dynamic-cluster "
+            "loss is the deployment-relevant cost"
+        ),
+    )
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
 
-def cluster_mean_probabilities(detections):
+def cluster_mean_probabilities(detections, dynamic_tags=None):
     """Mean ghost probability per (frame, cluster) for direct points.
 
     Clusters are the tracker's observations: one per object per frame. The
     emitted points inherit their cluster's truth ids and bounce family, so
-    (frame, truth_object_id, reflector_id, bounce_type, bounce_order) is
-    the cluster key.
+    (frame, truth_object_id, bounce_type, bounce_order) is the cluster key.
+    ``dynamic_tags`` optionally restricts the clusters to dynamic road
+    users (the controller only ever selects a dynamic track).
     """
 
     source = detections["source"].astype(str)
     direct = source == "direct"
+    if dynamic_tags is not None:
+        direct &= np.isin(detections["semantic_tag"], list(dynamic_tags))
     if not np.any(direct):
         return np.zeros(0), np.zeros(0)
     selected = detections[direct]
@@ -85,7 +99,8 @@ def cluster_mean_probabilities(detections):
 def main():
     args = parse_args()
     ghost_probabilities = []
-    cluster_means = []
+    all_cluster_means = []
+    dynamic_cluster_means = []
     for path in args.sidecar:
         detections = np.load(path, allow_pickle=True)["detections"]
         source = detections["source"].astype(str)
@@ -94,50 +109,57 @@ def main():
                 source == "ghost"
             ]
         )
-        means, counts = cluster_mean_probabilities(detections)
-        cluster_means.append((means, counts))
+        all_cluster_means.append(cluster_mean_probabilities(detections))
+        dynamic_cluster_means.append(
+            cluster_mean_probabilities(detections, args.dynamic_tags)
+        )
     ghost_points = np.concatenate(ghost_probabilities)
-    means = np.concatenate([item[0] for item in cluster_means])
-    counts = np.concatenate([item[1] for item in cluster_means])
-    weighted_clusters = float(counts.sum())
+    pooled = [
+        (np.concatenate([item[0] for item in groups]),
+         np.concatenate([item[1] for item in groups]))
+        for groups in (all_cluster_means, dynamic_cluster_means)
+    ]
+    ghost_points_total = int(len(ghost_points))
 
     rows = []
     for threshold in args.thresholds:
-        ghost_recall = float(np.mean(ghost_points >= threshold)) \
-            if len(ghost_points) else float("nan")
-        lost = float(np.sum(counts[means >= threshold]))
-        rows.append(
-            {
-                "threshold": float(threshold),
-                "ghost_point_recall": ghost_recall,
-                "direct_cluster_loss": lost / weighted_clusters,
-                "direct_clusters_lost": int(lost),
-                "direct_clusters_total": int(weighted_clusters),
-            }
+        row = {"threshold": float(threshold)}
+        row["ghost_point_recall"] = (
+            float(np.mean(ghost_points >= threshold))
+            if ghost_points_total else float("nan")
         )
-    ghost_points_total = int(len(ghost_points))
+        for name, (means, counts) in zip(("all", "dynamic"), pooled):
+            total = float(counts.sum())
+            lost = float(np.sum(counts[means >= threshold]))
+            row[f"{name}_cluster_loss"] = lost / total if total else float("nan")
+            row[f"{name}_clusters_lost"] = int(lost)
+            row[f"{name}_clusters_total"] = int(total)
+        rows.append(row)
     result = {
         "sidecars": [str(Path(path).resolve()) for path in args.sidecar],
         "ghost_points": ghost_points_total,
-        "direct_clusters": int(weighted_clusters),
+        "dynamic_tags": list(args.dynamic_tags),
         "curve": rows,
         "note": (
-            "ghost_point_recall is over ghost points; direct_cluster_loss "
-            "weights clusters equally (a lost cluster is a lost tracker "
-            "observation regardless of its point count). Deployment "
-            "threshold = knee of the curve, chosen on the simulator's "
-            "exact labels."
+            "ghost_point_recall is over ghost points; cluster loss weights "
+            "clusters equally (a lost cluster is a lost tracker "
+            "observation). The deployment-relevant cost is the dynamic "
+            "cluster loss: the controller only selects dynamic tracks. "
+            "Deployment threshold = knee of the curve, chosen on the "
+            "simulator's exact labels."
         ),
     }
     print(
-        f"{'threshold':>10s} {'ghost recall':>13s} "
-        f"{'direct loss':>12s} {'clusters lost':>14s}"
+        f"{'thr':>6s} {'ghost rec':>10s} "
+        f"{'dyn loss':>9s} {'dyn lost':>9s} "
+        f"{'all loss':>9s}"
     )
     for row in rows:
         print(
-            f"{row['threshold']:10.2f} {row['ghost_point_recall']:13.4f} "
-            f"{row['direct_cluster_loss']:12.4f} "
-            f"{row['direct_clusters_lost']:14d}"
+            f"{row['threshold']:6.2f} {row['ghost_point_recall']:10.4f} "
+            f"{row['dynamic_cluster_loss']:9.4f} "
+            f"{row['dynamic_clusters_lost']:9d} "
+            f"{row['all_cluster_loss']:9.4f}"
         )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
