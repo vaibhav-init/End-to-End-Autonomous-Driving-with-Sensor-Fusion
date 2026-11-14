@@ -188,10 +188,16 @@ def _joint_mmd2(x, y, bandwidth_scale=1.0):
     )
 
 
-def _mmd_table(x, y, feature_names, max_points, rng):
-    """Per-feature MMD^2 plus the joint 11-d MMD^2."""
+def _mmd_table(x, y, feature_names, max_points, rng, kernel_points=4000):
+    """Per-feature MMD^2 plus the joint 11-d MMD^2.
 
-    cap = min(max_points, len(x), len(y))
+    Kernels are built on at most ``kernel_points`` per domain: the unbiased
+    MMD^2 estimator is O(n^2) in the kernel gram matrices, so a 30k x 30k
+    matrix would need ~7 GB per feature. The estimator stays consistent —
+    it is a subsample of the same distribution — and the cap is reported.
+    """
+
+    cap = min(kernel_points, len(x), len(y))
     if len(x) > cap:
         x = x[np.sort(rng.choice(len(x), size=cap, replace=False))]
     if len(y) > cap:
