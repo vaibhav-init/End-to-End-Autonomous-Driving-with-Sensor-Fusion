@@ -28,7 +28,15 @@ def parse_args():
     parser.add_argument("--output", required=True, help="prepared artifact directory")
     parser.add_argument(
         "--split-mode",
-        choices=("official", "scenario_grouped", "all_train"),
+        choices=(
+            "official",
+            "scenario_grouped",
+            # Accepted alias: earlier documents referred to this mode as
+            # scenario_disjoint. It is the same strict scenario-disjoint
+            # split as scenario_grouped.
+            "scenario_disjoint",
+            "all_train",
+        ),
         default="official",
         help="official benchmark split or a strict scenario-disjoint split",
     )
@@ -292,6 +300,11 @@ def prepare_file(path, input_root, output_root, args, scenario_splits=None):
 
 def main():
     args = parse_args()
+    # scenario_disjoint is an accepted alias for scenario_grouped (kept for
+    # compatibility with the older documents); normalize once here so every
+    # downstream check and the recorded manifest use the canonical name.
+    if args.split_mode == "scenario_disjoint":
+        args.split_mode = "scenario_grouped"
     input_root = Path(args.input).resolve()
     output_root = Path(args.output).resolve()
     paths = sorted(input_root.rglob("*.h5")) + sorted(input_root.rglob("*.hdf5"))

@@ -72,6 +72,30 @@ pcrash_close() {
         --s5-follower-gap-m 10 --s5-follower-reaction-s 1.0
 }
 
+# Arm C: the learned ghost filter inside the radar path. This is the
+# comparison arm that answers "filter it or train through it?" — NOT a
+# proposed two-layer mitigation. The filter checkpoint must be a v2-schema
+# detector; the runtime applies the deployed radar config's amplitude gain
+# and scores the expanded point list (see radar/ghost_detection/runtime.py).
+C_REAL=${C_REAL:-/storage/vaibhav/s2r_results/s2r/real_only_s42/best_detector.pt}
+C_MATCHED=${C_MATCHED:-/storage/vaibhav/s2r_results/s2r_matched/ft_twostage_s42/best_detector.pt}
+
+pcrash_c() {
+    check_carla
+    run_s5 pcrash_c_real geometry ../model_mlp_clean 60 "$SEEDS" \
+        --radar-ghost-detector "$C_REAL" --radar-ghost-device cuda
+    run_s5 pcrash_c_matched geometry ../model_mlp_clean 60 "$SEEDS" \
+        --radar-ghost-detector "$C_MATCHED" --radar-ghost-device cuda
+}
+
+pcrash_c_smoke() {
+    check_carla
+    run_s5 c_smoke_real geometry ../model_mlp_clean 15 42 \
+        --radar-ghost-detector "$C_REAL" --radar-ghost-device cuda
+    run_s5 c_smoke_matched geometry ../model_mlp_clean 15 42 \
+        --radar-ghost-detector "$C_MATCHED" --radar-ghost-device cuda
+}
+
 analyze() {
     echo "=== final analysis ==="
     (
@@ -83,6 +107,8 @@ analyze() {
                 d=results_final_pcrash_d \
                 close_off=results_final_pcrash_close_off \
                 close_on=results_final_pcrash_close_on \
+                c_real=results_final_pcrash_c_real \
+                c_matched=results_final_pcrash_c_matched \
             --skip-validation \
             --out ../artifacts/final/comparison_pcrash
         "$PY" power_analysis.py \
@@ -101,7 +127,9 @@ case "${1:-all}" in
     pilot) pilot ;;
     pcrash) pcrash ;;
     pcrash_close) pcrash_close ;;
+    pcrash_c_smoke) pcrash_c_smoke ;;
+    pcrash_c) pcrash_c ;;
     analyze) analyze ;;
     all) smoke && pcrash && analyze ;;
-    *) echo "usage: $0 smoke|pilot|pcrash|pcrash_close|analyze|all" >&2; exit 2 ;;
+    *) echo "usage: $0 smoke|pilot|pcrash|pcrash_close|pcrash_c_smoke|pcrash_c|analyze|all" >&2; exit 2 ;;
 esac

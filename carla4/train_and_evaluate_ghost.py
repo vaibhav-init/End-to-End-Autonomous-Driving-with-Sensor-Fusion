@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """Train a radar ghost detector on the official RGD split and evaluate on test.
 
+**Deprecated (2026-11-14):** this one-pass wrapper is NOT equivalent to
+`train_radar_ghost_detector.py` — no label smoothing, no early stopping, no
+checkpoint-selection metric choice, no fine-tune hooks, and no
+`--cache-sequences` (thrashes on v2 frame-stat recomputation). Its numbers
+are not comparable to the main trainer's; use
+`train_radar_ghost_detector.py` + `evaluate_radar_ghost_detector.py` for any
+reported result. Kept only because `plot_ghost_training.py` and
+`analyze_ghost_dataset.py` consume its `history.json` / prepared splits.
+
 Runs the full pipeline in one pass:
   1. Train TemporalPointNet on the train split (augmented)
   2. Validate each epoch on the val split (no augmentation)
