@@ -77,15 +77,41 @@ pcrash_close() {
 # proposed two-layer mitigation. The filter checkpoint must be a v2-schema
 # detector; the runtime applies the deployed radar config's amplitude gain
 # and scores the expanded point list (see radar/ghost_detection/runtime.py).
+# C_THRESHOLD overrides the checkpoint's val-selected threshold: the
+# benchmark operating point (<=1% real FPR) suppresses 50-75% of direct
+# points in dense-town traffic, so the deployment threshold is calibrated
+# on the simulator's exact labels (calibrate_runtime_threshold.py).
 C_REAL=${C_REAL:-/storage/vaibhav/s2r_results/s2r/real_only_s42/best_detector.pt}
 C_MATCHED=${C_MATCHED:-/storage/vaibhav/s2r_results/s2r_matched/ft_twostage_s42/best_detector.pt}
+C_THRESHOLD=${C_THRESHOLD:-}
+
+threshold_args() {
+    if [[ -n "$C_THRESHOLD" ]]; then
+        printf '%s\n' --radar-ghost-threshold "$C_THRESHOLD"
+    fi
+}
 
 pcrash_c() {
     check_carla
     run_s5 pcrash_c_real geometry ../model_mlp_clean 60 "$SEEDS" \
-        --radar-ghost-detector "$C_REAL" --radar-ghost-device cuda
+        --radar-ghost-detector "$C_REAL" --radar-ghost-device cuda \
+        "$(threshold_args)"
     run_s5 pcrash_c_matched geometry ../model_mlp_clean 60 "$SEEDS" \
-        --radar-ghost-detector "$C_MATCHED" --radar-ghost-device cuda
+        --radar-ghost-detector "$C_MATCHED" --radar-ghost-device cuda \
+        "$(threshold_args)"
+}
+
+# Score-only calibration runs: threshold 1.0 rejects nothing, so the
+# sidecar carries every point's ghost_probability with exact sim labels.
+pcrash_c_score_only() {
+    check_carla
+    local seed=${C_CAL_SEED:-42}
+    run_s5 c_score_real geometry ../model_mlp_clean 60 "$seed" \
+        --radar-ghost-detector "$C_REAL" --radar-ghost-device cuda \
+        --radar-ghost-threshold 1.0
+    run_s5 c_score_matched geometry ../model_mlp_clean 60 "$seed" \
+        --radar-ghost-detector "$C_MATCHED" --radar-ghost-device cuda \
+        --radar-ghost-threshold 1.0
 }
 
 pcrash_c_smoke() {
@@ -129,7 +155,8 @@ case "${1:-all}" in
     pcrash_close) pcrash_close ;;
     pcrash_c_smoke) pcrash_c_smoke ;;
     pcrash_c) pcrash_c ;;
+    pcrash_c_score_only) pcrash_c_score_only ;;
     analyze) analyze ;;
     all) smoke && pcrash && analyze ;;
-    *) echo "usage: $0 smoke|pilot|pcrash|pcrash_close|pcrash_c_smoke|pcrash_c|analyze|all" >&2; exit 2 ;;
+    *) echo "usage: $0 smoke|pilot|pcrash|pcrash_close|pcrash_c_smoke|pcrash_c|pcrash_c_score_only|analyze|all" >&2; exit 2 ;;
 esac
