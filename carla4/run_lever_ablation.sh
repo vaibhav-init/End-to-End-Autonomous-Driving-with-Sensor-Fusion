@@ -101,11 +101,13 @@ run_variant() {
     "$PYTHON" -u collect_carla_radar_ghosts.py \
         --target-type cyclist --split train --seed 100 \
         --sequences 10 --headless --town "$TOWN" --output "$out" \
+        --sequence-retries 2 \
         "${common[@]}" "${density_args[@]}" "${config_args[@]}" \
         || { echo "[fail] $variant cyclist collection" >&2; return 1; }
     "$PYTHON" -u collect_carla_radar_ghosts.py \
         --target-type pedestrian --split train --seed 2000 \
         --sequences 10 --headless --town "$TOWN" --output "$out" \
+        --sequence-retries 2 \
         "${common[@]}" "${density_args[@]}" "${config_args[@]}" \
         || { echo "[fail] $variant pedestrian collection" >&2; return 1; }
 
