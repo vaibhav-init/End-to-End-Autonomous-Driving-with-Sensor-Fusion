@@ -129,6 +129,29 @@ run_variant() {
         --input "$out" --output "$prepared" --split-mode all_train \
         || { echo "[fail] $variant prepare" >&2; return 1; }
 
+    # all_train leaves no validation split for checkpoint selection; carve a
+    # small synthetic val out of the prepared set (last two sequences by
+    # name — the same scenes across variants, matching the matched study's
+    # synthetic-val protocol and never touching real data).
+    "$PYTHON" - "$prepared" <<'PY' || { echo "[fail] $variant val carve" >&2; return 1; }
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1]) / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+sequences = sorted(manifest["sequences"], key=lambda r: r["name"])
+moved = 0
+for record in reversed(sequences):
+    if moved >= 2:
+        break
+    if record.get("split") == "train":
+        record["split"] = "val"
+        moved += 1
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+print(f"val carve: moved {moved} sequences to val")
+PY
+
     echo "=== [$variant] pretrain (10 epochs from the zero-shot checkpoint) ==="
     "$PYTHON" -u train_radar_ghost_detector.py \
         --data "$prepared" --output "${out}_pretrain" \
