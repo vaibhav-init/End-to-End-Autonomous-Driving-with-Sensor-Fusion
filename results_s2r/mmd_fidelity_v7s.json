@@ -1,0 +1,52 @@
+{
+  "domain_mmd2": {
+    "age_over_0_5s": 0.0,
+    "cos_azimuth": 0.17884936377844451,
+    "doppler_cluster_residual_over_5mps": 0.010256138800325054,
+    "joint_11d": 0.24290680963991007,
+    "local_density_ratio_over_4": 0.1149608510565141,
+    "log_range_compensated_amplitude": 0.27046076592585644,
+    "radial_velocity_over_40mps": 0.0440139410790199,
+    "range_over_100m": 0.1580922278694673,
+    "relative_log_amplitude": 0.954820717507502,
+    "sin_azimuth": 0.10432324878094534,
+    "x_sensor_over_100m": 0.19275855099712425,
+    "y_sensor_over_100m": 0.027100315422605492
+  },
+  "max_points": 30000,
+  "note": "MMD^2 with an RBF kernel and median-heuristic bandwidth on labeled current-scan points (age 0). ratio = domain/floor; ratio near 1 means the synthetic side is as close to the real split as two halves of the real split are to each other.",
+  "ratio": {
+    "age_over_0_5s": null,
+    "cos_azimuth": 29.731589830048787,
+    "doppler_cluster_residual_over_5mps": 2.6252253786343656,
+    "joint_11d": 12.798832899293698,
+    "local_density_ratio_over_4": 10.965058450362884,
+    "log_range_compensated_amplitude": 22.532561997924663,
+    "radial_velocity_over_40mps": 4.253232465154412,
+    "range_over_100m": 13.39768575257105,
+    "relative_log_amplitude": 104.10232794915582,
+    "sin_azimuth": 4.349784028258012,
+    "x_sensor_over_100m": 17.604737699943204,
+    "y_sensor_over_100m": 1.2680656747264178
+  },
+  "real_dataset": "/storage/vaibhav/s2r_results/ghost_real_official_v2",
+  "real_floor_mmd2": {
+    "age_over_0_5s": 0.0,
+    "cos_azimuth": 0.006015465866466618,
+    "doppler_cluster_residual_over_5mps": 0.0039067650662665265,
+    "joint_11d": 0.0189788249874967,
+    "local_density_ratio_over_4": 0.010484289853713413,
+    "log_range_compensated_amplitude": 0.012003107589397377,
+    "radial_velocity_over_40mps": 0.01034835068142037,
+    "range_over_100m": 0.011799965366341647,
+    "relative_log_amplitude": 0.00917194395473886,
+    "sin_azimuth": 0.02398354679294834,
+    "x_sensor_over_100m": 0.01094924299824962,
+    "y_sensor_over_100m": 0.021371381595399086
+  },
+  "real_points": 30000,
+  "seed": 42,
+  "split": "test",
+  "synthetic_dataset": "/home/iiitd/Desktop/vaibhav/carla-claude/End-to-End-Autonomous-Driving-with-Sensor-Fusion/carla4/artifacts/ghost_carla_calibrated_v7s_prepared",
+  "synthetic_points": 9274
+}

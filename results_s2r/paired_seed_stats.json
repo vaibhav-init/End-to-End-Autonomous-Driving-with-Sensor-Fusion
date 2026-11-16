@@ -1,0 +1,127 @@
+{
+  "delta_auprc": {
+    "bootstrap_ci95": [
+      0.06686518281120733,
+      0.12135417811855474
+    ],
+    "bootstrap_draws": 10000,
+    "max": 0.16918878505917845,
+    "mean": 0.09357321452557933,
+    "min": 0.018591243514332778,
+    "n_pairs": 10,
+    "negative_pairs": 0,
+    "paired_t_p": 0.00012338289446227078,
+    "positive_pairs": 10,
+    "sign_test_p": 0.001953125,
+    "std": 0.046141763152420086,
+    "wilcoxon_n_nonzero": 10,
+    "wilcoxon_p": 0.001953125
+  },
+  "delta_auroc": {
+    "bootstrap_ci95": [
+      0.014047783457804351,
+      0.031136642178388088
+    ],
+    "bootstrap_draws": 10000,
+    "max": 0.04639303951652507,
+    "mean": 0.022307797696822607,
+    "min": 0.000850529681719836,
+    "n_pairs": 10,
+    "negative_pairs": 0,
+    "paired_t_p": 0.0008530982243318198,
+    "positive_pairs": 10,
+    "sign_test_p": 0.001953125,
+    "std": 0.01441028599908499,
+    "wilcoxon_n_nonzero": 10,
+    "wilcoxon_p": 0.001953125
+  },
+  "matched_dir": "/storage/vaibhav/s2r_results/s2r_matched",
+  "matched_pattern": "ft_twostage_s{seed}/test_metrics.json",
+  "note": "Paired by seed. Exact Wilcoxon signed-rank and sign tests are enumerated (no asymptotic approximation); bootstrap CI resamples seed pairs.",
+  "per_seed": [
+    {
+      "matched_auprc": 0.5591453664881381,
+      "matched_auroc": 0.8818806800962855,
+      "real_auprc": 0.492598171774073,
+      "real_auroc": 0.8689899166991323,
+      "seed": 7
+    },
+    {
+      "matched_auprc": 0.5604061886047398,
+      "matched_auroc": 0.8886673237560012,
+      "real_auprc": 0.39121740354556134,
+      "real_auroc": 0.8422742842394761,
+      "seed": 42
+    },
+    {
+      "matched_auprc": 0.5766540939545813,
+      "matched_auroc": 0.8946570510606077,
+      "real_auprc": 0.43327720257849367,
+      "real_auroc": 0.8678807841691432,
+      "seed": 123
+    },
+    {
+      "matched_auprc": 0.5844047976752927,
+      "matched_auroc": 0.8878348352133315,
+      "real_auprc": 0.45673480176040293,
+      "real_auroc": 0.870908792849282,
+      "seed": 256
+    },
+    {
+      "matched_auprc": 0.4875911127055348,
+      "matched_auroc": 0.8716223758101772,
+      "real_auprc": 0.468999869191202,
+      "real_auroc": 0.8553281243414966,
+      "seed": 2024
+    },
+    {
+      "matched_auprc": 0.5779008121850302,
+      "matched_auroc": 0.9055421994695572,
+      "real_auprc": 0.4957146273551619,
+      "real_auroc": 0.8691092335239194,
+      "seed": 5
+    },
+    {
+      "matched_auprc": 0.5789108044026603,
+      "matched_auroc": 0.897518271191349,
+      "real_auprc": 0.4629179921279687,
+      "real_auroc": 0.8597049870568649,
+      "seed": 11
+    },
+    {
+      "matched_auprc": 0.5833206798014777,
+      "matched_auroc": 0.8905457518178744,
+      "real_auprc": 0.5126283134439885,
+      "real_auroc": 0.8896952221361546,
+      "seed": 77
+    },
+    {
+      "matched_auprc": 0.6106995739583432,
+      "matched_auroc": 0.8901008015320018,
+      "real_auprc": 0.5149571879943176,
+      "real_auroc": 0.8823851329964619,
+      "seed": 99
+    },
+    {
+      "matched_auprc": 0.5702143376927339,
+      "matched_auroc": 0.8931926302785984,
+      "real_auprc": 0.5244700524415691,
+      "real_auroc": 0.8722074652456266,
+      "seed": 300
+    }
+  ],
+  "real_dir": "/storage/vaibhav/s2r_results/s2r",
+  "real_pattern": "real_only_s{seed}/test_metrics.json",
+  "seeds": [
+    7,
+    42,
+    123,
+    256,
+    2024,
+    5,
+    11,
+    77,
+    99,
+    300
+  ]
+}

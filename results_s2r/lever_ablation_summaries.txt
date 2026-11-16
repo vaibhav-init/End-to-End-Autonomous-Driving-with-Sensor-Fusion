@@ -1,0 +1,12 @@
+run                      AUROC   AUPRC     thr  recall     FPR      F1      val metric
+ft_twostage_s42         0.8512  0.3506  0.8900  0.6612  0.1747  0.4456   0.9765 auroc
+ft_twostage_s123        0.8503  0.3447  0.8710  0.6677  0.1763  0.4472   0.9784 auroc
+run                      AUROC   AUPRC     thr  recall     FPR      F1      val metric
+ft_twostage_s123        0.8868  0.4890  0.8805  0.4853  0.0792  0.4671   0.9755 auroc
+ft_twostage_s42         0.8547  0.4616  0.8870  0.5361  0.1163  0.4455   0.9777 auroc
+run                      AUROC   AUPRC     thr  recall     FPR      F1      val metric
+ft_twostage_s42         0.8935  0.5038  0.7755  0.7573  0.1727  0.4967   0.9763 auroc
+ft_twostage_s123        0.8824  0.4449  0.8415  0.8075  0.2154  0.4723   0.9757 auroc
+run                      AUROC   AUPRC     thr  recall     FPR      F1      val metric
+ft_twostage_s42         0.8804  0.4615  0.8030  0.7940  0.2157  0.4659   0.9748 auroc
+ft_twostage_s123        0.8665  0.4253  0.8290  0.7471  0.2034  0.4571   0.9754 auroc

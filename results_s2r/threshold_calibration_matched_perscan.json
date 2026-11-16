@@ -1,0 +1,107 @@
+{
+  "curve": [
+    {
+      "all_cluster_loss": 0.6242747651110241,
+      "all_clusters_lost": 437066,
+      "all_clusters_total": 700118,
+      "dynamic_cluster_loss": 0.9642931780862816,
+      "dynamic_clusters_lost": 32299,
+      "dynamic_clusters_total": 33495,
+      "ghost_point_recall": 0.9947872877080881,
+      "threshold": 0.5
+    },
+    {
+      "all_cluster_loss": 0.6093744197406723,
+      "all_clusters_lost": 426634,
+      "all_clusters_total": 700118,
+      "dynamic_cluster_loss": 0.9618749067024929,
+      "dynamic_clusters_lost": 32218,
+      "dynamic_clusters_total": 33495,
+      "ghost_point_recall": 0.9945350596939634,
+      "threshold": 0.6
+    },
+    {
+      "all_cluster_loss": 0.5900119694108708,
+      "all_clusters_lost": 413078,
+      "all_clusters_total": 700118,
+      "dynamic_cluster_loss": 0.9529482012240633,
+      "dynamic_clusters_lost": 31919,
+      "dynamic_clusters_total": 33495,
+      "ghost_point_recall": 0.9943669076845468,
+      "threshold": 0.7
+    },
+    {
+      "all_cluster_loss": 0.5719750099268981,
+      "all_clusters_lost": 400450,
+      "all_clusters_total": 700118,
+      "dynamic_cluster_loss": 0.948201224063293,
+      "dynamic_clusters_lost": 31760,
+      "dynamic_clusters_total": 33495,
+      "ghost_point_recall": 0.9941146796704221,
+      "threshold": 0.77
+    },
+    {
+      "all_cluster_loss": 0.5620623951962384,
+      "all_clusters_lost": 393510,
+      "all_clusters_total": 700118,
+      "dynamic_cluster_loss": 0.9452754142409315,
+      "dynamic_clusters_lost": 31662,
+      "dynamic_clusters_total": 33495,
+      "ghost_point_recall": 0.9939465276610056,
+      "threshold": 0.8
+    },
+    {
+      "all_cluster_loss": 0.5399132717627599,
+      "all_clusters_lost": 378003,
+      "all_clusters_total": 700118,
+      "dynamic_cluster_loss": 0.9383490073145245,
+      "dynamic_clusters_lost": 31430,
+      "dynamic_clusters_total": 33495,
+      "ghost_point_recall": 0.9922650075668404,
+      "threshold": 0.85
+    },
+    {
+      "all_cluster_loss": 0.505579059529965,
+      "all_clusters_lost": 353965,
+      "all_clusters_total": 700118,
+      "dynamic_cluster_loss": 0.9239886550231378,
+      "dynamic_clusters_lost": 30949,
+      "dynamic_clusters_total": 33495,
+      "ghost_point_recall": 0.9870522952749285,
+      "threshold": 0.9
+    },
+    {
+      "all_cluster_loss": 0.44193693063169354,
+      "all_clusters_lost": 309408,
+      "all_clusters_total": 700118,
+      "dynamic_cluster_loss": 0.8844902224212569,
+      "dynamic_clusters_lost": 29626,
+      "dynamic_clusters_total": 33495,
+      "ghost_point_recall": 0.965528838069615,
+      "threshold": 0.95
+    },
+    {
+      "all_cluster_loss": 0.2741880654403972,
+      "all_clusters_lost": 191964,
+      "all_clusters_total": 700118,
+      "dynamic_cluster_loss": 0.593670697118973,
+      "dynamic_clusters_lost": 19885,
+      "dynamic_clusters_total": 33495,
+      "ghost_point_recall": 0.7166638641331764,
+      "threshold": 0.99
+    }
+  ],
+  "dynamic_tags": [
+    12,
+    14,
+    18,
+    19,
+    21
+  ],
+  "ghost_points": 11894,
+  "note": "ghost_point_recall is over ghost points; cluster loss weights clusters equally (a lost cluster is a lost tracker observation). The deployment-relevant cost is the dynamic cluster loss: the controller only selects dynamic tracks. Deployment threshold = knee of the curve, chosen on the simulator's exact labels.",
+  "sidecars": [
+    "/home/iiitd/Desktop/vaibhav/carla-claude/End-to-End-Autonomous-Driving-with-Sensor-Fusion/carla4/scenarios/results_final_c_score_matched/results_s5/s5_fog3_seed44.detections.npz",
+    "/home/iiitd/Desktop/vaibhav/carla-claude/End-to-End-Autonomous-Driving-with-Sensor-Fusion/carla4/scenarios/results_final_c_score_matched/results_s5/s5_fog3_seed46.detections.npz"
+  ]
+}

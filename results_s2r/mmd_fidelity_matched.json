@@ -1,0 +1,52 @@
+{
+  "domain_mmd2": {
+    "age_over_0_5s": 0.0,
+    "cos_azimuth": 0.28241802159914964,
+    "doppler_cluster_residual_over_5mps": 0.019281357417479272,
+    "joint_11d": 0.3146407527819455,
+    "local_density_ratio_over_4": 0.09444737006126536,
+    "log_range_compensated_amplitude": 0.5347694138534633,
+    "radial_velocity_over_40mps": 0.007881536384095833,
+    "range_over_100m": 0.15705384858714677,
+    "relative_log_amplitude": 0.7492582085677669,
+    "sin_azimuth": 0.27413767424668656,
+    "x_sensor_over_100m": 0.2109807645036258,
+    "y_sensor_over_100m": 0.14412309005376334
+  },
+  "max_points": 30000,
+  "note": "MMD^2 with an RBF kernel and median-heuristic bandwidth on labeled current-scan points (age 0). ratio = domain/floor; ratio near 1 means the synthetic side is as close to the real split as two halves of the real split are to each other.",
+  "ratio": {
+    "age_over_0_5s": null,
+    "cos_azimuth": 46.94865333265321,
+    "doppler_cluster_residual_over_5mps": 4.93537673508107,
+    "joint_11d": 16.57851595076258,
+    "local_density_ratio_over_4": 9.008466131620082,
+    "log_range_compensated_amplitude": 44.552580227293596,
+    "radial_velocity_over_40mps": 0.7616224678437402,
+    "range_over_100m": 13.309687250026082,
+    "relative_log_amplitude": 81.690229711952,
+    "sin_azimuth": 11.430239097383575,
+    "x_sensor_over_100m": 19.268981840786058,
+    "y_sensor_over_100m": 6.743742299037453
+  },
+  "real_dataset": "/storage/vaibhav/s2r_results/ghost_real_official_v2",
+  "real_floor_mmd2": {
+    "age_over_0_5s": 0.0,
+    "cos_azimuth": 0.006015465866466618,
+    "doppler_cluster_residual_over_5mps": 0.0039067650662665265,
+    "joint_11d": 0.0189788249874967,
+    "local_density_ratio_over_4": 0.010484289853713413,
+    "log_range_compensated_amplitude": 0.012003107589397377,
+    "radial_velocity_over_40mps": 0.01034835068142037,
+    "range_over_100m": 0.011799965366341647,
+    "relative_log_amplitude": 0.00917194395473886,
+    "sin_azimuth": 0.02398354679294834,
+    "x_sensor_over_100m": 0.01094924299824962,
+    "y_sensor_over_100m": 0.021371381595399086
+  },
+  "real_points": 30000,
+  "seed": 42,
+  "split": "test",
+  "synthetic_dataset": "/storage/vaibhav/s2r_results/ghost_carla_matched_v1_prepared",
+  "synthetic_points": 19005
+}
